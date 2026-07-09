@@ -1,59 +1,21 @@
-# Dependencies
-node_modules/
-npm-debug.log*
-
-# Environment files
+node_modules
+.git
+data
+logs
+sessions
+sandbox-workspace
+obsidian-vault
 .env
-.env.*
-!.env.example
-
-# Git
-.git/
-.gitignore
-
-# Documentation
-*.md
-!CLAUDE.md
-
-# Runtime data (not needed in image)
-data/*.db
-data/*.db-shm
-data/*.db-wal
-logs/
-*.log
-
-# Sessions and workspace
-sessions/
-sandbox-workspace/
-obsidian-vault/
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
-
-# Build outputs
-dist/
-build/
-
-# Test files
-test/
-tests/
-*.test.js
-coverage/
-
-# CI/CD
-.github/
-
-# Deployment configs
-railway.toml
-nixpacks.toml
-docker-compose*.yml
-
-# Temporary
-tmp/
-temp/
-*.tmp
+.env.local
+.env.production
+*.db
+*.db-shm
+*.db-wal
+.claude-flow
+.claude
+.swarm
+.ruflo
+.mcp.json
+CLAUDE.md.pre-ruflo*
+mock-llm-endpoint.js
+terminal-smoke-test.js
