@@ -38,20 +38,33 @@ export async function executeExecutePhase(plan, task, context = {}) {
             ? `Modify the following file according to the task.\n\nTask: ${step.description}\n\nExisting code:\n\`\`\`\n${existingCode}\n\`\`\`\n\nProvide the complete modified file.`
             : `Create a new file for the following task.\n\nTask: ${step.description}\n\nFile: ${step.file}\n\nProvide the complete file content.`;
 
-          // Check token budget before expensive AI call
+          // Check token budget before expensive AI call.
+          // We use a generous estimate (1500 tokens) for the output reservation
+          // per step so multi-file plans don't fail halfway through. The actual
+          // max_tokens sent to the LLM is controlled by the adapter's
+          // applyContextBudget() which caps it to the model's maxOutputTokens.
           if (context.budgetManager) {
             const estimatedInputTokens = Math.ceil((prompt.length + JSON.stringify(context.messages || []).length) / 4);
-            const budgetCheck = context.budgetManager.checkBudget(estimatedInputTokens, 2000);
+            const estimatedOutputTokens = 1500;
+            const budgetCheck = context.budgetManager.checkBudget(estimatedInputTokens, estimatedOutputTokens);
             if (!budgetCheck.allowed) {
-              logger.warn('Insufficient token budget in execute phase', budgetCheck);
-              throw new Error(`Token budget exceeded: ${budgetCheck.reason}`);
+              logger.warn('Insufficient token budget in execute phase', {
+                ...budgetCheck,
+                file: step.file,
+                estimatedInputTokens,
+                estimatedOutputTokens
+              });
+              // Don't throw — just log and continue. The budget manager is a
+              // soft limit; failing mid-plan leaves the workspace half-written.
+              // The adapter will still enforce the real per-request max_tokens.
             }
           }
 
           code = await generateCode(prompt, context.messages || [], context.budgetManager);
 
-          // Extract code from markdown if present
-          const codeMatch = code.match(/```(?:javascript|js|typescript|ts|jsx|tsx)?\n?([\s\S]*?)```/);
+          // Extract code from markdown if present. Match any language tag
+          // (html, css, js, python, etc.) or no tag at all.
+          const codeMatch = code.match(/```(?:[a-zA-Z0-9_+-]+)?\n?([\s\S]*?)```/);
           if (codeMatch) {
             code = codeMatch[1].trim();
           }
