@@ -1,24 +1,31 @@
 # ============================================================================
-# STAGE 1: Build frontend (temporary build stage)
+# MAX — Production Dockerfile
+# ============================================================================
+# Build context must be the repo root (so we can access both app/ and idk-codex/).
+# Railway config: builder = "DOCKERFILE", dockerfilePath = "Dockerfile"
+# ============================================================================
+
+# ============================================================================
+# STAGE 1: Build the frontend (app/ — React 19 + Vite)
 # ============================================================================
 FROM node:22-alpine AS frontend-builder
 
 WORKDIR /app/frontend
 
 # Copy frontend package files
-COPY frontend/package.json frontend/package-lock.json* ./
+COPY app/package.json app/package-lock.json* ./
 
 # Install frontend dependencies (including dev dependencies for build)
 RUN npm ci
 
 # Copy frontend source
-COPY frontend/ ./
+COPY app/ ./
 
 # Build frontend (outputs to /app/frontend/dist)
 RUN npm run build
 
 # ============================================================================
-# STAGE 2: Install backend dependencies (temporary build stage)
+# STAGE 2: Install backend dependencies
 # ============================================================================
 FROM node:22-alpine AS backend-builder
 
@@ -28,7 +35,7 @@ RUN apk add --no-cache python3 make g++
 WORKDIR /app
 
 # Copy backend package files
-COPY package.json package-lock*.json ./
+COPY idk-codex/package.json idk-codex/package-lock*.json ./
 
 # Install ONLY production dependencies
 RUN npm ci --only=production && npm cache clean --force
@@ -42,7 +49,7 @@ RUN RUFLO_AUTO_CONFIRM=true NO_INTERACTIVE=true npx ruflo init --force || echo "
 # Initialize swarm (non-interactive)
 RUN RUFLO_AUTO_CONFIRM=true NO_INTERACTIVE=true npx ruflo swarm init --topology hierarchical --max-agents 4 --strategy specialized || echo "Ruflo swarm init skipped"
 
-# Aggressive cleanup to maintain Docker image size <120MB
+# Aggressive cleanup to maintain Docker image size
 RUN npm cache clean --force && \
     rm -rf /root/.npm && \
     rm -rf /tmp/* && \
@@ -58,12 +65,12 @@ RUN npm cache clean --force && \
     find /app/node_modules -name "examples" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # ============================================================================
-# STAGE 3: Final production image (minimal runtime)
+# STAGE 3: Final production image
 # ============================================================================
 FROM node:22-alpine
 
-# Install only runtime essentials (no build tools)
-RUN apk add --no-cache git && \
+# Install only runtime essentials
+RUN apk add --no-cache git wget && \
     rm -rf /var/cache/apk/*
 
 WORKDIR /app
@@ -71,27 +78,37 @@ WORKDIR /app
 # Copy production dependencies from builder
 COPY --from=backend-builder /app/node_modules ./node_modules
 
-# Copy application source (explicit to ensure all directories included)
-COPY src/database ./src/database
-COPY src/agent ./src/agent
-COPY src/api ./src/api
-COPY src/bot ./src/bot
-COPY src/error-resolution ./src/error-resolution
-COPY src/github ./src/github
-COPY src/groq ./src/groq
-COPY src/interfaces ./src/interfaces
-COPY src/llm ./src/llm
-COPY src/memory ./src/memory
-COPY src/security ./src/security
-COPY src/skills ./src/skills
-COPY src/ui ./src/ui
-COPY src/utils ./src/utils
-COPY server.js ./
-COPY package.json ./
-COPY ruflo.config.js ./
+# Copy backend application source from idk-codex/src/
+# IMPORTANT: copy EVERY subdirectory under src/ — missing any one of them
+# causes ERR_MODULE_NOT_FOUND at runtime (the bug that caused the 7/9 deploy
+# failure was src/context/ being missing from this list).
+COPY idk-codex/src/database ./src/database
+COPY idk-codex/src/agent ./src/agent
+COPY idk-codex/src/api ./src/api
+COPY idk-codex/src/bot ./src/bot
+COPY idk-codex/src/context ./src/context
+COPY idk-codex/src/error-resolution ./src/error-resolution
+COPY idk-codex/src/github ./src/github
+COPY idk-codex/src/groq ./src/groq
+COPY idk-codex/src/interfaces ./src/interfaces
+COPY idk-codex/src/llm ./src/llm
+COPY idk-codex/src/memory ./src/memory
+COPY idk-codex/src/security ./src/security
+COPY idk-codex/src/skills ./src/skills
+COPY idk-codex/src/ui ./src/ui
+COPY idk-codex/src/utils ./src/utils
 
-# Copy built frontend from builder
-COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+# Copy backend root files
+COPY idk-codex/server.js ./
+COPY idk-codex/package.json ./
+COPY idk-codex/ruflo.config.js ./
+
+# Copy built frontend.
+# web-gateway.js looks for the frontend at:
+#   path.resolve(path.dirname(__dirname), '..', '..', 'app', 'dist')
+# which resolves to /app/app/dist in the container (since __dirname is
+# /app/src/interfaces at runtime). We copy the built dist there.
+COPY --from=frontend-builder /app/frontend/dist ./app/dist
 
 # Initialize database
 RUN node src/database/init-db.js
@@ -100,12 +117,7 @@ RUN node src/database/init-db.js
 RUN mkdir -p data logs sessions sandbox-workspace obsidian-vault docs /tmp/volter/sop && \
     chmod -R 755 data logs sessions sandbox-workspace obsidian-vault docs /tmp/volter/sop
 
-# Railway dynamically assigns PORT - no EXPOSE needed
-# Application binds to process.env.PORT at runtime
-
-# Health check using wget (simpler and more reliable)
-RUN apk add --no-cache wget
-
+# Health check using wget
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT:-3000}/api/health || exit 1
 

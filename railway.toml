@@ -1,6 +1,8 @@
 [build]
 builder = "DOCKERFILE"
+# The Dockerfile is at the repo root so it can access both app/ and idk-codex/
 dockerfilePath = "Dockerfile"
+# Build context is the repo root (Railway default)
 
 [deploy]
 startCommand = "node server.js"
@@ -14,7 +16,6 @@ name = "telegram-agent"
 [services.healthcheck]
 path = "/api/health"
 # Railway automatically uses the PORT environment variable for healthchecks
-# No port configuration needed - Railway will probe the dynamically assigned PORT
 initialDelaySeconds = 30
 periodSeconds = 30
 timeoutSeconds = 10
