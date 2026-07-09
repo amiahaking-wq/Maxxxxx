@@ -1,15 +1,10 @@
-import Groq from 'groq-sdk';
+import adapter from '../llm/adapter.js';
 import logger from '../utils/logger.js';
 
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY
-});
-
-// Use the non-deprecated model
-const DEFAULT_MODEL = 'llama-3.3-70b-versatile';
+const DEFAULT_MODEL = process.env.GROQ_MODEL || undefined;
 
 /**
- * Generate completion with streaming support
+ * Generate completion
  * @param {Array} messages - Array of message objects
  * @param {Object} options - Generation options
  * @returns {Promise<Object>} Completion result
@@ -22,40 +17,44 @@ export async function generateCompletion(messages, options = {}) {
       maxTokens = 8000,
       stream = false,
       onChunk = null,
-      budgetManager = null // V2 Enhancement: Token budget tracking
+      budgetManager = null
     } = options;
 
-    logger.info('Generating completion', { model, messageCount: messages.length });
-
-    if (stream && onChunk) {
-      return await streamCompletion(messages, { model, temperature, maxTokens, onChunk, budgetManager });
-    }
-
-    const completion = await groq.chat.completions.create({
+    logger.info('Generating completion', {
       model,
-      messages,
       temperature,
-      max_tokens: maxTokens,
+      messageCount: messages.length
     });
 
-    const response = {
-      content: completion.choices[0]?.message?.content || '',
-      finishReason: completion.choices[0]?.finish_reason,
-      usage: {
-        promptTokens: completion.usage?.prompt_tokens || 0,
-        completionTokens: completion.usage?.completion_tokens || 0,
-        totalTokens: completion.usage?.total_tokens || 0
-      }
-    };
-
-    logger.logGroqAPI(model, response.usage.totalTokens);
-
-    // V2 Enhancement: Track token usage in budget manager
-    if (budgetManager) {
-      budgetManager.addUsage(response.usage.promptTokens, response.usage.completionTokens);
+    if (stream && onChunk) {
+      logger.warn('Streaming is not supported by the unified adapter; falling back to non-streaming');
     }
 
-    return response;
+    const result = await adapter.createCompletion({
+      messages,
+      model,
+      temperature,
+      max_tokens: maxTokens,
+      response_format: options.response_format,
+      budgetManager
+    });
+
+    if (budgetManager && result.usage) {
+      budgetManager.addUsage(
+        result.usage.prompt_tokens || 0,
+        result.usage.completion_tokens || 0
+      );
+    }
+
+    return {
+      content: result.content || '',
+      finishReason: result.finishReason || 'stop',
+      usage: {
+        promptTokens: result.usage?.prompt_tokens || 0,
+        completionTokens: result.usage?.completion_tokens || 0,
+        totalTokens: result.usage?.total_tokens || 0
+      }
+    };
   } catch (error) {
     logger.error('Failed to generate completion', { error: error.message });
     throw error;
@@ -63,69 +62,7 @@ export async function generateCompletion(messages, options = {}) {
 }
 
 /**
- * Stream completion with chunks
- * @param {Array} messages - Array of message objects
- * @param {Object} options - Generation options
- * @returns {Promise<Object>} Completion result
- */
-async function streamCompletion(messages, options) {
-  const { model, temperature, maxTokens, onChunk, budgetManager } = options;
-
-  try {
-    const stream = await groq.chat.completions.create({
-      model,
-      messages,
-      temperature,
-      max_tokens: maxTokens,
-      stream: true,
-    });
-
-    let fullContent = '';
-    let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-
-    for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content || '';
-      if (content) {
-        fullContent += content;
-        if (onChunk) {
-          await onChunk(content);
-        }
-      }
-
-      // Update usage if available
-      if (chunk.usage) {
-        usage = {
-          promptTokens: chunk.usage.prompt_tokens || 0,
-          completionTokens: chunk.usage.completion_tokens || 0,
-          totalTokens: chunk.usage.total_tokens || 0
-        };
-      }
-    }
-
-    logger.logGroqAPI(model, usage.totalTokens);
-
-    // V2 Enhancement: Track token usage in budget manager
-    if (budgetManager) {
-      budgetManager.addUsage(usage.promptTokens, usage.completionTokens);
-    }
-
-    return {
-      content: fullContent,
-      finishReason: 'stop',
-      usage
-    };
-  } catch (error) {
-    logger.error('Failed to stream completion', { error: error.message });
-    throw error;
-  }
-}
-
-/**
  * Generate code with optimized settings
- * @param {string} prompt - Code generation prompt
- * @param {Array} context - Context messages
- * @param {Object} budgetManager - Optional token budget manager
- * @returns {Promise<string>} Generated code
  */
 export async function generateCode(prompt, context = [], budgetManager = null) {
   const messages = [
@@ -141,7 +78,7 @@ export async function generateCode(prompt, context = [], budgetManager = null) {
   ];
 
   const result = await generateCompletion(messages, {
-    temperature: 0.3, // Lower temperature for more consistent code
+    temperature: 0.3,
     maxTokens: 8000,
     budgetManager
   });
@@ -151,10 +88,6 @@ export async function generateCode(prompt, context = [], budgetManager = null) {
 
 /**
  * Analyze code for issues
- * @param {string} code - Code to analyze
- * @param {string} context - Additional context
- * @param {Object} budgetManager - Optional token budget manager
- * @returns {Promise<Object>} Analysis result
  */
 export async function analyzeCode(code, context = '', budgetManager = null) {
   const messages = [
@@ -175,7 +108,6 @@ export async function analyzeCode(code, context = '', budgetManager = null) {
   });
 
   try {
-    // Try to parse JSON response
     const jsonMatch = result.content.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       return JSON.parse(jsonMatch[0]);
@@ -184,7 +116,6 @@ export async function analyzeCode(code, context = '', budgetManager = null) {
     logger.warn('Failed to parse code analysis JSON', { error: error.message });
   }
 
-  // Return raw content if parsing fails
   return {
     issues: [],
     suggestions: [result.content],
@@ -195,10 +126,6 @@ export async function analyzeCode(code, context = '', budgetManager = null) {
 
 /**
  * Generate plan from task description
- * @param {string} task - Task description
- * @param {string} repoContext - Repository context
- * @param {Object} budgetManager - Optional token budget manager
- * @returns {Promise<Object>} Plan object
  */
 export async function generatePlan(task, repoContext = '', budgetManager = null) {
   const messages = [
@@ -227,7 +154,6 @@ export async function generatePlan(task, repoContext = '', budgetManager = null)
     logger.warn('Failed to parse plan JSON', { error: error.message });
   }
 
-  // Fallback plan structure
   return {
     steps: [
       {
@@ -243,11 +169,6 @@ export async function generatePlan(task, repoContext = '', budgetManager = null)
 
 /**
  * Fix errors based on error messages
- * @param {string} code - Current code
- * @param {string} errorMessage - Error message from test/execution
- * @param {number} retryCount - Current retry count
- * @param {Object} budgetManager - Optional token budget manager
- * @returns {Promise<string>} Fixed code
  */
 export async function fixErrors(code, errorMessage, retryCount = 0, budgetManager = null) {
   const messages = [
@@ -262,12 +183,11 @@ export async function fixErrors(code, errorMessage, retryCount = 0, budgetManage
   ];
 
   const result = await generateCompletion(messages, {
-    temperature: 0.2 + (retryCount * 0.05), // Increase temperature with retries
+    temperature: 0.2 + (retryCount * 0.05),
     maxTokens: 8000,
     budgetManager
   });
 
-  // Extract code blocks if present
   const codeMatch = result.content.match(/```(?:javascript|js|typescript|ts)?\n?([\s\S]*?)```/);
   if (codeMatch) {
     return codeMatch[1].trim();

@@ -24,6 +24,7 @@ import { initWebSocket } from '../api/websocket.js';
 import { executeAgentLoop } from '../agent/loop.js';
 import { addMessage } from '../database/queries.js';
 import { initializeRuflo, initializeSwarm, startRufloDaemon } from '../agent/max/ruflo-setup.js';
+import phoneBridge from '../interfaces/phone-bridge.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -209,6 +210,16 @@ export class WebGateway {
   createExpressApp() {
     this.app = express();
     this.server = http.createServer(this.app);
+
+    // Initialize phone WebSocket bridge (no-op if PHONE_SECRET is not set)
+    try {
+      if (process.env.PHONE_SECRET) {
+        phoneBridge.initialize(this.server);
+      }
+    } catch (error) {
+      logger.warn('Failed to initialize phone bridge', { error: error.message });
+    }
+
     // Configure Socket.IO with extended ping timeout to prevent Railway transport close errors
     this.io = new SocketIO(this.server, {
       cors: {
@@ -258,8 +269,8 @@ export class WebGateway {
       logger.info('✅ Telegram webhook route registered', { path: webhookPath });
     }
 
-    // Serve frontend static files
-    const frontendDistPath = path.join(path.dirname(__dirname), '..', 'frontend', 'dist');
+    // Serve frontend static files from the new Devin-style app build
+    const frontendDistPath = path.resolve(path.dirname(__dirname), '..', '..', 'app', 'dist');
 
     // Log frontend path for debugging
     logger.info('Frontend dist path configured', {
@@ -271,7 +282,7 @@ export class WebGateway {
 
     // SPA fallback with error handling
     this.app.get(/.*/, (req, res) => {
-      const indexPath = path.join(frontendDistPath, 'index.html');
+      const indexPath = path.resolve(frontendDistPath, 'index.html');
       if (fs.existsSync(indexPath)) {
         res.sendFile(indexPath);
       } else {
@@ -400,16 +411,10 @@ export class WebGateway {
    * Log fatal error with formatting
    */
   logFatalError(errors) {
-    console.error('\n');
-    console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.error('[FATAL] WEB GATEWAY STARTUP FAILED');
-    console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.error('Missing required environment variables:');
-    errors.forEach((err, idx) => {
-      console.error(`  ${idx + 1}. ${err}`);
+    logger.error('[FATAL] WEB GATEWAY STARTUP FAILED', {
+      reason: 'Missing required environment variables',
+      errors
     });
-    console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.error('\n');
   }
 
   /**

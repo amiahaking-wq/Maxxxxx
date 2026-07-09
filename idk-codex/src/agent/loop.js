@@ -207,7 +207,6 @@ export async function executeAgentLoop(task, sessionId, progressCallback = null,
         logger.warn('Failed to write plan phase note', { error: err.message })
       );
     } catch (error) {
-      console.error('Plan phase error:', error.message, error.stack);
       logger.error('Plan phase failed', { error: error.message, stack: error.stack });
       throw error;
     }
@@ -259,7 +258,7 @@ export async function executeAgentLoop(task, sessionId, progressCallback = null,
         results.execute = await executeExecutePhase(
           results.plan.plan,
           task,
-          { attempt: healingAttempt, budgetManager }
+          { attempt: healingAttempt, budgetManager, sessionId }
         );
 
         if (!results.execute.success) {
@@ -292,7 +291,6 @@ export async function executeAgentLoop(task, sessionId, progressCallback = null,
           logger.warn('Failed to write execute phase note', { error: err.message })
         );
       } catch (error) {
-        console.error('Execute phase error:', error.message, error.stack);
         logger.error('Execute phase failed', { error: error.message, stack: error.stack });
         throw error;
       }
@@ -302,7 +300,7 @@ export async function executeAgentLoop(task, sessionId, progressCallback = null,
         await reportProgress('test', 'running', progressCallback, sessionId);
         const testRunId = createAgentRun(sessionId, 'test');
 
-        results.test = await executeTestPhase(results.execute);
+        results.test = await executeTestPhase(results.execute, { sessionId });
 
         if (!results.test.success && !results.test.skipped) {
           updateAgentRun(testRunId, 'failed', results.test.error, healingAttempt);
@@ -352,7 +350,6 @@ export async function executeAgentLoop(task, sessionId, progressCallback = null,
 
         executeSuccess = true;
       } catch (error) {
-        console.error('Test phase error:', error.message, error.stack);
         logger.error('Test phase failed', { error: error.message, stack: error.stack });
         throw error;
       }
@@ -416,7 +413,6 @@ export async function executeAgentLoop(task, sessionId, progressCallback = null,
         logger.warn('Failed to write deploy phase note', { error: err.message })
       );
     } catch (error) {
-      console.error('Deploy phase error:', error.message, error.stack);
       logger.error('Deploy phase failed', { error: error.message, stack: error.stack });
       throw error;
     }
@@ -445,7 +441,6 @@ export async function executeAgentLoop(task, sessionId, progressCallback = null,
         logger.warn('Failed to write monitor phase note', { error: err.message })
       );
     } catch (error) {
-      console.error('Monitor phase error:', error.message, error.stack);
       logger.error('Monitor phase failed', { error: error.message, stack: error.stack });
       throw error;
     }
@@ -521,7 +516,6 @@ export async function executeAgentLoop(task, sessionId, progressCallback = null,
 
     return results;
   } catch (error) {
-    console.error('Agent loop error:', error.message, error.stack);
     logger.error('Agent loop failed', { error: error.message, sessionId, stack: error.stack });
     throw error;
   }

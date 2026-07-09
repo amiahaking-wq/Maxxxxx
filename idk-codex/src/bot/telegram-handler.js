@@ -6,7 +6,7 @@
 import logger from '../utils/logger.js';
 import { getOrCreateSession, addMessage } from '../database/queries.js';
 import { executeAgentLoop } from '../agent/loop.js';
-import { MODEL_OPTIONS, getModelById, getDefaultModel } from '../llm/model-registry.js';
+import { getModelOptions, getModelById, getDefaultModel } from '../llm/model-registry.js';
 import { Markup } from 'telegraf';
 
 /**
@@ -287,19 +287,11 @@ async function handleTaskCommand(ctx, userId, text) {
     // Save user message
     await addMessage(sessionId, 'user', taskText);
 
-    // Execute agent loop with streaming callback
-    await executeAgentLoop({
-      task: taskText,
-      sessionId,
-      userId,
-      platform: 'telegram',
-      streamCallback: async (event, data) => {
-        await handleStreamEvent(ctx, event, data);
-      }
-    });
+    // Execute agent loop
+    const results = await executeAgentLoop(taskText, sessionId, null, userId);
 
     // Task complete
-    await ctx.reply('✅ Task complete!\n\n' + (data?.summary || 'Task finished successfully.'));
+    await ctx.reply('✅ Task complete!\n\n' + (results?.success ? 'Task finished successfully.' : 'Task finished with errors.'));
 
   } catch (err) {
     logger.error('TASK_FAILED', {

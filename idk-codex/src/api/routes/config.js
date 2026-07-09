@@ -6,7 +6,8 @@
 import express from 'express';
 import logger from '../../utils/logger.js';
 import { getDatabase } from '../../database/db.js';
-import { MODEL_OPTIONS } from '../../llm/model-registry.js';
+import { getModelOptions, getModelById, isValidModel } from '../../llm/model-registry.js';
+import phoneBridge from '../../interfaces/phone-bridge.js';
 
 const router = express.Router();
 
@@ -35,21 +36,14 @@ router.get('/', async (req, res) => {
 
     // Get provider status from environment
     const providers = [
-      {
-        name: 'Groq',
-        connected: !!process.env.GROQ_API_KEY,
-        speed: 'fast'
-      },
-      {
-        name: 'Anthropic',
-        connected: !!process.env.ANTHROPIC_API_KEY,
-        speed: 'medium'
-      },
-      {
-        name: 'Phone',
-        connected: !!process.env.PHONE_BRIDGE_ENABLED,
-        speed: 'slow'
-      }
+      { name: 'Ollama', connected: !!process.env.OLLAMA_HOST, speed: 'slow' },
+      { name: 'OpenAI', connected: !!process.env.OPENAI_API_KEY, speed: 'medium' },
+      { name: 'OpenAI-compatible', connected: !!process.env.OPENAI_COMPATIBLE_BASE_URL, speed: 'medium' },
+      { name: 'Local', connected: !!process.env.LOCAL_API_BASE_URL, speed: 'slow' },
+      { name: 'Groq', connected: !!process.env.GROQ_API_KEY, speed: 'fast' },
+      { name: 'Anthropic', connected: !!process.env.ANTHROPIC_API_KEY, speed: 'medium' },
+      { name: 'Gemini', connected: !!process.env.GOOGLE_GEMINI_API_KEY, speed: 'medium' },
+      { name: 'Phone', connected: phoneBridge.isAvailable(), speed: 'slow' }
     ];
 
     const config = {
@@ -57,10 +51,10 @@ router.get('/', async (req, res) => {
         owner: prefs.repo_owner,
         repo: prefs.repo_name
       } : null,
-      model: prefs?.preferred_model || 'groq-llama-70b',
+      model: prefs?.preferred_model || 'ollama',
       providers,
       telegramConnected: !!process.env.TELEGRAM_BOT_TOKEN,
-      phoneConnected: !!process.env.PHONE_BRIDGE_ENABLED
+      phoneConnected: phoneBridge.isAvailable()
     };
 
     logger.info('API', {
@@ -160,8 +154,9 @@ router.post('/model', async (req, res) => {
       body: { model, provider, userId }
     });
 
-    // Validate model exists
-    const validModel = MODEL_OPTIONS.find(m => m.id === model);
+    // Validate model exists by ID or display name
+    const options = getModelOptions();
+    const validModel = options.find(m => m.id === model || m.name === model);
     if (!validModel) {
       return res.status(400).json({
         error: 'Invalid model ID',
@@ -178,7 +173,7 @@ router.post('/model', async (req, res) => {
       ON CONFLICT(user_id) DO UPDATE SET
         preferred_model = excluded.preferred_model,
         updated_at = excluded.updated_at
-    `).run(userId, model, new Date().toISOString());
+    `).run(userId, validModel.id, new Date().toISOString());
 
     logger.info('API', {
       method: 'POST',
@@ -222,8 +217,10 @@ router.get('/models', async (req, res) => {
       path: '/api/config/models'
     });
 
+    const options = getModelOptions();
+
     res.json({
-      models: MODEL_OPTIONS.map(m => ({
+      models: options.map(m => ({
         id: m.id,
         name: m.name,
         provider: m.provider,

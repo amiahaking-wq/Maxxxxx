@@ -132,10 +132,28 @@ class AgentTerminal {
   handleOutput(data) {
     this.outputBuffer += data;
 
-    // Stream output to callback
+    // Capture exit code if present
+    if (this.exitRegex) {
+      const match = this.outputBuffer.match(this.exitRegex);
+      if (match) {
+        this.commandExitCode = parseInt(match[1], 10);
+      }
+    }
+
+    // Stream output to callback, stripping internal markers
     if (this.streamCallback) {
       try {
-        this.streamCallback('terminal:output', { output: data });
+        let displayData = data;
+        if (this.exitRegex) {
+          displayData = displayData.replace(new RegExp(this.exitRegex.source, 'g'), '');
+        }
+        if (this.completionMarker) {
+          displayData = displayData.split(this.completionMarker).join('');
+        }
+
+        if (displayData) {
+          this.streamCallback('terminal:output', { output: displayData });
+        }
       } catch (error) {
         logger.warn('Stream callback failed', { error: error.message });
       }
@@ -146,16 +164,22 @@ class AgentTerminal {
       if (this.outputBuffer.includes(this.completionMarker)) {
         clearTimeout(this.commandTimeout);
 
-        // Remove the marker from output
-        let output = this.outputBuffer.replace(this.completionMarker, '').trim();
+        // Remove exit code and completion markers from output
+        let output = this.outputBuffer
+          .replace(this.exitRegex, '')
+          .split(this.completionMarker)
+          .join('')
+          .trim();
 
         // Remove any trailing prompt
         output = output.replace(/\$\s*$/g, '').trim();
 
-        this.currentResolve({ output, exitCode: 0 });
+        this.currentResolve({ output, exitCode: this.commandExitCode ?? 0 });
         this.currentResolve = null;
         this.currentReject = null;
         this.completionMarker = null;
+        this.exitRegex = null;
+        this.commandExitCode = null;
         this.busy = false;
       }
     }
@@ -179,6 +203,7 @@ class AgentTerminal {
     try {
       this.busy = true;
       this.outputBuffer = '';
+      this.commandExitCode = null;
 
       logger.info('Executing terminal command', {
         sessionId: this.sessionId,
@@ -196,12 +221,15 @@ class AgentTerminal {
       }
 
       // Use a unique marker to detect command completion
-      const marker = `__CMD_DONE_${Date.now()}__`;
+      const timestamp = Date.now();
+      const marker = `__CMD_DONE_${timestamp}__`;
+      const exitPattern = `__CMD_EXIT_${timestamp}_(\\d+)__`;
+      this.exitRegex = new RegExp(exitPattern);
+      this.completionMarker = marker;
 
       return await new Promise((resolve, reject) => {
         this.currentResolve = resolve;
         this.currentReject = reject;
-        this.completionMarker = marker;
 
         // Set timeout
         this.commandTimeout = setTimeout(() => {
@@ -209,18 +237,23 @@ class AgentTerminal {
           this.currentResolve = null;
           this.currentReject = null;
           this.completionMarker = null;
+          this.exitRegex = null;
           reject(new Error(`Command timed out after ${timeoutMs}ms`));
         }, timeoutMs);
 
         // Write command with completion marker
+        // Capture exit code and emit completion marker in a single bash line
+        const statusVar = `__CMD_STATUS_${timestamp}`;
+        const wrapped = '{ ' + command + '; }; ' + statusVar + '=$?; echo "__CMD_EXIT_' + timestamp + '_${' + statusVar + '}__"; echo "' + marker + '"';
         try {
-          this.process.stdin.write(command + `; echo "${marker}"\n`);
+          this.process.stdin.write(wrapped + '\n');
         } catch (error) {
           clearTimeout(this.commandTimeout);
           this.busy = false;
           this.currentResolve = null;
           this.currentReject = null;
           this.completionMarker = null;
+          this.exitRegex = null;
           reject(error);
         }
       });

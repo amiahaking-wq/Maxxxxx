@@ -57,9 +57,8 @@ export async function executeDeployPhase(executeResult, testResult, options = {}
       logger.info('Running quad-pass validation before deployment');
 
       try {
-        // Import LLM adapter for validation
-        const { default: GroqAdapter } = await import('../../groq/groq-adapter.js');
-        const llmAdapter = new GroqAdapter();
+        // Import unified LLM adapter for validation
+        const { default: llmAdapter } = await import('../../llm/adapter.js');
 
         const validator = new QuadPassValidator(llmAdapter, options.budgetManager);
 

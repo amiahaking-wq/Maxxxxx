@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
 import { isCommandSafe, sanitizeCommandArgs } from './blocklist.js';
+import { broadcastTerminalOutput, broadcastTerminalCommand } from '../api/websocket.js';
 import logger from '../utils/logger.js';
 import fs from 'fs';
 
@@ -15,7 +16,8 @@ const SANDBOX_WORKSPACE = process.env.SANDBOX_WORKSPACE || './sandbox-workspace'
  */
 export async function executeCommandSafely(command, args = [], options = {}) {
   // Validate command safety
-  const fullCommand = `${command} ${args.join(' ')}`;
+  const fullCommand = [command, ...args].join(' ');
+  const sessionId = options.sessionId || null;
   const safetyCheck = isCommandSafe(fullCommand);
 
   if (!safetyCheck.safe) {
@@ -42,9 +44,20 @@ export async function executeCommandSafely(command, args = [], options = {}) {
       // Ensure we don't leak sensitive env vars
       TELEGRAM_BOT_TOKEN: undefined,
       GROQ_API_KEY: undefined,
+      ANTHROPIC_API_KEY: undefined,
+      GOOGLE_GEMINI_API_KEY: undefined,
+      GEMINI_API_KEY: undefined,
+      OPENAI_API_KEY: undefined,
+      OPENAI_COMPATIBLE_API_KEY: undefined,
+      LOCAL_API_KEY: undefined,
+      PHONE_SECRET: undefined,
       GITHUB_TOKEN: undefined,
     },
   };
+
+  if (sessionId) {
+    broadcastTerminalCommand(sessionId, fullCommand);
+  }
 
   return new Promise((resolve, reject) => {
     logger.info('Executing command', { command, args: sanitizedArgs, cwd: execOptions.cwd });
@@ -68,14 +81,22 @@ export async function executeCommandSafely(command, args = [], options = {}) {
       }, 5000);
     }, execOptions.timeout);
 
-    // Collect stdout
+    // Collect stdout and broadcast to session terminal if sessionId is set
     child.stdout.on('data', (data) => {
-      stdout += data.toString();
+      const chunk = data.toString();
+      stdout += chunk;
+      if (sessionId) {
+        broadcastTerminalOutput(sessionId, chunk);
+      }
     });
 
-    // Collect stderr
+    // Collect stderr and broadcast to session terminal if sessionId is set
     child.stderr.on('data', (data) => {
-      stderr += data.toString();
+      const chunk = data.toString();
+      stderr += chunk;
+      if (sessionId) {
+        broadcastTerminalOutput(sessionId, chunk);
+      }
     });
 
     // Handle process completion
@@ -188,18 +209,20 @@ export function validateEnvironment() {
     errors.push(`Failed to check sandbox workspace: ${error.message}`);
   }
 
-  // Check required environment variables (core requirements)
-  const requiredVars = [
-    'GROQ_API_KEY',
-    'GITHUB_TOKEN',
-    'GITHUB_OWNER',
-    'GITHUB_REPO',
-  ];
+  // Check that at least one LLM provider is configured
+  const hasProvider = !!(
+    process.env.GROQ_API_KEY ||
+    process.env.ANTHROPIC_API_KEY ||
+    process.env.GOOGLE_GEMINI_API_KEY ||
+    process.env.OPENAI_API_KEY ||
+    process.env.OPENAI_COMPATIBLE_BASE_URL ||
+    process.env.OLLAMA_HOST ||
+    process.env.LOCAL_API_BASE_URL ||
+    process.env.PHONE_SECRET
+  );
 
-  for (const varName of requiredVars) {
-    if (!process.env[varName]) {
-      errors.push(`Missing required environment variable: ${varName}`);
-    }
+  if (!hasProvider) {
+    errors.push('No LLM provider configured. Set one of: GROQ_API_KEY, ANTHROPIC_API_KEY, GOOGLE_GEMINI_API_KEY, OPENAI_API_KEY, OPENAI_COMPATIBLE_BASE_URL, OLLAMA_HOST, LOCAL_API_BASE_URL, or PHONE_SECRET');
   }
 
   // Check optional environment variables (Telegram bot)

@@ -25,16 +25,16 @@ export class IntelligentProviderRouter {
   selectProvider(taskType = 'complex', contextSize = 0) {
     const ROUTING_MATRIX = {
       // Fast, cheap tasks - use smallest/fastest models
-      light: ['groq', 'gemini-flash'],
+      light: ['groq', 'gemini', 'openai'],
 
       // Syntax/semantic validation - speed matters
-      validation: ['groq', 'gemini-flash'],
+      validation: ['groq', 'gemini', 'openai'],
 
       // Complex reasoning, architecture, design - quality matters
-      complex: ['gemini-pro', 'groq'],
+      complex: ['anthropic', 'gemini', 'groq'],
 
       // Code generation - balance quality and speed
-      generation: ['gemini-pro', 'groq']
+      generation: ['anthropic', 'gemini', 'groq']
     };
 
     const providers = ROUTING_MATRIX[taskType] || ['gemini-pro', 'groq'];

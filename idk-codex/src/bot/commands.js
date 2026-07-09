@@ -391,9 +391,10 @@ export async function handleCommit(ctx) {
 
     // Trigger a commit task
     await executeAgentLoop(
-      userId,
       `Commit all changes with message: "${message}"`,
-      { sessionId: session.id }
+      session.id,
+      null,
+      userId
     );
 
     await ctx.reply('✅ Commit created and pushed!', { parse_mode: 'HTML' });
@@ -415,9 +416,10 @@ export async function handleTest(ctx) {
     await ctx.reply('🧪 Running tests...');
 
     await executeAgentLoop(
-      userId,
       'Run all tests and report results',
-      { sessionId: session.id }
+      session.id,
+      null,
+      userId
     );
 
     await ctx.reply('✅ Tests completed!');
@@ -439,9 +441,10 @@ export async function handleBuild(ctx) {
     await ctx.reply('🔨 Building project...');
 
     await executeAgentLoop(
-      userId,
       'Build the project and report any errors',
-      { sessionId: session.id }
+      session.id,
+      null,
+      userId
     );
 
     await ctx.reply('✅ Build completed!');
@@ -476,9 +479,10 @@ export async function handlePR(ctx) {
 
     // Trigger PR creation task
     await executeAgentLoop(
-      userId,
       `Create a pull request with title: "${title}". Include a detailed description of changes.`,
-      { sessionId: session.id }
+      session.id,
+      null,
+      userId
     );
 
     await ctx.reply('✅ Pull request created!');
@@ -500,9 +504,10 @@ export async function handleDeploy(ctx) {
     await ctx.reply('🚀 Triggering deployment...');
 
     await executeAgentLoop(
-      userId,
       'Deploy the application. Push to main branch and verify deployment succeeds.',
-      { sessionId: session.id }
+      session.id,
+      null,
+      userId
     );
 
     await ctx.reply('✅ Deployment triggered! Check /status for progress.');
@@ -524,9 +529,10 @@ export async function handleRollback(ctx) {
     await ctx.reply('⏪ Rolling back...');
 
     await executeAgentLoop(
-      userId,
       'Rollback to the previous stable version. Revert the last commit and redeploy.',
-      { sessionId: session.id }
+      session.id,
+      null,
+      userId
     );
 
     await ctx.reply('✅ Rollback completed!');
@@ -556,9 +562,10 @@ export async function handleLogs(ctx) {
     await ctx.reply(`📋 Fetching last ${numLines} log lines...`);
 
     await executeAgentLoop(
-      userId,
       `Show the last ${numLines} lines of application logs. Format them clearly.`,
-      { sessionId: session.id }
+      session.id,
+      null,
+      userId
     );
 
     await ctx.reply('✅ Logs retrieved!');
@@ -593,9 +600,10 @@ export async function handleFix(ctx) {
     await ctx.reply('🔍 Analyzing issue...');
 
     await executeAgentLoop(
-      userId,
       `Fix this issue: ${issue}. Analyze, debug, and implement a solution. Run tests to verify the fix.`,
-      { sessionId: session.id }
+      session.id,
+      null,
+      userId
     );
 
     await ctx.reply('✅ Issue fixed!');
@@ -617,9 +625,10 @@ export async function handleDocs(ctx) {
     await ctx.reply('📚 Generating documentation...');
 
     await executeAgentLoop(
-      userId,
       'Generate comprehensive documentation for the codebase. Create/update README, API docs, and code comments.',
-      { sessionId: session.id }
+      session.id,
+      null,
+      userId
     );
 
     await ctx.reply('✅ Documentation generated!');

@@ -3,6 +3,7 @@
  */
 
 import logger from '../utils/logger.js';
+import terminalManager from '../agent/tools/terminal-manager.js';
 
 /**
  * Initialize WebSocket server with Socket.io
@@ -56,6 +57,60 @@ export function initWebSocket(io) {
     // Handle ping/pong for connection health
     socket.on('ping', () => {
       socket.emit('pong', { timestamp: Date.now() });
+    });
+
+    // Handle terminal session initialization
+    socket.on('terminal:init', (data) => {
+      try {
+        const { sessionId, workspacePath } = data || {};
+        if (!sessionId) {
+          socket.emit('terminal:error', { message: 'Session ID required' });
+          return;
+        }
+
+        terminalManager.getTerminal(sessionId.toString(), workspacePath);
+        socket.join(`session-${sessionId}`);
+        socket.emit('terminal:ready', { sessionId });
+        logger.info('Terminal initialized', { socketId: socket.id, sessionId });
+      } catch (error) {
+        logger.error('Terminal init failed', { error: error.message });
+        socket.emit('terminal:error', { message: error.message });
+      }
+    });
+
+    // Handle terminal command input from frontend
+    socket.on('terminal:command', async (data) => {
+      try {
+        const { sessionId, command, workspacePath } = data || {};
+        if (!sessionId || !command) {
+          socket.emit('terminal:error', { message: 'Session ID and command required' });
+          return;
+        }
+
+        socket.join(`session-${sessionId}`);
+        await terminalManager.exec(sessionId.toString(), command, { workspacePath });
+      } catch (error) {
+        logger.error('Terminal command failed', { error: error.message });
+        socket.emit('terminal:error', { message: error.message });
+      }
+    });
+
+    // Handle terminal kill
+    socket.on('terminal:kill', async (data) => {
+      try {
+        const { sessionId } = data || {};
+        if (!sessionId) return;
+
+        await terminalManager.kill(sessionId.toString());
+        socket.emit('terminal:killed', { sessionId });
+      } catch (error) {
+        logger.error('Terminal kill failed', { error: error.message });
+      }
+    });
+
+    // Handle terminal resize (no-op for compatibility with xterm.js)
+    socket.on('terminal:resize', () => {
+      // Terminal resize is not implemented for the bash-spawn backend
     });
 
     // Handle disconnection

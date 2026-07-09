@@ -9,7 +9,8 @@
  * Integrates with TokenBudgetManager and implements 429 backoff for free-tier resiliency.
  */
 
-import adapter, { completion } from './adapter.js';
+import adapter from './adapter.js';
+import phoneBridge from '../interfaces/phone-bridge.js';
 import { GeminiProvider } from './providers/gemini.js';
 import { GroqProvider } from './providers/groq.js';
 import { AnthropicProvider } from './providers/anthropic.js';
@@ -115,8 +116,11 @@ export class MultiSDKGateway {
     } = options;
 
     // Check budget if provided
-    if (budgetManager && !budgetManager.canAfford(maxTokens)) {
-      throw new Error('Token budget exceeded');
+    if (budgetManager) {
+      const budgetCheck = budgetManager.checkBudget(0, maxTokens);
+      if (!budgetCheck.allowed) {
+        throw new Error(`Token budget exceeded: ${budgetCheck.reason}`);
+      }
     }
 
     try {
@@ -144,7 +148,7 @@ export class MultiSDKGateway {
 
       } else if (this.routingMode === 'force-mobile' && this.enableMobileInference) {
         // Force local phone model (if available)
-        return await this.routeToMobile(messages, temperature, maxTokens);
+        return await this.routeToMobile(messages, temperature, maxTokens, budgetManager);
 
       } else if (this.routingMode === 'autonomous') {
         // Autonomous engine routing based on task type
@@ -174,7 +178,7 @@ export class MultiSDKGateway {
 
       // Track token usage if budget manager provided
       if (budgetManager && result.usage) {
-        budgetManager.recordUsage(
+        budgetManager.addUsage(
           result.usage.prompt_tokens || 0,
           result.usage.completion_tokens || 0
         );
@@ -254,18 +258,21 @@ export class MultiSDKGateway {
    * @param {number} maxTokens - Max output tokens
    * @returns {Promise<Object>} Completion result
    */
-  async routeToMobile(messages, temperature, maxTokens) {
-    logger.info('Routing to mobile inference (not implemented)');
+  async routeToMobile(messages, temperature, maxTokens, budgetManager = null) {
+    logger.info('Routing to mobile phone inference');
 
-    // TODO: Implement mobile WebSocket protocol
-    // 1. Emit prompt to mobile WebSocket
-    // 2. Stream tokens back from phone
-    // 3. Assemble response
-    //
-    // This would enable free-forever inference using local phone LLM
-    // Example: Llama 3.2 running on iPhone/Android
+    if (!this.adapter.providers.some(p => p.name === 'phone')) {
+      this.adapter.providers.push(new (await import('./providers/phone.js')).PhoneProvider(phoneBridge));
+    }
 
-    throw new Error('Mobile inference not yet implemented. Falling back to cloud providers.');
+    this.adapter.setProvider('phone');
+
+    return await this.adapter.createCompletion({
+      messages,
+      temperature,
+      maxTokens,
+      budgetManager
+    });
   }
 
   /**

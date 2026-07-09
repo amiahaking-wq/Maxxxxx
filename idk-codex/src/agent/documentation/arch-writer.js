@@ -4,12 +4,10 @@
  * Writes to docs/ARCHITECTURE.md after successful deployment
  */
 
-import Groq from 'groq-sdk';
 import fs from 'fs';
 import path from 'path';
+import { generateCompletion } from '../../groq/client.js';
 import logger from '../../utils/logger.js';
-
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 /**
  * Automatically documents architectural decisions
@@ -107,28 +105,13 @@ Implementation specifics for future reference:
 - Scaling considerations`
       }];
 
-      const options = {
-        model: 'llama-3.3-70b-versatile',
-        messages,
+      const result = await generateCompletion(messages, {
         temperature: 0.3,
-        max_tokens: 2000,
+        maxTokens: 2000,
         budgetManager
-      };
+      });
 
-      // Extract budgetManager from options before API call
-      const { budgetManager: budget, ...requestOptions } = options;
-
-      const completion = await groq.chat.completions.create(requestOptions);
-
-      // Track token usage if budgetManager exists
-      if (budget && completion.usage) {
-        budget.addUsage(
-          completion.usage.prompt_tokens,
-          completion.usage.completion_tokens
-        );
-      }
-
-      const entry = completion.choices[0].message.content;
+      const entry = result.content;
 
       logger.debug('Architecture entry generated', { entryLength: entry.length });
 

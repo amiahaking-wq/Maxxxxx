@@ -51,7 +51,8 @@ export async function executeTestPhase(executeResult, options = {}) {
     let testResult;
     try {
       testResult = await executeTestCommand(testCommand, {
-        timeout: options.timeout || 120000 // 2 minutes default
+        timeout: options.timeout || 120000, // 2 minutes default
+        sessionId: options.sessionId
       });
     } catch (error) {
       testResult = {

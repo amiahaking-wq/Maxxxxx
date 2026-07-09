@@ -4,9 +4,13 @@
  */
 
 import express from 'express';
+import os from 'os';
 import logger from '../../utils/logger.js';
 import { getDatabase } from '../../database/db.js';
 import { executeAgentLoop } from '../../agent/loop.js';
+import { setProvider } from '../../llm/adapter.js';
+import { broadcastMessage } from '../websocket.js';
+import { addToContext } from '../../agent/context.js';
 
 const router = express.Router();
 
@@ -75,14 +79,29 @@ router.post('/task', async (req, res) => {
         // Mark as active
         activeTasks.set(actualSessionId, { cancelled: false });
 
-        await executeAgentLoop({
-          task,
-          sessionId: actualSessionId,
-          userId: userId || 'default-user',
-          platform: 'web',
-          model,
-          streamCallback: null // Socket.IO will handle streaming
-        });
+        // Set the requested model/provider before starting the loop
+        if (model) {
+          try {
+            setProvider(model);
+            logger.info('Set provider/model for task', { sessionId: actualSessionId, model });
+          } catch (providerError) {
+            logger.warn('Failed to set requested model, using adapter default', {
+              sessionId: actualSessionId,
+              model,
+              error: providerError.message
+            });
+          }
+        }
+
+        const results = await executeAgentLoop(task, actualSessionId, null, userId || 'default-user');
+
+        // Build a short summary for the chat UI
+        const summary = results.success
+          ? `Task completed successfully.\n\nPhases: plan ${results.plan?.success ? '✓' : '✗'}, execute ${results.execute?.success ? '✓' : '✗'}, test ${results.test?.success ? '✓' : '✗'}, deploy ${results.deploy?.success ? '✓' : '✗'}, monitor ${results.monitor?.success ? '✓' : '✗'}.`
+          : `Task failed: ${results.error || 'unknown error'}`;
+
+        await addToContext(actualSessionId, 'assistant', summary);
+        broadcastMessage(actualSessionId, { role: 'assistant', content: summary });
 
         // Remove from active tasks
         activeTasks.delete(actualSessionId);
@@ -245,7 +264,7 @@ router.get('/runtime', async (req, res) => {
 
     // Get memory usage
     const memUsage = process.memoryUsage();
-    const totalMem = require('os').totalmem();
+    const totalMem = os.totalmem();
     const usedMem = memUsage.heapUsed;
 
     // Get CPU usage (simple approximation)
@@ -304,8 +323,16 @@ router.get('/health', async (req, res) => {
     // Check database
     const dbOk = !!db.prepare('SELECT 1').get();
 
-    // Check Groq
-    const groqOk = !!process.env.GROQ_API_KEY;
+    // Check for any configured LLM provider
+    const llmOk = !!(
+      process.env.GROQ_API_KEY ||
+      process.env.ANTHROPIC_API_KEY ||
+      process.env.GOOGLE_GEMINI_API_KEY ||
+      process.env.OPENAI_API_KEY ||
+      process.env.OPENAI_COMPATIBLE_BASE_URL ||
+      process.env.OLLAMA_HOST ||
+      process.env.LOCAL_API_BASE_URL
+    );
 
     // Check Telegram
     const telegramOk = !!process.env.TELEGRAM_BOT_TOKEN;
@@ -316,7 +343,7 @@ router.get('/health', async (req, res) => {
       timestamp: new Date().toISOString(),
       telegram: telegramOk,
       db: dbOk,
-      groq: groqOk
+      llm: llmOk
     };
 
     res.json(health);

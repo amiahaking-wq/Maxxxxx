@@ -6,11 +6,9 @@
 
 import { executeCommandSafely } from '../../security/sandbox.js';
 import { findKnownFix, learnFromSuccess } from '../error-learning.js';
+import { generateCompletion } from '../../groq/client.js';
 import logger from '../../utils/logger.js';
 import path from 'path';
-import Groq from 'groq-sdk';
-
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 /**
  * Validates generated code before reporting completion
@@ -202,29 +200,14 @@ Respond with JSON:
 }`
       }];
 
-      const options = {
-        model: 'llama-3.3-70b-versatile',
-        messages,
+      const result = await generateCompletion(messages, {
         temperature: 0.2,
-        max_tokens: 1000,
+        maxTokens: 1000,
         response_format: { type: 'json_object' },
         budgetManager
-      };
+      });
 
-      // Extract budgetManager from options before API call
-      const { budgetManager: budget, ...requestOptions } = options;
-
-      const completion = await groq.chat.completions.create(requestOptions);
-
-      // Track token usage if budgetManager exists
-      if (budget && completion.usage) {
-        budget.addUsage(
-          completion.usage.prompt_tokens,
-          completion.usage.completion_tokens
-        );
-      }
-
-      const fix = JSON.parse(completion.choices[0].message.content);
+      const fix = JSON.parse(result.content);
 
       logger.info('Generated fix recommendation', {
         diagnosis: fix.diagnosis,

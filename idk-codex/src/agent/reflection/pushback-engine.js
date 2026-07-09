@@ -4,10 +4,8 @@
  * Prevents "slop code" by refusing to proceed with vague requirements
  */
 
-import Groq from 'groq-sdk';
+import { generateCompletion } from '../../groq/client.js';
 import logger from '../../utils/logger.js';
-
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 /**
  * Analyzes user prompt for ambiguity and forces clarification
@@ -37,7 +35,6 @@ export class PushbackEngine {
         userPrompt.toLowerCase().includes(trigger)
       );
 
-      // Use AI to detect missing specifications
       const messages = [{
         role: 'system',
         content: `You are an expert software architect. Analyze if this user request has enough specificity to implement safely.
@@ -62,29 +59,14 @@ Respond with JSON:
         content: userPrompt
       }];
 
-      const options = {
-        model: 'llama-3.3-70b-versatile',
-        messages,
+      const result = await generateCompletion(messages, {
         temperature: 0.3,
-        max_tokens: 1000,
+        maxTokens: 1000,
         response_format: { type: 'json_object' },
         budgetManager
-      };
+      });
 
-      // Extract budgetManager from options before API call
-      const { budgetManager: budget, ...requestOptions } = options;
-
-      const completion = await groq.chat.completions.create(requestOptions);
-
-      // Track token usage if budgetManager exists
-      if (budget && completion.usage) {
-        budget.addUsage(
-          completion.usage.prompt_tokens,
-          completion.usage.completion_tokens
-        );
-      }
-
-      const analysis = JSON.parse(completion.choices[0].message.content);
+      const analysis = JSON.parse(result.content);
 
       logger.info('Prompt analysis completed', {
         isVague: isVague || analysis.isVague,
@@ -160,32 +142,15 @@ Please choose A, B, C, or provide more specific details.`
         content: JSON.stringify({ prompt: userPrompt, analysis })
       }];
 
-      const options = {
-        model: 'llama-3.3-70b-versatile',
-        messages,
+      const result = await generateCompletion(messages, {
         temperature: 0.4,
-        max_tokens: 1500,
+        maxTokens: 1500,
         budgetManager
-      };
+      });
 
-      // Extract budgetManager from options before API call
-      const { budgetManager: budget, ...requestOptions } = options;
+      logger.info('Clarification menu generated', { menuLength: result.content.length });
 
-      const completion = await groq.chat.completions.create(requestOptions);
-
-      // Track token usage if budgetManager exists
-      if (budget && completion.usage) {
-        budget.addUsage(
-          completion.usage.prompt_tokens,
-          completion.usage.completion_tokens
-        );
-      }
-
-      const menu = completion.choices[0].message.content;
-
-      logger.info('Clarification menu generated', { menuLength: menu.length });
-
-      return menu;
+      return result.content;
     } catch (error) {
       logger.error('Failed to generate clarification menu', { error: error.message });
       // Provide a basic fallback menu

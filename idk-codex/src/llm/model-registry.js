@@ -3,7 +3,7 @@
  * Provides all available LLM models with their capabilities and routing info
  */
 
-export const MODEL_OPTIONS = [
+const BASE_MODEL_OPTIONS = [
   {
     id: 'groq-llama-70b',
     name: 'Llama 3.3 70B',
@@ -36,56 +36,194 @@ export const MODEL_OPTIONS = [
     description: 'Highest quality for complex reasoning'
   },
   {
-    id: 'phone-qwen',
-    name: 'Qwen 2.5 Coder 3B',
+    id: 'gemini-pro',
+    name: 'Gemini Pro',
+    provider: 'gemini',
+    model: 'gemini-1.5-pro',
+    speed: 'medium',
+    speedLabel: '🧠',
+    bestFor: ['complex', 'analysis', 'long-context'],
+    description: 'Large context window for architecture and documentation'
+  },
+  {
+    id: 'gemini-flash',
+    name: 'Gemini Flash',
+    provider: 'gemini',
+    model: 'gemini-1.5-flash',
+    speed: 'fast',
+    speedLabel: '⚡',
+    bestFor: ['simple', 'quick', 'long-context'],
+    description: 'Fast model with long context'
+  },
+  {
+    id: 'openai-gpt4o',
+    name: 'OpenAI GPT-4o',
+    provider: 'openai',
+    model: 'gpt-4o',
+    speed: 'medium',
+    speedLabel: '🧠',
+    bestFor: ['code', 'analysis', 'general'],
+    description: 'OpenAI GPT-4o via OpenAI-compatible API'
+  },
+  {
+    id: 'openai-gpt4o-mini',
+    name: 'OpenAI GPT-4o Mini',
+    provider: 'openai',
+    model: 'gpt-4o-mini',
+    speed: 'fast',
+    speedLabel: '⚡',
+    bestFor: ['simple', 'quick', 'code'],
+    description: 'Fast, low-cost OpenAI model'
+  },
+  {
+    id: 'ollama',
+    name: 'Ollama (local)',
+    provider: 'ollama',
+    model: process.env.OLLAMA_MODEL || 'qwen2.5-coder:3b',
+    speed: 'slow',
+    speedLabel: '🖥️',
+    bestFor: ['offline', 'private', 'local'],
+    description: 'Local Ollama model for offline/private use'
+  },
+  {
+    id: 'openai-compatible',
+    name: 'OpenAI-compatible (custom)',
+    provider: 'openai-compatible',
+    model: process.env.OPENAI_COMPATIBLE_MODEL || 'default',
+    speed: 'medium',
+    speedLabel: '🔌',
+    bestFor: ['custom', 'local', 'self-hosted'],
+    description: 'Any OpenAI-compatible endpoint (LM Studio, vLLM, etc.)'
+  },
+  {
+    id: 'local',
+    name: 'Local OpenAI-compatible',
+    provider: 'local',
+    model: process.env.LOCAL_MODEL || 'default',
+    speed: 'slow',
+    speedLabel: '🖥️',
+    bestFor: ['offline', 'private', 'local'],
+    description: 'Local inference server without API key'
+  },
+  {
+    id: 'phone',
+    name: 'Phone (Termux/Ollama)',
     provider: 'phone',
-    model: 'qwen2.5-coder:3b',
+    model: process.env.PHONE_MODEL || 'phi3:mini',
     speed: 'slow',
     speedLabel: '📱',
-    bestFor: ['offline', 'private'],
-    description: 'Local model for offline/private use'
+    bestFor: ['mobile', 'offline', 'private'],
+    description: 'Phone-powered Ollama via WebSocket bridge'
   }
 ];
 
 /**
+ * Build a complete model list from static config and environment variables
+ */
+export function getModelOptions() {
+  const options = [...BASE_MODEL_OPTIONS];
+
+  // Add custom OpenAI-compatible endpoint if configured
+  if (process.env.OPENAI_COMPATIBLE_BASE_URL) {
+    const custom = options.find(m => m.id === 'openai-compatible');
+    if (custom) {
+      custom.model = process.env.OPENAI_COMPATIBLE_MODEL || custom.model;
+    }
+  }
+
+  // Update Ollama model from environment
+  if (process.env.OLLAMA_MODEL || process.env.OLLAMA_HOST) {
+    const ollama = options.find(m => m.id === 'ollama');
+    if (ollama) {
+      ollama.model = process.env.OLLAMA_MODEL || ollama.model;
+    }
+  }
+
+  // Update local model from environment
+  if (process.env.LOCAL_MODEL || process.env.LOCAL_API_BASE_URL) {
+    const local = options.find(m => m.id === 'local');
+    if (local) {
+      local.model = process.env.LOCAL_MODEL || local.model;
+    }
+  }
+
+  // Update phone model from environment
+  if (process.env.PHONE_MODEL) {
+    const phone = options.find(m => m.id === 'phone');
+    if (phone) {
+      phone.model = process.env.PHONE_MODEL;
+    }
+  }
+
+  // Update OpenAI default model from environment
+  if (process.env.OPENAI_MODEL) {
+    const openaiDefault = options.find(m => m.provider === 'openai' && m.model.startsWith('gpt-4o'));
+    if (openaiDefault) {
+      openaiDefault.model = process.env.OPENAI_MODEL;
+    }
+  }
+
+  return options;
+}
+
+/**
  * Get model configuration by ID
- * @param {string} modelId - Model identifier
- * @returns {object|null} Model configuration or null if not found
  */
 export function getModelById(modelId) {
-  return MODEL_OPTIONS.find(m => m.id === modelId) || null;
+  return getModelOptions().find(m => m.id === modelId) || null;
+}
+
+/**
+ * Get model configuration by name (fallback for older frontends)
+ */
+export function getModelByName(name) {
+  return getModelOptions().find(m => m.name === name || m.id === name) || null;
+}
+
+/**
+ * Resolve a model identifier or display name to a provider/model pair
+ */
+export function resolveModel(modelIdOrName) {
+  const model = getModelById(modelIdOrName) || getModelByName(modelIdOrName);
+  if (!model) return null;
+
+  return {
+    provider: model.provider,
+    model: model.model,
+    id: model.id
+  };
 }
 
 /**
  * Get default model configuration
- * @returns {object} Default model configuration
  */
 export function getDefaultModel() {
-  return MODEL_OPTIONS.find(m => m.default) || MODEL_OPTIONS[0];
+  return getModelOptions().find(m => m.default) || getModelOptions()[0];
 }
 
 /**
  * Get all models for a specific provider
- * @param {string} provider - Provider name (groq, anthropic, phone)
- * @returns {array} Array of model configurations
  */
 export function getModelsByProvider(provider) {
-  return MODEL_OPTIONS.filter(m => m.provider === provider);
+  return getModelOptions().filter(m => m.provider === provider);
 }
 
 /**
  * Validate if a model ID exists
- * @param {string} modelId - Model identifier to validate
- * @returns {boolean} True if model exists
  */
 export function isValidModelId(modelId) {
-  return MODEL_OPTIONS.some(m => m.id === modelId);
+  return getModelOptions().some(m => m.id === modelId);
+}
+
+/**
+ * Validate if a model name or ID exists
+ */
+export function isValidModel(modelIdOrName) {
+  return getModelOptions().some(m => m.id === modelIdOrName || m.name === modelIdOrName);
 }
 
 /**
  * Get model display info for UI
- * @param {string} modelId - Model identifier
- * @returns {object} Display information
  */
 export function getModelDisplayInfo(modelId) {
   const model = getModelById(modelId);
