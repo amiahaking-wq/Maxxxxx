@@ -194,10 +194,21 @@ export async function executeTestCommand(testCommand, options = {}) {
 
 /**
  * Validate execution environment
+ *
+ * The only hard fatal condition is a missing sandbox workspace directory
+ * that we cannot create. Everything else (LLM providers, Telegram bot, etc.)
+ * is a warning — the server boots and the user can configure providers later
+ * via the .env file or the web UI.
+ *
+ * This lets the user start MAX, test the Telegram bot, and add an LLM key
+ * (Groq/Gemini/etc.) afterwards without having to restart in a particular
+ * order.
+ *
  * @returns {Object} Environment validation result
  */
 export function validateEnvironment() {
   const errors = [];
+  const warnings = [];
 
   // Check if sandbox workspace exists
   try {
@@ -209,11 +220,16 @@ export function validateEnvironment() {
     errors.push(`Failed to check sandbox workspace: ${error.message}`);
   }
 
-  // Check that at least one LLM provider is configured
+  // Check that at least one LLM provider is configured.
+  // This is a WARNING, not a fatal error — the server still boots so the user
+  // can interact with the Telegram bot and the web UI before adding an LLM key.
+  // When the user actually sends a /task, the agent loop will return a clear
+  // "All LLM providers failed" error if no provider is configured.
   const hasProvider = !!(
     process.env.GROQ_API_KEY ||
     process.env.ANTHROPIC_API_KEY ||
     process.env.GOOGLE_GEMINI_API_KEY ||
+    process.env.GEMINI_API_KEY ||
     process.env.OPENAI_API_KEY ||
     process.env.OPENAI_COMPATIBLE_BASE_URL ||
     process.env.OLLAMA_HOST ||
@@ -222,7 +238,12 @@ export function validateEnvironment() {
   );
 
   if (!hasProvider) {
-    errors.push('No LLM provider configured. Set one of: GROQ_API_KEY, ANTHROPIC_API_KEY, GOOGLE_GEMINI_API_KEY, OPENAI_API_KEY, OPENAI_COMPATIBLE_BASE_URL, OLLAMA_HOST, LOCAL_API_BASE_URL, or PHONE_SECRET');
+    warnings.push(
+      'No LLM provider configured. The server will start, but task execution will fail until you set at least one of: ' +
+      'GROQ_API_KEY, ANTHROPIC_API_KEY, GOOGLE_GEMINI_API_KEY, OPENAI_API_KEY, ' +
+      'OPENAI_COMPATIBLE_BASE_URL, OLLAMA_HOST, LOCAL_API_BASE_URL, or PHONE_SECRET. ' +
+      'Free options: Groq (https://console.groq.com/keys) or Google Gemini (https://aistudio.google.com/app/apikey).'
+    );
   }
 
   // Check optional environment variables (Telegram bot)
@@ -231,7 +252,6 @@ export function validateEnvironment() {
     'AUTHORIZED_USER_ID',
   ];
 
-  const warnings = [];
   for (const varName of optionalVars) {
     if (!process.env[varName]) {
       warnings.push(`Optional environment variable not set: ${varName} (Telegram bot will be disabled)`);
@@ -239,12 +259,13 @@ export function validateEnvironment() {
   }
 
   if (warnings.length > 0) {
-    logger.warn('Optional features disabled', { warnings });
+    logger.warn('Environment warnings (non-fatal)', { warnings });
   }
 
   return {
     valid: errors.length === 0,
-    errors
+    errors,
+    warnings
   };
 }
 
