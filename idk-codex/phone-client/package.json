@@ -1,0 +1,23 @@
+{
+  "name": "max-phone-client",
+  "version": "1.0.0",
+  "description": "MAX Phone Inference Client for Termux",
+  "type": "module",
+  "main": "inference-client.js",
+  "scripts": {
+    "start": "node inference-client.js"
+  },
+  "keywords": [
+    "ollama",
+    "llm",
+    "inference",
+    "termux",
+    "websocket"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.18.0",
+    "axios": "^1.16.1"
+  }
+}

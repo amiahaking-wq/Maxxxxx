@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+
+/**
+ * MAX CLI Executable (Legacy)
+ * Wrapper script for CLI mode
+ * Note: Use max-cli.js for WebSocket client
+ */
+
+import '../server.js';

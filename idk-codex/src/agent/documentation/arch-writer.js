@@ -1,0 +1,231 @@
+/**
+ * Layer 3: Architectural Documentation Handoff
+ * Purpose: Automatically documents architectural decisions
+ * Writes to docs/ARCHITECTURE.md after successful deployment
+ */
+
+import Groq from 'groq-sdk';
+import fs from 'fs';
+import path from 'path';
+import logger from '../../utils/logger.js';
+
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+/**
+ * Automatically documents architectural decisions
+ * Writes to docs/ARCHITECTURE.md after successful deployment
+ */
+export class ArchitectureWriter {
+  constructor(repoPath) {
+    this.repoPath = repoPath || process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
+    this.archFilePath = path.join(this.repoPath, 'docs', 'ARCHITECTURE.md');
+  }
+
+  /**
+   * Documents why a design decision was made
+   * @param {string} task - Original task description
+   * @param {Object} implementation - Implementation details
+   * @param {string} reasoning - Reasoning for approach
+   * @param {Object} budgetManager - Token budget manager (optional)
+   * @returns {Promise<Object>} Documentation result
+   */
+  async documentDecision(task, implementation, reasoning, budgetManager = null) {
+    try {
+      logger.info('Documenting architectural decision', { task: task.substring(0, 50) });
+
+      const entry = await this.generateEntry(task, implementation, reasoning, budgetManager);
+      await this.appendToArchFile(entry);
+
+      logger.info('Architecture documented successfully', { file: this.archFilePath });
+
+      return {
+        success: true,
+        filePath: this.archFilePath,
+        entryLength: entry.length
+      };
+    } catch (error) {
+      logger.error('Failed to document architecture', { error: error.message });
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * Generates structured architecture entry
+   * @param {string} task - Task description
+   * @param {Object} implementation - Implementation details
+   * @param {string} reasoning - Reasoning for approach
+   * @param {Object} budgetManager - Token budget manager (optional)
+   * @returns {Promise<string>} Markdown entry
+   */
+  async generateEntry(task, implementation, reasoning, budgetManager = null) {
+    try {
+      const date = new Date().toISOString().split('T')[0];
+
+      const messages = [{
+        role: 'system',
+        content: `You are an expert technical writer. Document this architectural decision in clear, structured format.
+
+Task: ${task}
+Implementation: ${JSON.stringify(implementation, null, 2)}
+Reasoning: ${reasoning}
+
+Generate a markdown entry with:
+
+## [Feature Name] - ${date}
+
+### Decision
+Brief summary of what was implemented
+
+### Rationale
+Why this approach was chosen over alternatives
+
+### Trade-offs
+- **Pros:**
+  - Benefit 1
+  - Benefit 2
+- **Cons:**
+  - Limitation 1
+  - Limitation 2
+
+### Files Modified
+- \`file1.js\`: description
+- \`file2.js\`: description
+
+### Technical Details
+Implementation specifics for future reference:
+- Key design patterns used
+- Integration points
+- Performance considerations
+- Security implications
+
+### Future Considerations
+- Potential improvements
+- Known limitations to address
+- Scaling considerations`
+      }];
+
+      const options = {
+        model: 'llama-3.3-70b-versatile',
+        messages,
+        temperature: 0.3,
+        max_tokens: 2000,
+        budgetManager
+      };
+
+      // Extract budgetManager from options before API call
+      const { budgetManager: budget, ...requestOptions } = options;
+
+      const completion = await groq.chat.completions.create(requestOptions);
+
+      // Track token usage if budgetManager exists
+      if (budget && completion.usage) {
+        budget.addUsage(
+          completion.usage.prompt_tokens,
+          completion.usage.completion_tokens
+        );
+      }
+
+      const entry = completion.choices[0].message.content;
+
+      logger.debug('Architecture entry generated', { entryLength: entry.length });
+
+      return entry;
+    } catch (error) {
+      logger.error('Failed to generate architecture entry', { error: error.message });
+
+      // Provide a basic fallback entry
+      const date = new Date().toISOString().split('T')[0];
+      const filesModified = implementation.modifiedFiles || implementation.filesModified || [];
+
+      return `## ${task.substring(0, 50)} - ${date}
+
+### Decision
+Implemented: ${task}
+
+### Rationale
+${reasoning}
+
+### Files Modified
+${filesModified.map(f => `- \`${f}\``).join('\n')}
+
+### Technical Details
+Implementation completed with following changes:
+${JSON.stringify(implementation, null, 2)}
+
+---
+*Note: Auto-generated entry due to documentation generation error*
+`;
+    }
+  }
+
+  /**
+   * Appends entry to ARCHITECTURE.md
+   * @param {string} entry - Markdown entry
+   * @returns {Promise<void>}
+   */
+  async appendToArchFile(entry) {
+    try {
+      // Ensure docs directory exists
+      const docsDir = path.dirname(this.archFilePath);
+      if (!fs.existsSync(docsDir)) {
+        logger.info('Creating docs directory', { path: docsDir });
+        fs.mkdirSync(docsDir, { recursive: true });
+      }
+
+      // Create file if doesn't exist
+      if (!fs.existsSync(this.archFilePath)) {
+        const header = `# Architecture Documentation
+
+This document contains auto-generated documentation of architectural decisions made during development.
+
+**Purpose:** Provide historical context for design decisions to aid future development and maintenance.
+
+**Auto-generated by:** Cognitive Reflection System
+
+---
+
+`;
+        logger.info('Creating new ARCHITECTURE.md', { path: this.archFilePath });
+        fs.writeFileSync(this.archFilePath, header, 'utf8');
+      }
+
+      // Append new entry
+      const separator = '\n\n---\n\n';
+      fs.appendFileSync(this.archFilePath, separator + entry, 'utf8');
+
+      logger.info('Architecture entry appended', {
+        file: this.archFilePath,
+        size: fs.statSync(this.archFilePath).size
+      });
+    } catch (error) {
+      logger.error('Failed to append to architecture file', {
+        error: error.message,
+        file: this.archFilePath
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Reads the current architecture documentation
+   * @returns {Promise<string>} Current documentation content
+   */
+  async readArchitecture() {
+    try {
+      if (!fs.existsSync(this.archFilePath)) {
+        return null;
+      }
+
+      const content = fs.readFileSync(this.archFilePath, 'utf8');
+      return content;
+    } catch (error) {
+      logger.error('Failed to read architecture file', { error: error.message });
+      return null;
+    }
+  }
+}
+
+export default ArchitectureWriter;

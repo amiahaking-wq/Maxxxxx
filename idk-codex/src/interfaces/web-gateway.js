@@ -1,0 +1,455 @@
+/**
+ * Web Gateway (MODE A)
+ * Optimized for remote cloud hosting (Railway)
+ * Communicates via Telegram polling/webhooks
+ * Sandboxes file execution inside cloud container volumes
+ */
+
+import http from 'http';
+import express from 'express';
+import cors from 'cors';
+import { Server as SocketIO } from 'socket.io';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import fs from 'fs';
+import { initDatabase, pruneSessions } from '../database/db.js';
+import { migrateToV2, needsMigration } from '../database/migrate-v2.js';
+import { runMAXMigration } from '../database/migrate-max.js';
+import { initBot, startBot, startBotWebhook } from '../bot/telegram.js';
+import { ensureSandbox } from '../utils/filesystem.js';
+import { validateEnvironment } from '../security/sandbox.js';
+import logger from '../utils/logger.js';
+import apiRoutes from '../api/routes/index.js';
+import { initWebSocket } from '../api/websocket.js';
+import { executeAgentLoop } from '../agent/loop.js';
+import { addMessage } from '../database/queries.js';
+import { initializeRuflo, initializeSwarm, startRufloDaemon } from '../agent/max/ruflo-setup.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+export class WebGateway {
+  constructor() {
+    // Railway ALWAYS provides PORT env var in production
+    // 3000 fallback is ONLY for local development
+    this.port = Number(process.env.PORT) || 3000;
+    this.app = null;
+    this.server = null;
+    this.io = null;
+    this.bot = null;
+    this.botConnected = false;
+    this.botRetryCount = 0;
+    this.botRetryTimer = null;
+  }
+
+  /**
+   * Initialize web gateway
+   */
+  async initialize() {
+    logger.info('🌐 Initializing WEB GATEWAY', {
+      port: this.port,
+      nodeEnv: process.env.NODE_ENV
+    });
+
+    // Warn if running in production without PORT env var
+    if (process.env.NODE_ENV === 'production' && !process.env.PORT) {
+      logger.warn('⚠️ Running in production without PORT environment variable set. Using fallback port 3000.');
+    }
+
+    // Validate environment
+    const envValidation = validateEnvironment();
+    if (!envValidation.valid) {
+      this.logFatalError(envValidation.errors);
+      throw new Error('Environment validation failed');
+    }
+
+    // Initialize database
+    logger.info('Initializing database');
+    initDatabase();
+
+    // Check for V2 migration
+    if (needsMigration()) {
+      logger.info('Running V2 migration');
+      migrateToV2();
+    }
+
+    // Run MAX migration
+    logger.info('Running MAX migration');
+    runMAXMigration();
+
+    // Prune old sessions
+    pruneSessions();
+
+    // Initialize Ruflo swarm framework (if enabled)
+    // This runs after database migrations but before server start
+    if (process.env.RUFLO_ENABLED === 'true') {
+      logger.info('Initializing Ruflo swarm framework');
+
+      try {
+        // Step 1: Initialize ruflo
+        const rufloInit = await initializeRuflo();
+        if (rufloInit.success && rufloInit.enabled) {
+          logger.info('Ruflo framework initialized', {
+            message: rufloInit.message
+          });
+
+          // Step 2: Initialize swarm topology
+          const swarmInit = await initializeSwarm();
+          if (swarmInit.success && swarmInit.enabled) {
+            logger.info('Ruflo swarm initialized', {
+              topology: swarmInit.topology,
+              maxAgents: swarmInit.maxAgents,
+              strategy: swarmInit.strategy
+            });
+          } else {
+            logger.warn('Ruflo swarm initialization skipped', {
+              reason: swarmInit.message
+            });
+          }
+
+          // Step 3: Start daemon (if enabled)
+          if (process.env.RUFLO_DAEMON_ENABLED === 'true') {
+            const daemonStart = await startRufloDaemon();
+            if (daemonStart.success && daemonStart.running) {
+              logger.info('Ruflo daemon started', {
+                port: daemonStart.port,
+                pid: daemonStart.pid
+              });
+            } else {
+              logger.warn('Ruflo daemon start skipped or failed', {
+                reason: daemonStart.message
+              });
+            }
+          }
+        } else {
+          logger.warn('Ruflo initialization skipped or failed', {
+            reason: rufloInit.message
+          });
+        }
+      } catch (error) {
+        // Graceful fallback: Log error but continue startup
+        logger.error('Ruflo initialization error (continuing without ruflo)', {
+          error: error.message,
+          stack: error.stack
+        });
+      }
+    } else {
+      logger.debug('Ruflo disabled (RUFLO_ENABLED not set to true)');
+    }
+
+    // Ensure sandbox exists
+    await ensureSandbox();
+
+    // Create Express app
+    this.createExpressApp();
+
+    // Initialize Telegram bot (if configured)
+    if (process.env.TELEGRAM_BOT_TOKEN) {
+      logger.info('Initializing Telegram bot');
+      try {
+        this.bot = initBot();
+        logger.info('✅ Bot instance created successfully');
+      } catch (error) {
+        logger.error('❌ Failed to create bot instance', {
+          error: error.message,
+          hasToken: !!process.env.TELEGRAM_BOT_TOKEN,
+          tokenLength: process.env.TELEGRAM_BOT_TOKEN?.length || 0
+        });
+        // Don't throw - allow server to start without bot
+        this.bot = null;
+      }
+    } else {
+      logger.warn('⚠️  Telegram bot disabled - TELEGRAM_BOT_TOKEN not set');
+      this.bot = null;
+    }
+
+    // Start server FIRST (non-blocking)
+    await this.startServer();
+
+    // Attempt bot start in background (non-blocking, if bot initialized)
+    if (this.bot) {
+      logger.info('Attempting Telegram bot connection in background');
+      this.attemptBotStart();
+    } else {
+      logger.info('Telegram bot not initialized - skipping connection attempt');
+    }
+
+    // Monitor memory usage for Railway deployment
+    if (process.env.NODE_ENV === 'production') {
+      setInterval(() => {
+        const usage = process.memoryUsage();
+        logger.info('Memory usage', {
+          heapUsed: Math.round(usage.heapUsed / 1024 / 1024) + 'MB',
+          rss: Math.round(usage.rss / 1024 / 1024) + 'MB',
+          external: Math.round(usage.external / 1024 / 1024) + 'MB'
+        });
+      }, 300000); // Every 5 minutes
+    }
+    // Railway self-ping to prevent idle timeout
+    const RAILWAY_URL = process.env.RAILWAY_PUBLIC_DOMAIN;
+    if (RAILWAY_URL) {
+      setInterval(async () => {
+        try {
+          const url = `https://${RAILWAY_URL}/health`;
+          await fetch(url);
+          logger.debug('Self-ping successful');
+        } catch (e) {
+          logger.debug('Self-ping failed', { error: e.message });
+        }
+      }, 4 * 60 * 1000); // Every 4 minutes
+    }
+
+
+    logger.info('✅ Web Gateway ready (Telegram bot connecting in background)');
+  }
+
+  /**
+   * Create Express application with WebSocket support
+   */
+  createExpressApp() {
+    this.app = express();
+    this.server = http.createServer(this.app);
+    // Configure Socket.IO with extended ping timeout to prevent Railway transport close errors
+    this.io = new SocketIO(this.server, {
+      cors: {
+        origin: process.env.WEB_UI_ORIGIN || '*',
+        methods: ['GET', 'POST']
+      },
+      pingTimeout: 60000,   // Wait 60 seconds for pong response before considering connection dead
+      pingInterval: 25000,  // Send ping every 25 seconds to keep connection alive
+      transports: ['websocket', 'polling']  // Allow fallback to polling if WebSocket fails
+    });
+
+    // Middleware
+    this.app.use(cors());
+    this.app.use(express.json());
+    this.app.use(express.urlencoded({ extended: true }));
+
+    // API routes
+    this.app.use('/api', apiRoutes);
+
+    // Health check endpoint for Railway keep-alive
+    this.app.get('/health', (req, res) => {
+      res.json({ status: 'ok', timestamp: Date.now() });
+    });
+
+    // Telegram webhook route (if webhook mode enabled)
+    if (process.env.TELEGRAM_WEBHOOK_URL && process.env.TELEGRAM_BOT_TOKEN) {
+      const webhookPath = process.env.TELEGRAM_WEBHOOK_PATH || '/api/telegram/webhook';
+
+      logger.info('Setting up Telegram webhook route', { path: webhookPath });
+
+      // This route will be used when bot is in webhook mode
+      this.app.post(webhookPath, async (req, res) => {
+        if (!this.bot) {
+          res.sendStatus(503); // Service unavailable
+          return;
+        }
+
+        try {
+          await this.bot.handleUpdate(req.body);
+          res.sendStatus(200);
+        } catch (error) {
+          logger.error('Webhook handler error', { error: error.message });
+          res.sendStatus(500);
+        }
+      });
+
+      logger.info('✅ Telegram webhook route registered', { path: webhookPath });
+    }
+
+    // Serve frontend static files
+    const frontendDistPath = path.join(path.dirname(__dirname), '..', 'frontend', 'dist');
+
+    // Log frontend path for debugging
+    logger.info('Frontend dist path configured', {
+      frontendDistPath,
+      exists: fs.existsSync(frontendDistPath)
+    });
+
+    this.app.use(express.static(frontendDistPath));
+
+    // SPA fallback with error handling
+    this.app.get(/.*/, (req, res) => {
+      const indexPath = path.join(frontendDistPath, 'index.html');
+      if (fs.existsSync(indexPath)) {
+        res.sendFile(indexPath);
+      } else {
+        logger.error('index.html not found', { indexPath, frontendDistPath });
+        res.status(404).send('Frontend not built. index.html missing.');
+      }
+    });
+
+    // Initialize WebSocket
+    initWebSocket(this.io);
+
+    // Make agent executor available globally for API
+    global.agentExecutor = async (sessionId, task) => {
+      logger.info('Executing agent task via API', { sessionId, task: task.substring(0, 50) });
+
+      // Add user message to database
+      await addMessage(sessionId, 'user', task);
+
+      // Execute agent loop
+      const results = await executeAgentLoop(task, sessionId, null, 'web_user');
+
+      return results;
+    };
+
+    logger.info('Express app created with WebSocket support');
+  }
+
+  /**
+   * Start HTTP server
+   */
+  async startServer() {
+    return new Promise((resolve, reject) => {
+      // Bind to 0.0.0.0 for Railway compatibility (allows external access)
+      const host = process.env.HOST || '0.0.0.0';
+
+      this.server.listen(this.port, host, () => {
+        logger.info('🚀 Web Gateway listening', {
+          host,
+          port: this.port,
+          webUI: `http://${host}:${this.port}`,
+          api: `http://${host}:${this.port}/api`
+        });
+        resolve();
+      });
+
+      this.server.on('error', (error) => {
+        logger.error('Server error', { error: error.message });
+        reject(error);
+      });
+    });
+  }
+
+  /**
+   * Attempt to start Telegram bot (polling or webhook mode)
+   */
+  async attemptBotStart() {
+    if (!this.bot) {
+      logger.warn('Bot instance not available, skipping start attempt');
+      return;
+    }
+
+    // Calculate retry delay
+    let retryDelay = 0;
+    if (this.botRetryCount > 0) {
+      if (this.botRetryCount <= 5) {
+        retryDelay = 5000 * Math.pow(3, this.botRetryCount - 1);
+      } else {
+        retryDelay = 5 * 60 * 1000;
+      }
+
+      logger.info('Waiting before bot launch attempt', {
+        attempt: this.botRetryCount + 1,
+        retryDelay
+      });
+
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
+    }
+
+    this.botRetryCount++;
+
+    // Determine mode: webhook if URL set, otherwise polling
+    const useWebhook = !!process.env.TELEGRAM_WEBHOOK_URL;
+    let result;
+
+    if (useWebhook) {
+      logger.info('Starting bot in WEBHOOK mode');
+      result = await startBotWebhook(this.bot, {
+        webhookUrl: process.env.TELEGRAM_WEBHOOK_URL,
+        path: process.env.TELEGRAM_WEBHOOK_PATH || '/api/telegram/webhook',
+        port: this.port
+      });
+    } else {
+      logger.info('Starting bot in POLLING mode');
+      result = await startBot(this.bot, { retryDelay });
+    }
+
+    if (result.success) {
+      this.botConnected = true;
+      logger.info('✅ Telegram bot connected successfully', {
+        mode: result.mode || 'polling',
+        attempt: this.botRetryCount
+      });
+    } else if (result.retryable) {
+      const nextRetryDelay = this.botRetryCount <= 5
+        ? 5000 * Math.pow(3, this.botRetryCount)
+        : 5 * 60 * 1000;
+
+      logger.info('Scheduling bot reconnection attempt', {
+        attempt: this.botRetryCount,
+        nextRetryIn: `${nextRetryDelay / 1000}s`,
+        reason: result.error?.message || 'Unknown error'
+      });
+
+      this.botRetryTimer = setTimeout(() => {
+        this.attemptBotStart();
+      }, nextRetryDelay);
+    } else {
+      logger.error('❌ Bot startup failed with non-retryable error', {
+        error: result.error?.message,
+        code: result.code
+      });
+    }
+  }
+
+  /**
+   * Log fatal error with formatting
+   */
+  logFatalError(errors) {
+    console.error('\n');
+    console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.error('[FATAL] WEB GATEWAY STARTUP FAILED');
+    console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.error('Missing required environment variables:');
+    errors.forEach((err, idx) => {
+      console.error(`  ${idx + 1}. ${err}`);
+    });
+    console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.error('\n');
+  }
+
+  /**
+   * Shutdown gracefully
+   */
+  async shutdown() {
+    logger.info('Shutting down Web Gateway');
+
+    // Clear bot retry timer if active
+    if (this.botRetryTimer) {
+      clearTimeout(this.botRetryTimer);
+      this.botRetryTimer = null;
+      logger.info('Cleared bot retry timer');
+    }
+
+    // Stop bot if connected
+    if (this.bot && this.botConnected) {
+      try {
+        logger.info('Stopping Telegram bot');
+        await this.bot.stop();
+        logger.info('Telegram bot stopped');
+      } catch (error) {
+        logger.warn('Error stopping bot during shutdown', {
+          error: error.message
+        });
+      }
+    }
+
+    if (this.server) {
+      await new Promise((resolve) => {
+        this.server.close(resolve);
+      });
+    }
+
+    if (this.io) {
+      this.io.close();
+    }
+
+    logger.info('✅ Web Gateway shut down');
+  }
+}
+
+export default WebGateway;

@@ -1,0 +1,18 @@
+{
+  "theme": "obsidian",
+  "cssTheme": "",
+  "baseFontSize": 16,
+  "enabledCssSnippets": [],
+  "enabledPlugins": [],
+  "hotkeys": {},
+  "foldHeading": true,
+  "foldIndent": true,
+  "showLineNumber": true,
+  "spellcheck": true,
+  "strictLineBreaks": false,
+  "showFrontmatter": true,
+  "defaultViewMode": "preview",
+  "readableLineLength": true,
+  "newFileLocation": "folder",
+  "newFileFolderPath": "docs"
+}

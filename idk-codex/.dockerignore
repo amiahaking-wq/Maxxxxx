@@ -1,0 +1,59 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+!CLAUDE.md
+
+# Runtime data (not needed in image)
+data/*.db
+data/*.db-shm
+data/*.db-wal
+logs/
+*.log
+
+# Sessions and workspace
+sessions/
+sandbox-workspace/
+obsidian-vault/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Build outputs
+dist/
+build/
+
+# Test files
+test/
+tests/
+*.test.js
+coverage/
+
+# CI/CD
+.github/
+
+# Deployment configs
+railway.toml
+nixpacks.toml
+docker-compose*.yml
+
+# Temporary
+tmp/
+temp/
+*.tmp
