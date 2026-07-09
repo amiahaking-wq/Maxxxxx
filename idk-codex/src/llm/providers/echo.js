@@ -326,14 +326,19 @@ export class EchoProvider {
   /**
    * Generate an HTML page. If the plan also includes styles.css and script.js,
    * the HTML will link to them externally; otherwise it inlines everything.
+   *
+   * Detects the animal type from the task (cats, dogs, birds, fish, etc.)
+   * and generates an appropriate store catalog.
    */
   _generateHTML(t, requestedCount, hasExternalCSS, hasExternalJS) {
-    const isCats = t.includes('cats');
     const isLogin = t.includes('login');
     const isLanding = t.includes('landing');
 
+    // Detect animal type from the task
+    const animalType = this._detectAnimalType(t);
+
     let title = 'My Web Page';
-    if (isCats) title = '🐱 Cats Store';
+    if (animalType) title = `${animalType.emoji} ${animalType.label} Store`;
     else if (isLogin) title = 'Login';
     else if (isLanding) title = 'Landing Page';
 
@@ -350,10 +355,12 @@ export class EchoProvider {
 
     // Build the body
     let body = '';
-    if (isCats) {
-      const cats = this._generateCatsArray(requestedCount);
-      const cards = cats.map(c => `          <div class="card">\n            <div class="cat-emoji">${c.emoji}</div>\n            <h3>${c.name}</h3>\n            <p class="breed">${c.breed}</p>\n            <p class="age">${c.age} old</p>\n            <p class="price">$${c.price}</p>\n            <button class="add-to-cart" data-name="${c.name}" data-price="${c.price}">Add to Cart</button>\n          </div>`).join('\n');
-      body = `    <header>\n      <h1>🐱 Welcome to the Cats Store</h1>\n      <nav>\n        <a href="#products">Products</a>\n        <a href="#cart">Cart (<span id="cart-count">0</span>)</a>\n        <a href="#about">About</a>\n        <a href="#contact">Contact</a>\n      </nav>\n    </header>\n    <main>\n      <section id="products">\n        <h2>Our Cats (${cats.length} available)</h2>\n        <div class="grid">\n${cards}\n        </div>\n      </section>\n      <section id="cart">\n        <h2>Your Cart</h2>\n        <ul id="cart-items"><li>(empty)</li></ul>\n        <p>Total: $<span id="cart-total">0</span></p>\n        <button id="checkout-btn">Checkout</button>\n      </section>\n      <section id="about"><h2>About Us</h2><p>We love cats and want to share them with you. Every cat is healthy, vaccinated, and ready for a loving home.</p></section>\n      <section id="contact"><h2>Contact</h2><p>Email: hello@catsstore.example · Phone: +1 (555) 123-4567</p></section>\n    </main>\n    <footer>\n      <p>&copy; 2026 Cats Store · Made with 🐾 by MAX</p>\n    </footer>`;
+    if (animalType) {
+      const items = this._generateAnimalsArray(animalType.id, requestedCount);
+      const cards = items.map(c => `          <div class="card">\n            <div class="cat-emoji">${c.emoji}</div>\n            <h3>${c.name}</h3>\n            <p class="breed">${c.breed}</p>\n            <p class="age">${c.age} old</p>\n            <p class="price">$${c.price}</p>\n            <button class="add-to-cart" data-name="${c.name}" data-price="${c.price}">Add to Cart</button>\n          </div>`).join('\n');
+      const aType = animalType.label.toLowerCase();
+      const aPlural = aType.endsWith('s') ? aType : aType + 's';
+      body = `    <header>\n      <h1>${animalType.emoji} Welcome to the ${animalType.label} Store</h1>\n      <nav>\n        <a href="#products">Products</a>\n        <a href="#cart">Cart (<span id="cart-count">0</span>)</a>\n        <a href="#about">About</a>\n        <a href="#contact">Contact</a>\n      </nav>\n    </header>\n    <main>\n      <section id="products">\n        <h2>Our ${animalType.label}s (${items.length} available)</h2>\n        <div class="grid">\n${cards}\n        </div>\n      </section>\n      <section id="cart">\n        <h2>Your Cart</h2>\n        <ul id="cart-items"><li>(empty)</li></ul>\n        <p>Total: $<span id="cart-total">0</span></p>\n        <button id="checkout-btn">Checkout</button>\n      </section>\n      <section id="about"><h2>About Us</h2><p>We love ${aPlural} and want to share them with you. Every ${aType} is healthy, vaccinated, and ready for a loving home.</p></section>\n      <section id="contact"><h2>Contact</h2><p>Email: hello@${aType}store.example · Phone: +1 (555) 123-4567</p></section>\n    </main>\n    <footer>\n      <p>&copy; 2026 ${animalType.label} Store · Made with 🐾 by MAX</p>\n    </footer>`;
     } else if (isLogin) {
       body = `    <main class="login-container">\n      <form class="login-form" id="login-form">\n        <h1>Sign In</h1>\n        <label>Email<br><input type="email" id="email" required placeholder="you@example.com"></label>\n        <label>Password<br><input type="password" id="password" required placeholder="••••••••"></label>\n        <button type="submit">Sign In</button>\n        <p class="hint">Don't have an account? <a href="#">Sign up</a></p>\n      </form>\n    </main>`;
     } else if (isLanding) {
@@ -363,6 +370,139 @@ export class EchoProvider {
     }
 
     return '```\n<!DOCTYPE html>\n<html lang="en">\n<head>\n  ' + head + '\n</head>\n<body>\n' + body + '\n</body>\n</html>\n```';
+  }
+
+  /**
+   * Detect the animal type from the task text.
+   * Returns { id, label, emoji } or null if no animal is mentioned.
+   */
+  _detectAnimalType(t) {
+    if (t.includes('cat')) return { id: 'cats', label: 'Cat', emoji: '🐱' };
+    if (t.includes('dog')) return { id: 'dogs', label: 'Dog', emoji: '🐶' };
+    if (t.includes('bird')) return { id: 'birds', label: 'Bird', emoji: '🐦' };
+    if (t.includes('fish')) return { id: 'fish', label: 'Fish', emoji: '🐟' };
+    if (t.includes('rabbit') || t.includes('bunny')) return { id: 'rabbits', label: 'Rabbit', emoji: '🐰' };
+    if (t.includes('hamster')) return { id: 'hamsters', label: 'Hamster', emoji: '🐹' };
+    if (t.includes('reptile') || t.includes('lizard') || t.includes('snake') || t.includes('turtle')) return { id: 'reptiles', label: 'Reptile', emoji: '🦎' };
+    if (t.includes('horse')) return { id: 'horses', label: 'Horse', emoji: '🐴' };
+    if (t.includes('pet')) return { id: 'pets', label: 'Pet', emoji: '🐾' };
+    return null;
+  }
+
+  /**
+   * Build an array of N animal objects for the given animal type.
+   * Each animal has: name, breed, emoji, age, price.
+   */
+  _generateAnimalsArray(type, count) {
+    const pools = {
+      cats: [
+        { name: 'Whiskers', breed: 'Tabby', emoji: '🐱', age: '2 years', price: 200 },
+        { name: 'Mittens', breed: 'Siamese', emoji: '😺', age: '1 year', price: 300 },
+        { name: 'Shadow', breed: 'Maine Coon', emoji: '🌑', age: '3 years', price: 500 },
+        { name: 'Luna', breed: 'Persian', emoji: '🌙', age: '2 years', price: 450 },
+        { name: 'Oliver', breed: 'Bengal', emoji: '🐯', age: '1 year', price: 700 },
+        { name: 'Bella', breed: 'Russian Blue', emoji: '💙', age: '4 years', price: 400 },
+        { name: 'Simba', breed: 'Savannah', emoji: '🦁', age: '2 years', price: 1200 },
+        { name: 'Nala', breed: 'Scottish Fold', emoji: '👂', age: '1 year', price: 800 },
+        { name: 'Coco', breed: 'Sphynx', emoji: '🎀', age: '3 years', price: 900 },
+        { name: 'Leo', breed: 'British Shorthair', emoji: '👑', age: '2 years', price: 600 },
+        { name: 'Milo', breed: 'Abyssinian', emoji: '🔴', age: '1 year', price: 550 },
+        { name: 'Cleo', breed: 'Burmese', emoji: '👸', age: '2 years', price: 480 },
+        { name: 'Felix', breed: 'Tuxedo', emoji: '🐧', age: '3 years', price: 350 },
+        { name: 'Zoe', breed: 'Turkish Angora', emoji: '⚪', age: '2 years', price: 650 },
+        { name: 'Max', breed: 'Norwegian Forest', emoji: '🌲', age: '4 years', price: 520 },
+        { name: 'Lily', breed: 'Ragdoll', emoji: '🌸', age: '1 year', price: 750 },
+        { name: 'Tigger', breed: 'Egyptian Mau', emoji: '🐆', age: '2 years', price: 680 },
+        { name: 'Ginger', breed: 'Ginger Tabby', emoji: '🦊', age: '3 years', price: 280 },
+        { name: 'Pearl', breed: 'Himalayan', emoji: '💎', age: '2 years', price: 620 },
+        { name: 'Oscar', breed: 'American Shorthair', emoji: '🇺🇸', age: '1 year', price: 420 }
+      ],
+      dogs: [
+        { name: 'Buddy', breed: 'Golden Retriever', emoji: '🐕', age: '2 years', price: 800 },
+        { name: 'Bella', breed: 'Labrador', emoji: '🐶', age: '1 year', price: 700 },
+        { name: 'Max', breed: 'German Shepherd', emoji: '🐕‍🦺', age: '3 years', price: 1000 },
+        { name: 'Lucy', breed: 'Beagle', emoji: '🐩', age: '2 years', price: 500 },
+        { name: 'Charlie', breed: 'Poodle', emoji: '🐩', age: '1 year', price: 900 },
+        { name: 'Daisy', breed: 'Bulldog', emoji: '🐶', age: '3 years', price: 1200 },
+        { name: 'Rocky', breed: 'Boxer', emoji: '🐕', age: '2 years', price: 750 },
+        { name: 'Lola', breed: 'Chihuahua', emoji: '🐕', age: '1 year', price: 400 },
+        { name: 'Milo', breed: 'Husky', emoji: '🐺', age: '2 years', price: 1100 },
+        { name: 'Sadie', breed: 'Dachshund', emoji: '🌭', age: '3 years', price: 550 },
+        { name: 'Tucker', breed: 'Rottweiler', emoji: '🐕', age: '4 years', price: 850 },
+        { name: 'Molly', breed: 'Shih Tzu', emoji: '🐶', age: '2 years', price: 650 },
+        { name: 'Duke', breed: 'Doberman', emoji: '🐕', age: '3 years', price: 950 },
+        { name: 'Rosie', breed: 'Pomeranian', emoji: '🐶', age: '1 year', price: 600 },
+        { name: 'Bear', breed: 'Bernese Mountain', emoji: '🐻', age: '2 years', price: 1400 },
+        { name: 'Ruby', breed: 'Cocker Spaniel', emoji: '🐕', age: '1 year', price: 720 },
+        { name: 'Cooper', breed: 'Border Collie', emoji: '🐶', age: '2 years', price: 880 },
+        { name: 'Lily', breed: 'Cavalier King Charles', emoji: '👑', age: '1 year', price: 1300 },
+        { name: 'Zeus', breed: 'Great Dane', emoji: '🐕', age: '3 years', price: 1500 },
+        { name: 'Zoe', breed: 'Yorkshire Terrier', emoji: '🐶', age: '2 years', price: 680 }
+      ],
+      birds: [
+        { name: 'Kiwi', breed: 'Parakeet', emoji: '🦜', age: '1 year', price: 80 },
+        { name: 'Mango', breed: 'Cockatiel', emoji: '🐤', age: '2 years', price: 150 },
+        { name: 'Sunny', breed: 'Canary', emoji: '🐤', age: '1 year', price: 100 },
+        { name: 'Sky', breed: 'Lovebird', emoji: '💕', age: '2 years', price: 120 },
+        { name: 'Indigo', breed: 'Macaw', emoji: '🦜', age: '5 years', price: 1200 },
+        { name: 'Pepper', breed: 'African Grey', emoji: '🦜', age: '4 years', price: 2000 },
+        { name: 'Comet', breed: 'Cockatoo', emoji: '🦜', age: '3 years', price: 1800 },
+        { name: 'Jade', breed: 'Conure', emoji: '🟢', age: '2 years', price: 400 },
+        { name: 'Storm', breed: 'Finch', emoji: '🐤', age: '1 year', price: 60 },
+        { name: 'Rainbow', breed: 'Lorikeet', emoji: '🌈', age: '2 years', price: 500 },
+        { name: 'Echo', breed: 'Eclectus', emoji: '🦜', age: '3 years', price: 900 },
+        { name: 'Pearl', breed: 'Dove', emoji: '🕊️', age: '1 year', price: 70 }
+      ],
+      fish: [
+        { name: 'Bubbles', breed: 'Goldfish', emoji: '🐟', age: '6 months', price: 15 },
+        { name: 'Flash', breed: 'Betta', emoji: '🐠', age: '1 year', price: 25 },
+        { name: 'Shadow', breed: 'Angelfish', emoji: '🐟', age: '1 year', price: 40 },
+        { name: 'Neon', breed: 'Tetra', emoji: '🐠', age: '6 months', price: 10 },
+        { name: 'Stripes', breed: 'Danio', emoji: '🐟', age: '8 months', price: 8 },
+        { name: 'Spot', breed: 'Guppy', emoji: '🐠', age: '4 months', price: 5 },
+        { name: 'Crimson', breed: 'Discus', emoji: '🐟', age: '2 years', price: 120 },
+        { name: 'Cobalt', breed: 'Gourami', emoji: '🐠', age: '1 year', price: 30 },
+        { name: 'Sunny', breed: 'Cichlid', emoji: '🐟', age: '1 year', price: 50 },
+        { name: 'Pearl', breed: 'Pearlscale', emoji: '🐠', age: '1 year', price: 35 }
+      ],
+      rabbits: [
+        { name: 'Cottontail', breed: 'Holland Lop', emoji: '🐰', age: '1 year', price: 60 },
+        { name: 'Snowball', breed: 'Netherland Dwarf', emoji: '🐰', age: '8 months', price: 80 },
+        { name: 'Hops', breed: 'Mini Rex', emoji: '🐰', age: '1 year', price: 50 },
+        { name: 'Thumper', breed: 'Flemish Giant', emoji: '🐰', age: '2 years', price: 150 },
+        { name: 'Cocoa', breed: 'Lionhead', emoji: '🐰', age: '1 year', price: 70 },
+        { name: 'Hazel', breed: 'Dutch', emoji: '🐰', age: '9 months', price: 45 }
+      ],
+      hamsters: [
+        { name: 'Pip', breed: 'Syrian', emoji: '🐹', age: '6 months', price: 15 },
+        { name: 'Waffle', breed: 'Roborovski', emoji: '🐹', age: '4 months', price: 20 },
+        { name: 'Cookie', breed: 'Winter White', emoji: '🐹', age: '5 months', price: 18 },
+        { name: 'Peanut', breed: 'Campbell', emoji: '🐹', age: '6 months', price: 16 },
+        { name: 'Marshmallow', breed: 'Chinese', emoji: '🐹', age: '7 months', price: 22 }
+      ],
+      reptiles: [
+        { name: 'Spike', breed: 'Bearded Dragon', emoji: '🦎', age: '2 years', price: 200 },
+        { name: 'Slither', breed: 'Ball Python', emoji: '🐍', age: '3 years', price: 300 },
+        { name: 'Shell', breed: 'Box Turtle', emoji: '🐢', age: '5 years', price: 150 },
+        { name: 'Gecko', breed: 'Leopard Gecko', emoji: '🦎', age: '1 year', price: 120 },
+        { name: 'Iggie', breed: 'Iguana', emoji: '🦎', age: '2 years', price: 180 }
+      ],
+      horses: [
+        { name: 'Thunder', breed: 'Arabian', emoji: '🐴', age: '5 years', price: 5000 },
+        { name: 'Spirit', breed: 'Mustang', emoji: '🐴', age: '4 years', price: 3500 },
+        { name: 'Blaze', breed: 'Quarter Horse', emoji: '🐴', age: '6 years', price: 4500 },
+        { name: 'Star', breed: 'Appaloosa', emoji: '🐴', age: '3 years', price: 4000 },
+        { name: 'Duke', breed: 'Clydesdale', emoji: '🐴', age: '7 years', price: 8000 }
+      ],
+      pets: [
+        { name: 'Companion', breed: 'Mixed', emoji: '🐾', age: '2 years', price: 100 },
+        { name: 'Buddy', breed: 'Mixed', emoji: '🐾', age: '1 year', price: 80 },
+        { name: 'Lucky', breed: 'Mixed', emoji: '🐾', age: '3 years', price: 90 }
+      ]
+    };
+
+    const pool = pools[type] || pools.pets;
+    return pool.slice(0, Math.min(count, pool.length));
   }
 
   /**
@@ -411,11 +551,13 @@ export class EchoProvider {
 
   /**
    * Generate a JavaScript file (when the plan asks for script.js as a separate file).
-   * For cats-store tasks, includes add-to-cart / cart-count / checkout logic.
+   * For animal-store tasks, includes add-to-cart / cart-count / checkout logic.
    */
   _generateJS(t, allLower) {
-    if (t.includes('cats') || allLower.includes('cats store')) {
-      return '```\n// Cats Store — cart interactivity\n// Generated by MAX autonomous coding agent\n\nconst cart = [];\nconst cartItemsEl = document.getElementById("cart-items");\nconst cartCountEl = document.getElementById("cart-count");\nconst cartTotalEl = document.getElementById("cart-total");\nconst checkoutBtn = document.getElementById("checkout-btn");\n\nfunction renderCart() {\n  if (cart.length === 0) {\n    cartItemsEl.innerHTML = "<li>(empty)</li>";\n  } else {\n    cartItemsEl.innerHTML = cart.map(item => `<li>${item.name} — $${item.price}</li>`).join("");\n  }\n  cartCountEl.textContent = cart.length;\n  const total = cart.reduce((sum, item) => sum + item.price, 0);\n  cartTotalEl.textContent = total;\n}\n\ndocument.querySelectorAll(".add-to-cart").forEach(btn => {\n  btn.addEventListener("click", () => {\n    const name = btn.dataset.name;\n    const price = parseInt(btn.dataset.price, 10);\n    cart.push({ name, price });\n    renderCart();\n    btn.textContent = "Added ✓";\n    btn.disabled = true;\n    setTimeout(() => { btn.textContent = "Add to Cart"; btn.disabled = false; }, 1000);\n  });\n});\n\nif (checkoutBtn) {\n  checkoutBtn.addEventListener("click", () => {\n    if (cart.length === 0) {\n      alert("Your cart is empty!");\n    } else {\n      const total = cart.reduce((sum, item) => sum + item.price, 0);\n      alert(`Thank you for adopting ${cart.length} cat(s)! Total: $${total}`);\n      cart.length = 0;\n      renderCart();\n    }\n  });\n}\n\nconsole.log("Cats store script loaded");\n```';
+    const animal = this._detectAnimalType(t) || this._detectAnimalType(allLower);
+    if (animal) {
+      const labelLower = animal.label.toLowerCase();
+      return '```\n// ' + animal.label + ' Store — cart interactivity\n// Generated by MAX autonomous coding agent\n\nconst cart = [];\nconst cartItemsEl = document.getElementById("cart-items");\nconst cartCountEl = document.getElementById("cart-count");\nconst cartTotalEl = document.getElementById("cart-total");\nconst checkoutBtn = document.getElementById("checkout-btn");\n\nfunction renderCart() {\n  if (cart.length === 0) {\n    cartItemsEl.innerHTML = "<li>(empty)</li>";\n  } else {\n    cartItemsEl.innerHTML = cart.map(item => `<li>${item.name} — $${item.price}</li>`).join("");\n  }\n  cartCountEl.textContent = cart.length;\n  const total = cart.reduce((sum, item) => sum + item.price, 0);\n  cartTotalEl.textContent = total;\n}\n\ndocument.querySelectorAll(".add-to-cart").forEach(btn => {\n  btn.addEventListener("click", () => {\n    const name = btn.dataset.name;\n    const price = parseInt(btn.dataset.price, 10);\n    cart.push({ name, price });\n    renderCart();\n    btn.textContent = "Added ✓";\n    btn.disabled = true;\n    setTimeout(() => { btn.textContent = "Add to Cart"; btn.disabled = false; }, 1000);\n  });\n});\n\nif (checkoutBtn) {\n  checkoutBtn.addEventListener("click", () => {\n    if (cart.length === 0) {\n      alert("Your cart is empty!");\n    } else {\n      const total = cart.reduce((sum, item) => sum + item.price, 0);\n      alert(`Thank you for adopting ${cart.length} ' + labelLower + '(s)! Total: $${total}`);\n      cart.length = 0;\n      renderCart();\n    }\n  });\n}\n\nconsole.log("' + animal.label + ' store script loaded");\n```';
     }
 
     if (t.includes('login')) {
@@ -440,12 +582,13 @@ export class EchoProvider {
   }
 
   /**
-   * Generate a JSON file (e.g. for cats-store tasks, return a cats array).
+   * Generate a JSON file (e.g. for animal-store tasks, return an animals array).
    */
   _generateJSON(t, requestedCount) {
-    if (t.includes('cats')) {
-      const cats = this._generateCatsArray(requestedCount);
-      return '```\n{\n  "store": "Cats Store",\n  "cats": ' + JSON.stringify(cats, null, 2).replace(/\n/g, '\n  ') + '\n}\n```';
+    const animal = this._detectAnimalType(t);
+    if (animal) {
+      const items = this._generateAnimalsArray(animal.id, requestedCount);
+      return '```\n{\n  "store": "' + animal.label + ' Store",\n  "' + animal.id + '": ' + JSON.stringify(items, null, 2).replace(/\n/g, '\n  ') + '\n}\n```';
     }
     return '```\n{\n  "name": "max-generated",\n  "version": "1.0.0",\n  "generatedBy": "MAX"\n}\n```';
   }
