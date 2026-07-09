@@ -14,26 +14,32 @@ export class GeminiProvider {
     this.client = new GoogleGenerativeAI(apiKey);
     this.name = 'gemini';
     this.models = {
-      'gemini-1.5-pro': {
+      'gemini-2.5-pro': {
         maxTokens: 2000000,
         contextWindow: 2000000,
         inputCost: 0.00125,
         outputCost: 0.005
       },
-      'gemini-1.5-flash': {
+      'gemini-2.5-flash': {
         maxTokens: 1000000,
         contextWindow: 1000000,
         inputCost: 0.000075,
         outputCost: 0.0003
       },
-      'gemini-2.0-flash-exp': {
+      'gemini-2.0-flash': {
+        maxTokens: 1000000,
+        contextWindow: 1000000,
+        inputCost: 0,
+        outputCost: 0
+      },
+      'gemini-2.0-flash-lite': {
         maxTokens: 1000000,
         contextWindow: 1000000,
         inputCost: 0,
         outputCost: 0
       }
     };
-    this.defaultModel = 'gemini-1.5-pro';
+    this.defaultModel = 'gemini-2.5-pro';
   }
 
   /**

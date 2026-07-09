@@ -131,23 +131,41 @@ async function handleHelpCommand(ctx) {
  */
 async function handleStatusCommand(ctx, userId) {
   try {
-    const session = await getOrCreateSession(userId, 'telegram');
+    // getOrCreateSession returns the sessionId (UUID string) directly,
+    // NOT a session object. We need to query the DB for the rest of the row.
+    const sessionId = await getOrCreateSession(userId, 'telegram');
+
+    // Pull the full session row from the DB for display.
+    const { getDatabase } = await import('../database/db.js');
+    const db = getDatabase();
+    const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+
+    // Count messages in this session
+    const msgCount = db.prepare('SELECT COUNT(*) as n FROM messages WHERE session_id = ?').get(sessionId)?.n || 0;
+
+    // Get user preferences (model + repo)
+    const prefs = db.prepare('SELECT repo_owner, repo_name, preferred_model FROM user_preferences WHERE user_id = ?').get(String(userId));
+
+    // Get latest agent run for this session
+    const lastRun = db.prepare('SELECT phase, status, started_at FROM agent_runs WHERE session_id = ? ORDER BY started_at DESC LIMIT 1').get(sessionId);
 
     const statusMessage = `
 📊 *Session Status*
 
-Session ID: \`${session.id}\`
+Session ID: \`${sessionId}\`
 Platform: Telegram
-Status: ${session.status || 'idle'}
-Created: ${new Date(session.createdAt).toLocaleString()}
-Messages: ${session.messageCount || 0}
+Status: ${session?.status || 'idle'}
+Created: ${session?.created_at ? new Date(session.created_at).toLocaleString() : 'unknown'}
+Messages: ${msgCount}
 
-Current Repository: ${session.repoName || 'Not set'}
-Current Model: ${session.currentModel || 'groq-llama-70b'}
+Current Repository: ${prefs?.repo_name ? `\`${prefs.repo_owner}/${prefs.repo_name}\`` : 'Not set'}
+Current Model: ${prefs?.preferred_model || 'gemini-pro (default)'}
+Last Phase: ${lastRun ? `${lastRun.phase} (${lastRun.status})` : 'none yet'}
     `.trim();
 
     await ctx.reply(statusMessage, { parse_mode: 'Markdown' });
   } catch (err) {
+    logger.error('STATUS_COMMAND_ERROR', { userId, error: err.message, stack: err.stack });
     await ctx.reply('❌ Failed to get status: ' + err.message);
   }
 }
@@ -217,21 +235,72 @@ async function handleReposCommand(ctx, userId, text) {
 
 /**
  * /model - Show model selection inline keyboard
+ *
+ * Only show models whose provider is currently configured (has an API key
+ * in the environment). This prevents the user from picking a model that
+ * will fail at task time.
  */
 async function handleModelCommand(ctx, userId) {
-  const keyboard = Markup.inlineKeyboard([
-    [
-      Markup.button.callback('Llama 3.3 70B ⚡', 'model:groq-llama-70b'),
-      Markup.button.callback('Llama 3.1 8B ⚡⚡', 'model:groq-llama-8b')
-    ],
-    [
-      Markup.button.callback('Claude Sonnet 🧠', 'model:anthropic-sonnet'),
-      Markup.button.callback('Qwen Local 📱', 'model:phone-qwen')
-    ]
-  ]);
+  // Determine which providers are actually available right now.
+  const availableProviders = new Set();
+  if (process.env.GROQ_API_KEY) availableProviders.add('groq');
+  if (process.env.ANTHROPIC_API_KEY) availableProviders.add('anthropic');
+  if (process.env.GOOGLE_GEMINI_API_KEY || process.env.GEMINI_API_KEY) availableProviders.add('gemini');
+  if (process.env.OPENAI_API_KEY) availableProviders.add('openai');
+  if (process.env.OPENAI_COMPATIBLE_BASE_URL) availableProviders.add('openai-compatible');
+  if (process.env.OLLAMA_HOST) availableProviders.add('ollama');
+  if (process.env.LOCAL_API_BASE_URL) availableProviders.add('local');
+  if (process.env.PHONE_SECRET) availableProviders.add('phone');
+
+  // All models we know how to render as buttons.
+  const allButtons = [
+    { id: 'gemini-pro',       label: 'Gemini Pro (2M ctx) 🧠',  provider: 'gemini' },
+    { id: 'gemini-flash',     label: 'Gemini Flash ⚡',          provider: 'gemini' },
+    { id: 'groq-llama-70b',   label: 'Llama 3.3 70B ⚡',         provider: 'groq' },
+    { id: 'groq-llama-8b',    label: 'Llama 3.1 8B ⚡⚡',        provider: 'groq' },
+    { id: 'anthropic-sonnet', label: 'Claude Sonnet 🧠',        provider: 'anthropic' },
+    { id: 'openai-gpt4o',     label: 'GPT-4o 🧠',               provider: 'openai' },
+    { id: 'openai-gpt4o-mini',label: 'GPT-4o Mini ⚡',          provider: 'openai' },
+    { id: 'ollama',           label: 'Ollama (local) 🖥️',        provider: 'ollama' },
+    { id: 'phone',            label: 'Phone (Termux) 📱',        provider: 'phone' }
+  ];
+
+  const visibleButtons = allButtons.filter(b => availableProviders.has(b.provider));
+
+  if (visibleButtons.length === 0) {
+    await ctx.reply(
+      '⚠️ *No LLM providers configured*\n\n' +
+      'Add at least one API key to `idk-codex/.env`:\n' +
+      '  • `GROQ_API_KEY` — free at https://console.groq.com/keys\n' +
+      '  • `GOOGLE_GEMINI_API_KEY` — free at https://aistudio.google.com/app/apikey\n' +
+      '  • `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OLLAMA_HOST`, etc.\n\n' +
+      'Then restart the server.',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  // Pair up into rows of 2 buttons
+  const rows = [];
+  for (let i = 0; i < visibleButtons.length; i += 2) {
+    const row = [Markup.button.callback(visibleButtons[i].label, `model:${visibleButtons[i].id}`)];
+    if (visibleButtons[i + 1]) {
+      row.push(Markup.button.callback(visibleButtons[i + 1].label, `model:${visibleButtons[i + 1].id}`));
+    }
+    rows.push(row);
+  }
+
+  const keyboard = Markup.inlineKeyboard(rows);
+
+  // Get current preference
+  const { getDatabase } = await import('../database/db.js');
+  const db = getDatabase();
+  const prefs = db.prepare('SELECT preferred_model FROM user_preferences WHERE user_id = ?').get(String(userId));
+  const current = prefs?.preferred_model ? `Current: \`${prefs.preferred_model}\`` : 'Current: none (will use adapter default)';
 
   await ctx.reply(
     '🤖 *Select AI Model*\n\n' +
+    `${current}\n\n` +
     'Choose the model for your next task:',
     {
       parse_mode: 'Markdown',
@@ -280,9 +349,25 @@ async function handleTaskCommand(ctx, userId, text) {
   await ctx.reply('🚀 Starting: ' + taskText);
 
   try {
-    // Get or create session
-    const session = await getOrCreateSession(userId, 'telegram');
-    const sessionId = session.id;
+    // Get or create session — returns the sessionId (UUID string) directly,
+    // NOT a session object.
+    const sessionId = await getOrCreateSession(userId, 'telegram');
+    logger.info('TASK_STARTED', { userId, sessionId, task: taskText.substring(0, 100) });
+
+    // Load the user's preferred model (if set via /model command) and switch
+    // the LLM adapter to it before running the task.
+    const { getDatabase } = await import('../database/db.js');
+    const db = getDatabase();
+    const prefs = db.prepare('SELECT preferred_model FROM user_preferences WHERE user_id = ?').get(String(userId));
+    if (prefs?.preferred_model) {
+      try {
+        const { setProvider } = await import('../../llm/adapter.js');
+        setProvider(prefs.preferred_model);
+        logger.info('TASK_USING_PREFERRED_MODEL', { userId, model: prefs.preferred_model });
+      } catch (e) {
+        logger.warn('Failed to set preferred model, using adapter default', { error: e.message });
+      }
+    }
 
     // Save user message
     await addMessage(sessionId, 'user', taskText);
@@ -290,14 +375,29 @@ async function handleTaskCommand(ctx, userId, text) {
     // Execute agent loop
     const results = await executeAgentLoop(taskText, sessionId, null, userId);
 
-    // Task complete
-    await ctx.reply('✅ Task complete!\n\n' + (results?.success ? 'Task finished successfully.' : 'Task finished with errors.'));
-
+    // Build a detailed completion summary
+    let summary = '';
+    if (results?.success) {
+      summary = '✅ Task complete!\n\n';
+      summary += `Phases: ${results.plan?.success ? '✓' : '✗'} plan · ${results.execute?.success ? '✓' : '✗'} execute · ${results.test?.success ? '✓' : (results.test?.skipped ? '⊘' : '✗')} test · ${results.deploy?.success ? '✓' : (results.deploy?.skipped ? '⊘' : '✗')} deploy\n`;
+      if (results.execute?.filesModified?.length > 0) {
+        summary += `\nFiles written:\n${results.execute.filesModified.map(f => `  • ${f}`).join('\n')}`;
+      }
+    } else if (results?.needsClarification) {
+      summary = '💬 ' + (results.clarificationMenu || 'Task needs clarification.');
+    } else {
+      summary = '⚠️ Task finished with errors.\n\n';
+      summary += `Error: ${results?.error || 'unknown'}\n\n`;
+      if (results?.plan?.success === false) summary += `Plan phase: ${results.plan.error}\n`;
+      if (results?.execute?.success === false) summary += `Execute phase: ${results.execute.error}\n`;
+    }
+    await ctx.reply(summary);
   } catch (err) {
     logger.error('TASK_FAILED', {
       userId,
       task: taskText,
-      error: err.message
+      error: err.message,
+      stack: err.stack
     });
     await ctx.reply('❌ Failed: ' + err.message);
   }
@@ -405,12 +505,38 @@ export async function handleTelegramCallback(ctx) {
       const model = getModelById(modelId);
 
       if (model) {
-        // Save to session
-        const session = await getOrCreateSession(userId, 'telegram');
-        // TODO: Save model preference to database
+        // Persist the model selection to user_preferences so future tasks use it.
+        const { getDatabase } = await import('../database/db.js');
+        const db = getDatabase();
+        db.prepare(`
+          INSERT INTO user_preferences (user_id, preferred_model, updated_at)
+          VALUES (?, ?, ?)
+          ON CONFLICT(user_id) DO UPDATE SET
+            preferred_model = excluded.preferred_model,
+            updated_at = excluded.updated_at
+        `).run(String(userId), model.id, new Date().toISOString());
+
+        // Also tell the LLM adapter to switch providers immediately for the
+        // next task. The agent loop's /api/agent/task route already calls
+        // setProvider(model) per-request, so this is just for any in-flight
+        // direct calls.
+        try {
+          const { setProvider } = await import('../../llm/adapter.js');
+          setProvider(model.id);
+        } catch (e) {
+          logger.warn('Failed to set adapter provider on model select', { error: e.message });
+        }
 
         await ctx.answerCbQuery();
-        await ctx.reply(`✅ Model set to: ${model.name}`);
+        await ctx.reply(
+          `✅ Model set to: *${model.name}*\n\n` +
+          `Provider: ${model.provider}\n` +
+          `Context window: ${(model.contextWindow || 0).toLocaleString()} tokens\n` +
+          `Max output: ${(model.maxOutputTokens || 0).toLocaleString()} tokens`,
+          { parse_mode: 'Markdown' }
+        );
+      } else {
+        await ctx.answerCbQuery('Unknown model');
       }
     } else if (callbackData.startsWith('agent:')) {
       const agentRole = callbackData.replace('agent:', '');

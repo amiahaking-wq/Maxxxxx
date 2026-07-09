@@ -62,9 +62,9 @@ const BASE_MODEL_OPTIONS = [
   },
   {
     id: 'gemini-pro',
-    name: 'Gemini Pro',
+    name: 'Gemini 2.5 Pro',
     provider: 'gemini',
-    model: 'gemini-1.5-pro',
+    model: 'gemini-2.5-pro',
     speed: 'medium',
     speedLabel: '🧠',
     bestFor: ['complex', 'analysis', 'long-context'],
@@ -74,9 +74,9 @@ const BASE_MODEL_OPTIONS = [
   },
   {
     id: 'gemini-flash',
-    name: 'Gemini Flash',
+    name: 'Gemini 2.5 Flash',
     provider: 'gemini',
-    model: 'gemini-1.5-flash',
+    model: 'gemini-2.5-flash',
     speed: 'fast',
     speedLabel: '⚡',
     bestFor: ['simple', 'quick', 'long-context'],
