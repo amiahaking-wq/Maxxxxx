@@ -95,8 +95,24 @@ export async function executeAgentLoop(task, sessionId, progressCallback = null,
   try {
     logger.info('Starting agent loop', { task, sessionId });
 
-    // V2: Initialize token budget manager
-    const budgetManager = new TokenBudgetManager();
+    // V3: Initialize token budget manager with context-window awareness.
+    // We pass the currently-selected model id so the manager picks up the right
+    // context window from the registry. Falls back to defaults if no model set.
+    const { getModelOptions } = await import('../llm/model-registry.js');
+    const currentAdapter = (await import('../llm/adapter.js')).default;
+    let activeModelId = null;
+    try {
+      if (currentAdapter?.currentModel) {
+        // Find the registry id matching the adapter's current model name
+        const allModels = getModelOptions();
+        const match = allModels.find(m => m.model === currentAdapter.currentModel);
+        if (match) activeModelId = match.id;
+      }
+    } catch (e) {
+      logger.warn('Failed to resolve active model id for budget manager', { error: e.message });
+    }
+
+    const budgetManager = new TokenBudgetManager(activeModelId ? { modelId: activeModelId } : {});
 
   // V4: Initialize Cognitive Reflection Loop
   const cognitiveLoop = new CognitiveReflectionLoop(
@@ -191,7 +207,10 @@ export async function executeAgentLoop(task, sessionId, progressCallback = null,
       await reportProgress('plan', 'running', progressCallback, sessionId);
       const planRunId = createAgentRun(sessionId, 'plan');
 
-      results.plan = await executePlanPhase(task, budgetManager);
+      results.plan = await executePlanPhase(task, budgetManager, {
+        sessionId,
+        modelId: activeModelId
+      });
 
       if (!results.plan.success) {
         updateAgentRun(planRunId, 'failed', results.plan.error);

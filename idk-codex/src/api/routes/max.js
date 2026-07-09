@@ -296,4 +296,116 @@ router.get('/agents', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/max/swarm
+ * Get Ruflo swarm status (enabled, initialized, daemon running, etc.)
+ */
+router.get('/swarm', async (req, res) => {
+  try {
+    const { getSwarmStatus, isRufloReady } = await import('../../agent/max/ruflo-setup.js');
+
+    const status = await getSwarmStatus();
+    const ready = isRufloReady();
+
+    res.json({
+      success: true,
+      ready,
+      ...status
+    });
+
+  } catch (error) {
+    logger.error('Failed to get swarm status', {
+      error: error.message
+    });
+
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/max/parallel-task
+ * Run a task against multiple specialists IN PARALLEL.
+ *
+ * Body:
+ *   { task: string, specialistNames?: string[], context?: object, concurrencyLimit?: number }
+ *
+ * Response:
+ *   { success, results, summary, durationMs }
+ */
+router.post('/parallel-task', async (req, res) => {
+  try {
+    const { task, specialistNames, context = {}, concurrencyLimit } = req.body;
+
+    if (!task) {
+      return res.status(400).json({
+        success: false,
+        error: 'task is required'
+      });
+    }
+
+    logger.info('MAX parallel-task submitted', {
+      task: task.substring(0, 100),
+      specialistNames: specialistNames || 'auto',
+      concurrencyLimit
+    });
+
+    const { createSpecialistRegistry } = await import('../../agent/specialists/index.js');
+    const registry = await createSpecialistRegistry();
+
+    // Run specialists in parallel
+    const result = await registry.delegateParallel(task, {
+      specialistNames,
+      context,
+      concurrencyLimit
+    });
+
+    res.json({
+      success: result.success,
+      results: result.results,
+      summary: result.summary,
+      durationMs: result.durationMs
+    });
+
+  } catch (error) {
+    logger.error('MAX parallel-task failed', {
+      error: error.message,
+      stack: error.stack
+    });
+
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/max/specialists
+ * List all registered specialist agents.
+ */
+router.get('/specialists', async (req, res) => {
+  try {
+    const { createSpecialistRegistry } = await import('../../agent/specialists/index.js');
+    const registry = await createSpecialistRegistry();
+
+    res.json({
+      success: true,
+      specialists: registry.listSpecialists()
+    });
+
+  } catch (error) {
+    logger.error('Failed to list specialists', {
+      error: error.message
+    });
+
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 export default router;

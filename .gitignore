@@ -38,3 +38,18 @@ Thumbs.db
 # Build outputs
 dist/
 build/
+
+# Ruflo swarm auto-generated artifacts (created by `npx ruflo init`)
+idk-codex/.claude-flow/
+idk-codex/.claude/
+idk-codex/.swarm/
+idk-codex/.mcp.json
+idk-codex/CLAUDE.md.pre-ruflo*
+idk-codex/.ruflo/
+
+# Local test scripts
+idk-codex/mock-llm-endpoint.js
+idk-codex/terminal-smoke-test.js
+
+# Obsidian vault (live-sync target)
+obsidian-vault/

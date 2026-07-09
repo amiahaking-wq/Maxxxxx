@@ -227,7 +227,9 @@ router.get('/models', async (req, res) => {
         speed: m.speed,
         speedLabel: m.speedLabel,
         description: m.description,
-        bestFor: m.bestFor
+        bestFor: m.bestFor,
+        contextWindow: m.contextWindow,
+        maxOutputTokens: m.maxOutputTokens
       }))
     });
 

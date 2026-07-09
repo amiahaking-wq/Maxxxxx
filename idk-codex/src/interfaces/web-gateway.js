@@ -149,6 +149,7 @@ export class WebGateway {
       logger.info('Initializing Telegram bot');
       try {
         this.bot = initBot();
+        global.botStatus = 'initialized';
         logger.info('✅ Bot instance created successfully');
       } catch (error) {
         logger.error('❌ Failed to create bot instance', {
@@ -156,11 +157,13 @@ export class WebGateway {
           hasToken: !!process.env.TELEGRAM_BOT_TOKEN,
           tokenLength: process.env.TELEGRAM_BOT_TOKEN?.length || 0
         });
+        global.botStatus = 'init_failed';
         // Don't throw - allow server to start without bot
         this.bot = null;
       }
     } else {
       logger.warn('⚠️  Telegram bot disabled - TELEGRAM_BOT_TOKEN not set');
+      global.botStatus = 'disabled';
       this.bot = null;
     }
 
@@ -381,6 +384,7 @@ export class WebGateway {
 
     if (result.success) {
       this.botConnected = true;
+      global.botStatus = 'connected';
       logger.info('✅ Telegram bot connected successfully', {
         mode: result.mode || 'polling',
         attempt: this.botRetryCount
@@ -390,6 +394,7 @@ export class WebGateway {
         ? 5000 * Math.pow(3, this.botRetryCount)
         : 5 * 60 * 1000;
 
+      global.botStatus = 'reconnecting';
       logger.info('Scheduling bot reconnection attempt', {
         attempt: this.botRetryCount,
         nextRetryIn: `${nextRetryDelay / 1000}s`,
@@ -400,6 +405,7 @@ export class WebGateway {
         this.attemptBotStart();
       }, nextRetryDelay);
     } else {
+      global.botStatus = 'failed';
       logger.error('❌ Bot startup failed with non-retryable error', {
         error: result.error?.message,
         code: result.code

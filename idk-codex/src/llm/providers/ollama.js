@@ -56,6 +56,11 @@ export class OllamaProvider {
 
   /**
    * Create chat completion using Ollama's /api/chat endpoint
+   *
+   * The adapter stashes `_contextWindow` and `_maxOutputTokens` on the options
+   * object after context-budget truncation. We pass `num_ctx` to Ollama so the
+   * local model loads the right context size (default 128k, env-overridable
+   * via OLLAMA_CONTEXT_WINDOW).
    */
   async createCompletion(options) {
     try {
@@ -70,10 +75,19 @@ export class OllamaProvider {
       const modelInfo = this.getModelInfo(model);
       const requestMaxTokens = Math.min(max_tokens, modelInfo.maxTokens);
 
+      // Resolve the context window for this request.
+      // Priority: adapter-set _contextWindow -> provider modelMap -> env OLLAMA_CONTEXT_WINDOW -> 128000
+      const contextWindow =
+        options._contextWindow ||
+        modelInfo.contextWindow ||
+        parseInt(process.env.OLLAMA_CONTEXT_WINDOW || '128000', 10);
+
       logger.debug('Ollama completion request', {
         host: this.host,
         model,
-        messageCount: messages.length
+        messageCount: messages.length,
+        contextWindow,
+        requestMaxTokens
       });
 
       const body = {
@@ -82,7 +96,8 @@ export class OllamaProvider {
         stream: false,
         options: {
           temperature,
-          num_predict: requestMaxTokens
+          num_predict: requestMaxTokens,
+          num_ctx: contextWindow
         }
       };
 
@@ -117,7 +132,8 @@ export class OllamaProvider {
       logger.debug('Ollama completion success', {
         model,
         inputTokens,
-        outputTokens
+        outputTokens,
+        contextWindow
       });
 
       return {

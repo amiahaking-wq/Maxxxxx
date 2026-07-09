@@ -2,6 +2,7 @@ import { generateCode, analyzeCode } from '../../groq/client.js';
 import { buildSelfReviewContext } from '../../groq/prompts.js';
 import { writeFileSafe, readFileSafe, existsSafe } from '../../utils/filesystem.js';
 import { generateCompletion } from '../../groq/client.js';
+import { invalidateWorkspace } from './plan.js';
 import logger from '../../utils/logger.js';
 
 /**
@@ -85,6 +86,20 @@ export async function executeExecutePhase(plan, task, context = {}) {
           // Write the file
           await writeFileSafe(step.file, code);
           filesModified.push(step.file);
+
+          // Invalidate the cached WorkspaceContext for this session so the next
+          // plan/execute phase re-indexes the workspace (the file we just wrote
+          // may have changed the structure / keyword scores).
+          if (context?.sessionId) {
+            try {
+              invalidateWorkspace(context.sessionId);
+            } catch (e) {
+              logger.warn('Failed to invalidate workspace cache after write', {
+                file: step.file,
+                error: e.message
+              });
+            }
+          }
 
           executedSteps.push({
             file: step.file,

@@ -261,6 +261,174 @@ export class SpecialistRegistry {
   }
 
   /**
+   * Delegate a complex task to multiple specialists IN PARALLEL.
+   *
+   * This is the multi-specialist parallel execution path used for complex tasks
+   * that benefit from multiple perspectives (e.g. code review + security scan +
+   * test generation + documentation all running at once). Each specialist
+   * receives the SAME task description and runs concurrently via Promise.allSettled.
+   *
+   * The caller can either:
+   *   - pass an explicit list of specialist names via `specialistNames`, OR
+   *   - let the registry pick every specialist that `canHandle(task)`
+   *
+   * Results are returned as an array of `{ specialist, success, result, error, duration }`
+   * objects so the caller can fan-in / merge as needed.
+   *
+   * @param {string|Object} task - Task to delegate
+   * @param {Object} [options]
+   * @param {string[]} [options.specialistNames] - explicit list of specialists
+   * @param {Object} [options.context={}] - execution context passed to each specialist
+   * @param {number} [options.concurrencyLimit=8] - max concurrent specialists
+   * @param {AbortSignal} [options.signal] - optional abort signal
+   * @returns {Promise<Object>} { success, results, summary, durationMs }
+   */
+  async delegateParallel(task, options = {}) {
+    const {
+      specialistNames = null,
+      context = {},
+      concurrencyLimit = 8,
+      signal
+    } = options;
+
+    // Resolve the list of specialists to run
+    let specialistsToRun = [];
+    if (Array.isArray(specialistNames) && specialistNames.length > 0) {
+      for (const name of specialistNames) {
+        const s = this.findByName(name);
+        if (s) specialistsToRun.push(s);
+        else logger.warn('delegateParallel: specialist not found, skipping', { name });
+      }
+    } else {
+      // Auto-select: every specialist that canHandle the task
+      for (const specialist of this.specialists.values()) {
+        try {
+          if (specialist.canHandle(task)) specialistsToRun.push(specialist);
+        } catch (e) {
+          logger.warn('delegateParallel: canHandle threw, skipping', {
+            specialist: specialist.name,
+            error: e.message
+          });
+        }
+      }
+    }
+
+    if (specialistsToRun.length === 0) {
+      logger.warn('delegateParallel: no specialists available', {
+        task: typeof task === 'string' ? task : task.description
+      });
+      return {
+        success: false,
+        results: [],
+        summary: { total: 0, succeeded: 0, failed: 0 },
+        durationMs: 0,
+        error: 'No specialists available'
+      };
+    }
+
+    logger.info('delegateParallel: starting parallel execution', {
+      specialists: specialistsToRun.map(s => s.name),
+      count: specialistsToRun.length,
+      concurrencyLimit
+    });
+
+    const startTime = Date.now();
+
+    // Simple concurrency limiter
+    const queue = [...specialistsToRun];
+    const running = [];
+    const results = [];
+
+    const runOne = async (specialist) => {
+      const t0 = Date.now();
+      try {
+        if (signal?.aborted) {
+          return {
+            specialist: specialist.name,
+            success: false,
+            error: 'aborted',
+            duration: 0
+          };
+        }
+        const result = await specialist.execute(task, context);
+        const duration = Date.now() - t0;
+        results.push({
+          specialist: specialist.name,
+          success: result?.success !== false,
+          result,
+          duration
+        });
+
+        // Record in delegation history
+        this.delegationHistory.push({
+          specialist: specialist.name,
+          task: typeof task === 'string' ? task : task.description,
+          success: result?.success !== false,
+          duration,
+          timestamp: new Date().toISOString(),
+          parallel: true
+        });
+
+        return results[results.length - 1];
+      } catch (error) {
+        const duration = Date.now() - t0;
+        const entry = {
+          specialist: specialist.name,
+          success: false,
+          error: error.message,
+          duration
+        };
+        results.push(entry);
+        this.delegationHistory.push({
+          specialist: specialist.name,
+          task: typeof task === 'string' ? task : task.description,
+          success: false,
+          duration,
+          timestamp: new Date().toISOString(),
+          parallel: true,
+          error: error.message
+        });
+        return entry;
+      }
+    };
+
+    while (queue.length > 0 || running.length > 0) {
+      while (queue.length > 0 && running.length < concurrencyLimit) {
+        const specialist = queue.shift();
+        const p = runOne(specialist).finally(() => {
+          const idx = running.indexOf(p);
+          if (idx >= 0) running.splice(idx, 1);
+        });
+        running.push(p);
+      }
+      if (running.length > 0) {
+        await Promise.race(running);
+      }
+    }
+
+    // Make sure all settled
+    await Promise.allSettled(running);
+
+    const durationMs = Date.now() - startTime;
+    const succeeded = results.filter(r => r.success).length;
+    const failed = results.length - succeeded;
+
+    logger.info('delegateParallel: completed', {
+      total: results.length,
+      succeeded,
+      failed,
+      durationMs
+    });
+
+    return {
+      success: succeeded > 0,
+      results,
+      summary: { total: results.length, succeeded, failed },
+      durationMs
+    };
+  }
+
+  /**
    * AI-powered specialist selection with confidence scoring
    * v2.0 Enhancement: Uses LLM to classify tasks and select optimal specialist
    *

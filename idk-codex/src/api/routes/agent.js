@@ -342,6 +342,7 @@ router.get('/health', async (req, res) => {
       uptime: Math.floor(process.uptime()),
       timestamp: new Date().toISOString(),
       telegram: telegramOk,
+      telegramStatus: global.botStatus || 'unknown',
       db: dbOk,
       llm: llmOk
     };

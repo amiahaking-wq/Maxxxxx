@@ -13,6 +13,7 @@ import { PhoneProvider } from './providers/phone.js';
 import phoneBridge from '../interfaces/phone-bridge.js';
 import { resolveModel, getModelOptions } from './model-registry.js';
 import { IntelligentProviderRouter } from './routing-engine.js';
+import { ContextManager, truncateMessages, getInputBudget, estimateTokens, getContextWindow } from '../context/context-manager.js';
 import logger from '../utils/logger.js';
 
 class LLMAdapter {
@@ -77,50 +78,72 @@ class LLMAdapter {
                   { id: 'gpt-4o-mini', maxTokens: 16384, contextWindow: 128000 }
                 ]
               }));
-              logger.info('✓ OpenAI provider initialized');
+              logger.info('✓ OpenAI provider initialized', {
+                baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+                defaultModel: process.env.OPENAI_MODEL || 'gpt-4o-mini'
+              });
             }
             break;
 
           case 'openai-compatible':
             if (process.env.OPENAI_COMPATIBLE_BASE_URL || process.env.OPENAI_COMPATIBLE_API_KEY) {
+              const compatCtx = parseInt(process.env.OPENAI_COMPATIBLE_CONTEXT_WINDOW || '8192', 10);
+              const compatMaxOut = parseInt(process.env.OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS || '4096', 10);
               this.providers.push(new OpenAICompatibleProvider({
                 name: 'openai-compatible',
                 baseURL: process.env.OPENAI_COMPATIBLE_BASE_URL || 'http://localhost:8000/v1',
                 apiKey: process.env.OPENAI_COMPATIBLE_API_KEY,
                 defaultModel: process.env.OPENAI_COMPATIBLE_MODEL || 'default',
                 models: [
-                  { id: process.env.OPENAI_COMPATIBLE_MODEL || 'default', maxTokens: 8192, contextWindow: 8192 }
+                  { id: process.env.OPENAI_COMPATIBLE_MODEL || 'default', maxTokens: compatMaxOut, contextWindow: compatCtx }
                 ]
               }));
-              logger.info('✓ OpenAI-compatible provider initialized');
+              logger.info('✓ OpenAI-compatible provider initialized', {
+                baseURL: process.env.OPENAI_COMPATIBLE_BASE_URL || 'http://localhost:8000/v1',
+                contextWindow: compatCtx,
+                maxOutputTokens: compatMaxOut
+              });
             }
             break;
 
           case 'local':
             if (process.env.LOCAL_API_BASE_URL) {
+              const localCtx = parseInt(process.env.LOCAL_CONTEXT_WINDOW || '8192', 10);
+              const localMaxOut = parseInt(process.env.LOCAL_MAX_OUTPUT_TOKENS || '4096', 10);
               this.providers.push(new OpenAICompatibleProvider({
                 name: 'local',
                 baseURL: process.env.LOCAL_API_BASE_URL,
                 apiKey: process.env.LOCAL_API_KEY || '',
                 defaultModel: process.env.LOCAL_MODEL || 'default',
                 models: [
-                  { id: process.env.LOCAL_MODEL || 'default', maxTokens: 8192, contextWindow: 8192 }
+                  { id: process.env.LOCAL_MODEL || 'default', maxTokens: localMaxOut, contextWindow: localCtx }
                 ]
               }));
-              logger.info('✓ Local provider initialized');
+              logger.info('✓ Local provider initialized', {
+                baseURL: process.env.LOCAL_API_BASE_URL,
+                contextWindow: localCtx,
+                maxOutputTokens: localMaxOut
+              });
             }
             break;
 
           case 'ollama':
             if (process.env.OLLAMA_HOST) {
+              const ollamaCtx = parseInt(process.env.OLLAMA_CONTEXT_WINDOW || '128000', 10);
+              const ollamaMaxOut = parseInt(process.env.OLLAMA_MAX_OUTPUT_TOKENS || '4096', 10);
               this.providers.push(new OllamaProvider({
                 host: process.env.OLLAMA_HOST,
                 model: process.env.OLLAMA_MODEL,
                 models: [
-                  { id: process.env.OLLAMA_MODEL || 'qwen2.5-coder:3b', maxTokens: 8192, contextWindow: 8192 }
+                  { id: process.env.OLLAMA_MODEL || 'qwen2.5-coder:3b', maxTokens: ollamaMaxOut, contextWindow: ollamaCtx }
                 ]
               }));
-              logger.info('✓ Ollama provider initialized');
+              logger.info('✓ Ollama provider initialized', {
+                host: process.env.OLLAMA_HOST,
+                model: process.env.OLLAMA_MODEL,
+                contextWindow: ollamaCtx,
+                maxOutputTokens: ollamaMaxOut
+              });
             }
             break;
 
@@ -233,6 +256,91 @@ class LLMAdapter {
   }
 
   /**
+   * Apply context-window-aware truncation to a request before sending it to a provider.
+   *
+   * - Resolves the context window for the model being used (registry first, then
+   *   provider, then default).
+   * - Reserves `maxOutputTokens` for the response.
+   * - Truncates `messages` via `truncateMessages` so we never exceed the input budget.
+   * - Caps `max_tokens` to the model's output reservation.
+   * - Returns a *new* options object; the caller's original is not mutated.
+   *
+   * @param {Object} options - request options (will be shallow-copied)
+   * @param {Object} provider - provider instance about to handle the request
+   * @param {string} model - resolved model id (actual model name)
+   * @returns {Object} updated options with messages truncated and max_tokens capped
+   */
+  applyContextBudget(options, provider, model) {
+    const opts = { ...options };
+
+    // 1. Resolve the context window for this model
+    // Priority: registry (which knows the model id) -> provider.getModelInfo -> default
+    let contextWindow = null;
+    let maxOutputTokens = null;
+
+    // Try to find the registry entry by matching provider+model
+    const allModels = getModelOptions();
+    const registryMatch = allModels.find(
+      m => m.provider === provider?.name && m.model === model
+    );
+    if (registryMatch) {
+      contextWindow = registryMatch.contextWindow;
+      maxOutputTokens = registryMatch.maxOutputTokens;
+    }
+
+    if (!contextWindow && provider?.getModelInfo) {
+      const info = provider.getModelInfo(model);
+      if (info?.contextWindow) contextWindow = info.contextWindow;
+      if (info?.maxTokens && !maxOutputTokens) maxOutputTokens = info.maxTokens;
+    }
+
+    if (!contextWindow) {
+      contextWindow = getContextWindow(model, provider);
+    }
+    if (!maxOutputTokens) {
+      maxOutputTokens = parseInt(process.env.DEFAULT_MAX_OUTPUT_TOKENS || '4096', 10);
+    }
+
+    // 2. Honor caller-specified max_tokens but cap to the model's output reservation
+    const requestedOutput = opts.max_tokens || opts.maxTokens || maxOutputTokens;
+    const effectiveOutput = Math.min(requestedOutput, maxOutputTokens);
+    opts.max_tokens = effectiveOutput;
+    if (opts.maxTokens) opts.maxTokens = effectiveOutput;
+
+    // 3. Compute input budget and truncate messages
+    const inputBudget = getInputBudget(contextWindow, effectiveOutput);
+    const originalMessages = Array.isArray(opts.messages) ? opts.messages : [];
+    const originalTokens = originalMessages.reduce(
+      (sum, m) => sum + estimateTokens(m?.content),
+      0
+    );
+
+    if (originalTokens > inputBudget) {
+      const truncated = truncateMessages(originalMessages, inputBudget);
+      const droppedCount = originalMessages.length - truncated.length;
+      logger.info('ContextManager: truncated messages to fit model context window', {
+        provider: provider?.name,
+        model,
+        contextWindow,
+        effectiveOutput,
+        inputBudget,
+        originalTokens,
+        originalCount: originalMessages.length,
+        truncatedCount: truncated.length,
+        droppedCount
+      });
+      opts.messages = truncated;
+    }
+
+    // 4. Stash budget metadata so providers (e.g. Ollama) can read contextWindow
+    //    and pass it as num_ctx if they want to.
+    opts._contextWindow = contextWindow;
+    opts._maxOutputTokens = effectiveOutput;
+
+    return opts;
+  }
+
+  /**
    * Create chat completion with intelligent routing and automatic fallback
    */
   async createCompletion(options) {
@@ -268,12 +376,18 @@ class LLMAdapter {
 
       if (selectedProvider) {
         this.currentProvider = selectedProvider;
-        optionsCopy.model = this.currentProvider.defaultModel;
+        const routedModel = this.currentProvider.defaultModel;
+        optionsCopy.model = routedModel;
+
+        // Apply context budget for the routed provider/model BEFORE sending
+        const budgetedOptions = this.applyContextBudget(optionsCopy, selectedProvider, routedModel);
 
         logger.debug('Using intelligent routing', {
           taskType,
           contextSize,
-          selectedProvider: selectedProviderName
+          selectedProvider: selectedProviderName,
+          contextWindow: budgetedOptions._contextWindow,
+          maxOutputTokens: budgetedOptions._maxOutputTokens
         });
 
         const fallbackProviders = this.providers
@@ -282,7 +396,7 @@ class LLMAdapter {
 
         try {
           return await this.router.executeWithBackoff(
-            () => selectedProvider.createCompletion(optionsCopy),
+            () => selectedProvider.createCompletion(budgetedOptions),
             {
               currentProvider: selectedProviderName,
               fallbackProviders,
@@ -315,21 +429,28 @@ class LLMAdapter {
       const provider = this.providers[providerIndex] || this.currentProvider;
       attemptedProviders.push(provider.name);
 
+      // The model we'll actually send to this provider:
+      // - If this is the user-selected provider, use the resolved model name.
+      // - If we've fallen back to a different provider, use its default model.
+      const providerModel = provider === this.currentProvider ? optionsCopy.model : provider.defaultModel;
+
+      // Apply context budget per-provider so each fallback attempt is sized correctly
+      const attemptOptions = this.applyContextBudget(optionsCopy, provider, providerModel);
+
       try {
         logger.debug('Attempting completion', {
           provider: provider.name,
+          model: providerModel,
           attempt: attempt + 1,
-          maxAttempts
+          maxAttempts,
+          contextWindow: attemptOptions._contextWindow,
+          maxOutputTokens: attemptOptions._maxOutputTokens,
+          messageCount: attemptOptions.messages?.length || 0
         });
-
-        const attemptOptions = {
-          ...optionsCopy,
-          model: provider === this.currentProvider ? optionsCopy.model : provider.defaultModel
-        };
 
         const result = await provider.createCompletion(attemptOptions);
         this.currentProvider = provider;
-        this.currentModel = result.model || provider.defaultModel;
+        this.currentModel = result.model || providerModel;
 
         return result;
       } catch (error) {

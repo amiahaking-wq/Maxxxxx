@@ -1,8 +1,27 @@
 /**
  * Model Registry - Centralized model configuration and selection
- * Provides all available LLM models with their capabilities and routing info
+ * Provides all available LLM models with their capabilities and routing info.
+ *
+ * Each model carries a `contextWindow` (in tokens) and a `maxOutputTokens`
+ * reservation so the ContextManager can truncate prompts to fit and so the
+ * adapter can pass correct `max_tokens` / `num_ctx` values to providers.
  */
 
+import logger from '../utils/logger.js';
+
+/**
+ * Default context window used when nothing is configured for a model.
+ * 128k is a safe ceiling for most modern coding models (GPT-4o, Llama 3.x,
+ * Qwen 2.5, etc.) and is also the default `num_ctx` we will send to Ollama.
+ */
+const DEFAULT_CONTEXT_WINDOW = parseInt(process.env.DEFAULT_CONTEXT_WINDOW || '128000', 10);
+const DEFAULT_MAX_OUTPUT_TOKENS = parseInt(process.env.DEFAULT_MAX_OUTPUT_TOKENS || '4096', 10);
+
+/**
+ * Base model options. `contextWindow` is the total input+output budget the
+ * provider advertises for the model. `maxOutputTokens` is the per-request
+ * output reservation we will use unless the caller overrides it.
+ */
 const BASE_MODEL_OPTIONS = [
   {
     id: 'groq-llama-70b',
@@ -13,6 +32,8 @@ const BASE_MODEL_OPTIONS = [
     speedLabel: '⚡',
     bestFor: ['code', 'planning', 'general'],
     description: 'Best all-around model for code and general tasks',
+    contextWindow: 128000,
+    maxOutputTokens: 8192,
     default: true
   },
   {
@@ -23,7 +44,9 @@ const BASE_MODEL_OPTIONS = [
     speed: 'fastest',
     speedLabel: '⚡⚡',
     bestFor: ['simple', 'quick'],
-    description: 'Fastest model for simple tasks'
+    description: 'Fastest model for simple tasks',
+    contextWindow: 128000,
+    maxOutputTokens: 8192
   },
   {
     id: 'anthropic-sonnet',
@@ -33,7 +56,9 @@ const BASE_MODEL_OPTIONS = [
     speed: 'medium',
     speedLabel: '🧠',
     bestFor: ['complex', 'analysis', 'quality'],
-    description: 'Highest quality for complex reasoning'
+    description: 'Highest quality for complex reasoning',
+    contextWindow: 200000,
+    maxOutputTokens: 8192
   },
   {
     id: 'gemini-pro',
@@ -43,7 +68,9 @@ const BASE_MODEL_OPTIONS = [
     speed: 'medium',
     speedLabel: '🧠',
     bestFor: ['complex', 'analysis', 'long-context'],
-    description: 'Large context window for architecture and documentation'
+    description: 'Large context window for architecture and documentation',
+    contextWindow: 2000000, // 2M tokens
+    maxOutputTokens: 8192
   },
   {
     id: 'gemini-flash',
@@ -53,7 +80,9 @@ const BASE_MODEL_OPTIONS = [
     speed: 'fast',
     speedLabel: '⚡',
     bestFor: ['simple', 'quick', 'long-context'],
-    description: 'Fast model with long context'
+    description: 'Fast model with long context',
+    contextWindow: 1000000, // 1M tokens
+    maxOutputTokens: 8192
   },
   {
     id: 'openai-gpt4o',
@@ -63,7 +92,9 @@ const BASE_MODEL_OPTIONS = [
     speed: 'medium',
     speedLabel: '🧠',
     bestFor: ['code', 'analysis', 'general'],
-    description: 'OpenAI GPT-4o via OpenAI-compatible API'
+    description: 'OpenAI GPT-4o via OpenAI-compatible API',
+    contextWindow: 128000,
+    maxOutputTokens: 16384
   },
   {
     id: 'openai-gpt4o-mini',
@@ -73,7 +104,9 @@ const BASE_MODEL_OPTIONS = [
     speed: 'fast',
     speedLabel: '⚡',
     bestFor: ['simple', 'quick', 'code'],
-    description: 'Fast, low-cost OpenAI model'
+    description: 'Fast, low-cost OpenAI model',
+    contextWindow: 128000,
+    maxOutputTokens: 16384
   },
   {
     id: 'ollama',
@@ -83,7 +116,9 @@ const BASE_MODEL_OPTIONS = [
     speed: 'slow',
     speedLabel: '🖥️',
     bestFor: ['offline', 'private', 'local'],
-    description: 'Local Ollama model for offline/private use'
+    description: 'Local Ollama model for offline/private use',
+    contextWindow: parseInt(process.env.OLLAMA_CONTEXT_WINDOW || String(DEFAULT_CONTEXT_WINDOW), 10),
+    maxOutputTokens: parseInt(process.env.OLLAMA_MAX_OUTPUT_TOKENS || '4096', 10)
   },
   {
     id: 'openai-compatible',
@@ -93,7 +128,9 @@ const BASE_MODEL_OPTIONS = [
     speed: 'medium',
     speedLabel: '🔌',
     bestFor: ['custom', 'local', 'self-hosted'],
-    description: 'Any OpenAI-compatible endpoint (LM Studio, vLLM, etc.)'
+    description: 'Any OpenAI-compatible endpoint (LM Studio, vLLM, etc.)',
+    contextWindow: parseInt(process.env.OPENAI_COMPATIBLE_CONTEXT_WINDOW || '8192', 10),
+    maxOutputTokens: parseInt(process.env.OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS || '4096', 10)
   },
   {
     id: 'local',
@@ -103,7 +140,9 @@ const BASE_MODEL_OPTIONS = [
     speed: 'slow',
     speedLabel: '🖥️',
     bestFor: ['offline', 'private', 'local'],
-    description: 'Local inference server without API key'
+    description: 'Local inference server without API key',
+    contextWindow: parseInt(process.env.LOCAL_CONTEXT_WINDOW || '8192', 10),
+    maxOutputTokens: parseInt(process.env.LOCAL_MAX_OUTPUT_TOKENS || '4096', 10)
   },
   {
     id: 'phone',
@@ -113,15 +152,20 @@ const BASE_MODEL_OPTIONS = [
     speed: 'slow',
     speedLabel: '📱',
     bestFor: ['mobile', 'offline', 'private'],
-    description: 'Phone-powered Ollama via WebSocket bridge'
+    description: 'Phone-powered Ollama via WebSocket bridge',
+    // Phone capabilities are reported by the device itself at REGISTER time;
+    // this is just a fallback before the device connects.
+    contextWindow: parseInt(process.env.PHONE_CONTEXT_WINDOW || '4096', 10),
+    maxOutputTokens: parseInt(process.env.PHONE_MAX_OUTPUT_TOKENS || '2048', 10)
   }
 ];
 
 /**
- * Build a complete model list from static config and environment variables
+ * Build a complete model list from static config and environment variables.
+ * Environment-driven overrides win over the static BASE_MODEL_OPTIONS.
  */
 export function getModelOptions() {
-  const options = [...BASE_MODEL_OPTIONS];
+  const options = BASE_MODEL_OPTIONS.map(m => ({ ...m }));
 
   // Add custom OpenAI-compatible endpoint if configured
   if (process.env.OPENAI_COMPATIBLE_BASE_URL) {
@@ -181,7 +225,9 @@ export function getModelByName(name) {
 }
 
 /**
- * Resolve a model identifier or display name to a provider/model pair
+ * Resolve a model identifier or display name to a provider/model pair.
+ * Always returns `contextWindow` and `maxOutputTokens` so callers can size
+ * prompts and `max_tokens` correctly.
  */
 export function resolveModel(modelIdOrName) {
   const model = getModelById(modelIdOrName) || getModelByName(modelIdOrName);
@@ -190,7 +236,9 @@ export function resolveModel(modelIdOrName) {
   return {
     provider: model.provider,
     model: model.model,
-    id: model.id
+    id: model.id,
+    contextWindow: model.contextWindow || DEFAULT_CONTEXT_WINDOW,
+    maxOutputTokens: model.maxOutputTokens || DEFAULT_MAX_OUTPUT_TOKENS
   };
 }
 
@@ -206,6 +254,28 @@ export function getDefaultModel() {
  */
 export function getModelsByProvider(provider) {
   return getModelOptions().filter(m => m.provider === provider);
+}
+
+/**
+ * Get the context window for a model id, with a safe fallback.
+ * @param {string} modelIdOrName
+ * @returns {number}
+ */
+export function getContextWindowForModel(modelIdOrName) {
+  const resolved = resolveModel(modelIdOrName);
+  if (resolved?.contextWindow) return resolved.contextWindow;
+  return DEFAULT_CONTEXT_WINDOW;
+}
+
+/**
+ * Get the max output tokens for a model id, with a safe fallback.
+ * @param {string} modelIdOrName
+ * @returns {number}
+ */
+export function getMaxOutputTokensForModel(modelIdOrName) {
+  const resolved = resolveModel(modelIdOrName);
+  if (resolved?.maxOutputTokens) return resolved.maxOutputTokens;
+  return DEFAULT_MAX_OUTPUT_TOKENS;
 }
 
 /**
@@ -233,6 +303,13 @@ export function getModelDisplayInfo(modelId) {
     name: model.name,
     provider: model.provider,
     speedLabel: model.speedLabel,
-    description: model.description
+    description: model.description,
+    contextWindow: model.contextWindow,
+    maxOutputTokens: model.maxOutputTokens
   };
 }
+
+export { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS };
+
+// Re-export the logger binding for parity with the rest of the codebase.
+export { logger };

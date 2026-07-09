@@ -2,9 +2,19 @@
  * V2 Enhancement: Token Budget Manager
  * Purpose: Track and enforce token budgets to prevent context overflow
  * Integration Point: Used in agent loop and Groq client
+ *
+ * V3 (context-window-aware): The manager can be told the active model's
+ * context window and max-output reservation, and will set its input/output
+ * limits accordingly. Legacy env overrides (`TOKEN_INPUT_LIMIT`,
+ * `TOKEN_OUTPUT_LIMIT`) still win for backward compatibility, but if those
+ * are not set the limits come from the model's context window.
  */
 
 import logger from '../utils/logger.js';
+import { resolveModel } from '../llm/model-registry.js';
+
+const DEFAULT_CONTEXT_WINDOW = parseInt(process.env.DEFAULT_CONTEXT_WINDOW || '128000', 10);
+const DEFAULT_OUTPUT_RESERVE = parseInt(process.env.DEFAULT_MAX_OUTPUT_TOKENS || '4096', 10);
 
 /**
  * Manages token budgets for AI API calls
@@ -13,19 +23,72 @@ export class TokenBudgetManager {
   /**
    * Create a new token budget manager
    * @param {Object} options - Budget options
+   * @param {number} [options.contextWindow] - Model context window in tokens
+   * @param {number} [options.outputReserve] - Tokens reserved for output
+   * @param {number} [options.inputLimit] - Hard input limit (overrides ctx-derived)
+   * @param {number} [options.outputLimit] - Hard output limit (overrides ctx-derived)
    */
   constructor(options = {}) {
-    this.inputLimit = parseInt(process.env.TOKEN_INPUT_LIMIT || options.inputLimit || '6000', 10);
-    this.outputLimit = parseInt(process.env.TOKEN_OUTPUT_LIMIT || options.outputLimit || '2000', 10);
+    // Resolve the active model's context window (if a model id was passed)
+    let contextWindow = options.contextWindow || DEFAULT_CONTEXT_WINDOW;
+    let outputReserve = options.outputReserve || DEFAULT_OUTPUT_RESERVE;
+
+    if (options.modelId) {
+      const resolved = resolveModel(options.modelId);
+      if (resolved?.contextWindow) contextWindow = resolved.contextWindow;
+      if (resolved?.maxOutputTokens) outputReserve = resolved.maxOutputTokens;
+    }
+
+    // Env overrides win for backward compatibility
+    this.inputLimit = parseInt(
+      process.env.TOKEN_INPUT_LIMIT || options.inputLimit || String(contextWindow - outputReserve),
+      10
+    );
+    this.outputLimit = parseInt(
+      process.env.TOKEN_OUTPUT_LIMIT || options.outputLimit || String(outputReserve),
+      10
+    );
     this.handoffThreshold = parseFloat(process.env.HANDOFF_TOKEN_THRESHOLD || '0.8');
+
+    // Remember the model context so callers can re-derive budgets if needed
+    this.contextWindow = contextWindow;
+    this.outputReserve = outputReserve;
 
     this.currentInput = 0;
     this.currentOutput = 0;
 
     logger.info('Token budget manager initialized', {
+      contextWindow,
+      outputReserve,
       inputLimit: this.inputLimit,
       outputLimit: this.outputLimit,
       handoffThreshold: this.handoffThreshold
+    });
+  }
+
+  /**
+   * Update the context window for the current model. Useful when the agent
+   * switches providers mid-task.
+   * @param {number} contextWindow
+   * @param {number} [outputReserve]
+   */
+  setModel(contextWindow, outputReserve = null) {
+    this.contextWindow = contextWindow;
+    if (outputReserve !== null) this.outputReserve = outputReserve;
+
+    // Re-derive limits unless env overrides are set
+    if (!process.env.TOKEN_INPUT_LIMIT) {
+      this.inputLimit = contextWindow - this.outputReserve;
+    }
+    if (!process.env.TOKEN_OUTPUT_LIMIT) {
+      this.outputLimit = this.outputReserve;
+    }
+
+    logger.info('Token budget manager model updated', {
+      contextWindow: this.contextWindow,
+      outputReserve: this.outputReserve,
+      inputLimit: this.inputLimit,
+      outputLimit: this.outputLimit
     });
   }
 
@@ -128,6 +191,8 @@ export class TokenBudgetManager {
    */
   getUsageSummary() {
     return {
+      contextWindow: this.contextWindow,
+      outputReserve: this.outputReserve,
       input: {
         used: this.currentInput,
         limit: this.inputLimit,
