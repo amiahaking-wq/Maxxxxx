@@ -1,0 +1,22 @@
+# Don't send these to the Docker builder — keeps build context small and fast
+**/node_modules
+**/.git
+**/data
+**/logs
+**/sessions
+**/sandbox-workspace
+**/obsidian-vault
+**/.env
+**/.env.local
+**/.env.production
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/dist
+!app/dist
+**/.claude-flow
+**/.claude
+**/.swarm
+**/.ruflo
+**/.mcp.json
+**/CLAUDE.md.pre-ruflo*
