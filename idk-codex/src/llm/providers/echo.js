@@ -33,63 +33,72 @@ export class EchoProvider {
 
   /**
    * Generate a deterministic response based on the message content.
+   *
+   * The agent loop sends distinct prompt shapes for each phase:
+   *   - PLAN: "Create a detailed plan in JSON format with fields: steps..."
+   *   - EXECUTE: "Create a new file for the following task... Provide the complete file content."
+   *   - SELF-REVIEW: "Review the following code... {approved, issues, suggestions}"
+   *   - COGNITIVE PUSHBACK: "Analyze the prompt... {needsClarification, analysis}"
+   *
+   * We detect which phase we're in by looking for those signature phrases. The
+   * EXECUTE check must come BEFORE the PLAN check because the execute prompt
+   * also contains the word "plan" (it includes the plan in its context).
    */
   async createCompletion(options) {
     const messages = options.messages || [];
     const lastUser = [...messages].reverse().find(m => m.role === 'user');
-    const lastContent = (lastUser?.content || '').toLowerCase();
-    const allContent = messages.map(m => m.content || '').join('\n').toLowerCase();
+    const lastContent = lastUser?.content || '';
+    const allContent = messages.map(m => m.content || '').join('\n');
+    const allLower = allContent.toLowerCase();
+    const lastLower = lastContent.toLowerCase();
 
     logger.info('Echo provider generating response', {
       messageCount: messages.length,
-      lastUserLen: lastContent.length
+      lastUserLen: lastContent.length,
+      hasPlanKeyword: allLower.includes('plan'),
+      hasCreateFile: allLower.includes('create a new file') || allLower.includes('provide the complete file'),
+      hasReview: allLower.includes('self-review') || allLower.includes('approved'),
+      hasClarification: allLower.includes('clarification') || allLower.includes('pushback')
     });
 
     let response = '';
 
-    // ---- PLAN response (prompt asks for a JSON plan) ----
-    if (allContent.includes('create a detailed plan') ||
-        allContent.includes('create detailed implementation plans') ||
-        (allContent.includes('plan') && allContent.includes('json format'))) {
-      response = this._generatePlan(lastUser?.content || '');
+    // ---- EXECUTE / CODE GENERATION ----
+    // Triggered by: "Create a new file for the following task... Provide the complete file content."
+    // OR: "Modify the following file... Provide the complete modified file."
+    // OR: system prompt says "Generate clean, well-documented, production-ready code"
+    const isExecute =
+      lastLower.includes('provide the complete file content') ||
+      lastLower.includes('provide the complete modified file') ||
+      lastLower.includes('create a new file for the following task') ||
+      (allLower.includes('generate clean') && allLower.includes('production-ready code'));
+
+    if (isExecute) {
+      response = this._generateCode(lastContent, allContent);
     }
-    // ---- Self-review response ----
-    else if (allContent.includes('self-review') ||
-             allContent.includes('review the generated') ||
-             (allContent.includes('approved') && allContent.includes('issues'))) {
+    // ---- SELF-REVIEW ----
+    else if (allLower.includes('self-review') ||
+             allLower.includes('review the following code') ||
+             allLower.includes('provide analysis in json format with fields: issues') ||
+             (allLower.includes('approved') && allLower.includes('suggestions'))) {
       response = JSON.stringify({
         approved: true,
         issues: [],
         suggestions: ['Code looks good.']
       });
     }
-    // ---- Code generation ----
-    else if (allContent.includes('provide the complete file') ||
-             allContent.includes('create a new file') ||
-             allContent.includes('provide the complete modified file') ||
-             allContent.includes('generate clean')) {
-      response = this._generateCode(lastUser?.content || '', allContent);
+    // ---- PLAN ----
+    else if (allLower.includes('create a detailed plan') ||
+             allLower.includes('create detailed implementation plans') ||
+             (allLower.includes('plan') && allLower.includes('json format') && allLower.includes('steps'))) {
+      response = this._generatePlan(lastContent);
     }
-    // ---- Code analysis ----
-    else if (allContent.includes('analyze this code') ||
-             allContent.includes('code reviewer')) {
-      response = JSON.stringify({
-        issues: [],
-        suggestions: ['Code is well-structured.'],
-        security_concerns: [],
-        quality_score: 8
-      });
-    }
-    // ---- Error fixing ----
-    else if (allContent.includes('debugging expert') ||
-             allContent.includes('provide the fixed code')) {
-      response = '```\n// Fixed version\n' + (lastUser?.content || '').substring(0, 500) + '\n```';
-    }
-    // ---- Cognitive reflection / pushback ----
-    else if (allContent.includes('clarification') ||
-             allContent.includes('pushback') ||
-             allContent.includes('analyze the prompt') ||
-             allContent.includes('analyzeprompt')) {
+    // ---- COGNITIVE REFLECTION / PUSHBACK ----
+    else if (allLower.includes('clarification') ||
+             allLower.includes('pushback') ||
+             allLower.includes('analyze the prompt') ||
+             allLower.includes('analyzeprompt') ||
+             allLower.includes('needsclarification')) {
       response = JSON.stringify({
         needsClarification: false,
         analysis: 'Task is clear enough to proceed.',
@@ -97,19 +106,35 @@ export class EchoProvider {
         reasoning: 'The task description is specific enough to generate a plan.'
       });
     }
-    // ---- Architecture documentation ----
-    else if (allContent.includes('architect') ||
-             allContent.includes('document the architecture') ||
-             allContent.includes('documentation')) {
+    // ---- CODE ANALYSIS ----
+    else if (allLower.includes('analyze this code') ||
+             allLower.includes('code reviewer') ||
+             allLower.includes('analyze the code for bugs')) {
+      response = JSON.stringify({
+        issues: [],
+        suggestions: ['Code is well-structured.'],
+        security_concerns: [],
+        quality_score: 8
+      });
+    }
+    // ---- ERROR FIXING ----
+    else if (allLower.includes('debugging expert') ||
+             allLower.includes('provide the fixed code')) {
+      response = '```\n// Fixed version\n' + lastContent.substring(0, 500) + '\n```';
+    }
+    // ---- ARCHITECTURE DOCUMENTATION ----
+    else if (allLower.includes('architect') ||
+             allLower.includes('document the architecture') ||
+             allLower.includes('documentation')) {
       response = '# Architecture\n\nThis module was generated by MAX autonomous coding agent.\n\n## Components\n\n- Main entry point\n- Helper utilities\n\n## Notes\n\nSee the source code for details.';
     }
-    // ---- Generic fallback: always return JSON so callers that expect
+    // ---- GENERIC FALLBACK: always return JSON so callers that expect
     //      JSON don't crash on "OK"
     else {
       response = JSON.stringify({
         ok: true,
         message: 'Echo provider generic response',
-        task: (lastUser?.content || '').substring(0, 200)
+        task: lastContent.substring(0, 200)
       });
     }
 
@@ -230,17 +255,17 @@ export class EchoProvider {
     </main>`;
       }
 
-      return '```html\n<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n  <title>' + title + '</title>\n  <style>\n    * { box-sizing: border-box; margin: 0; padding: 0; }\n    body { font-family: system-ui, sans-serif; line-height: 1.6; color: #333; }\n    header { background: #2c3e50; color: white; padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; }\n    header nav a { color: white; margin-left: 1rem; text-decoration: none; }\n    main { max-width: 1100px; margin: 2rem auto; padding: 0 1rem; }\n    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1rem; margin-top: 1rem; }\n    .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; background: #fafafa; }\n    .card button { background: #6c5ce7; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; margin-top: 0.5rem; }\n    .login-container { display: flex; justify-content: center; align-items: center; min-height: 80vh; }\n    .login-form { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); width: 100%; max-width: 360px; }\n    .login-form h1 { margin-bottom: 1rem; }\n    .login-form label { display: block; margin-bottom: 1rem; }\n    .login-form input { width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; }\n    .login-form button { width: 100%; background: #6c5ce7; color: white; border: none; padding: 0.75rem; border-radius: 4px; cursor: pointer; font-size: 1rem; }\n    .hint { text-align: center; margin-top: 1rem; font-size: 0.875rem; }\n    .hint a { color: #6c5ce7; }\n  </style>\n</head>\n<body>' + body + '\n</body>\n</html>\n```';
+      return '```\n<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n  <title>' + title + '</title>\n  <style>\n    * { box-sizing: border-box; margin: 0; padding: 0; }\n    body { font-family: system-ui, sans-serif; line-height: 1.6; color: #333; }\n    header { background: #2c3e50; color: white; padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; }\n    header nav a { color: white; margin-left: 1rem; text-decoration: none; }\n    main { max-width: 1100px; margin: 2rem auto; padding: 0 1rem; }\n    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1rem; margin-top: 1rem; }\n    .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; background: #fafafa; }\n    .card button { background: #6c5ce7; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; margin-top: 0.5rem; }\n    .login-container { display: flex; justify-content: center; align-items: center; min-height: 80vh; }\n    .login-form { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); width: 100%; max-width: 360px; }\n    .login-form h1 { margin-bottom: 1rem; }\n    .login-form label { display: block; margin-bottom: 1rem; }\n    .login-form input { width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; }\n    .login-form button { width: 100%; background: #6c5ce7; color: white; border: none; padding: 0.75rem; border-radius: 4px; cursor: pointer; font-size: 1rem; }\n    .hint { text-align: center; margin-top: 1rem; font-size: 0.875rem; }\n    .hint a { color: #6c5ce7; }\n  </style>\n</head>\n<body>' + body + '\n</body>\n</html>\n```';
     }
 
     // JavaScript
     if (t.includes('javascript') || t.includes('.js') || t.includes('node')) {
-      return '```javascript\n// Generated by MAX\nconsole.log("Hello from MAX!");\n\nmodule.exports = {};\n```';
+      return '```\n// Generated by MAX\nconsole.log("Hello from MAX!");\n\nmodule.exports = {};\n```';
     }
 
     // Python
     if (t.includes('python') || t.includes('.py')) {
-      return '```python\n#!/usr/bin/env python3\n"""Generated by MAX."""\n\n\ndef main():\n    print("Hello from MAX!")\n\n\nif __name__ == "__main__":\n    main()\n```';
+      return '```\n#!/usr/bin/env python3\n"""Generated by MAX."""\n\n\ndef main():\n    print("Hello from MAX!")\n\n\nif __name__ == "__main__":\n    main()\n```';
     }
 
     // README
@@ -250,7 +275,7 @@ export class EchoProvider {
 
     // JSON
     if (t.includes('json') || t.includes('config')) {
-      return '```json\n{\n  "name": "max-generated",\n  "version": "1.0.0",\n  "generatedBy": "MAX"\n}\n```';
+      return '```\n{\n  "name": "max-generated",\n  "version": "1.0.0",\n  "generatedBy": "MAX"\n}\n```';
     }
 
     // Generic fallback
