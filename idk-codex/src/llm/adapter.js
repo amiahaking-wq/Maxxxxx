@@ -10,6 +10,7 @@ import { GeminiProvider } from './providers/gemini.js';
 import { OpenAICompatibleProvider } from './providers/openai-compatible.js';
 import { OllamaProvider } from './providers/ollama.js';
 import { PhoneProvider } from './providers/phone.js';
+import { EchoProvider } from './providers/echo.js';
 import phoneBridge from '../interfaces/phone-bridge.js';
 import { resolveModel, getModelOptions } from './model-registry.js';
 import { IntelligentProviderRouter } from './routing-engine.js';
@@ -35,7 +36,7 @@ class LLMAdapter {
 
     logger.info('Initializing LLM Adapter');
 
-    const priorityList = (process.env.LLM_PROVIDER_PRIORITY || 'ollama,openai,openai-compatible,groq,anthropic,gemini,phone')
+    const priorityList = (process.env.LLM_PROVIDER_PRIORITY || 'ollama,openai,openai-compatible,groq,anthropic,gemini,phone,echo')
       .split(',')
       .map(p => p.trim())
       .filter(p => p);
@@ -150,6 +151,16 @@ class LLMAdapter {
           case 'phone':
             this.providers.push(new PhoneProvider(phoneBridge));
             logger.info('✓ Phone provider initialized (waiting for device connection)');
+            break;
+
+          case 'echo':
+            // Always available when ECHO_PROVIDER_ENABLED=true. Use as a last-resort
+            // fallback so the agent loop can complete end-to-end without any external
+            // API key. Returns deterministic, task-aware responses.
+            if (process.env.ECHO_PROVIDER_ENABLED === 'true') {
+              this.providers.push(new EchoProvider());
+              logger.info('✓ Echo provider initialized (deterministic fallback)');
+            }
             break;
         }
       } catch (error) {

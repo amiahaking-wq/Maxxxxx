@@ -234,7 +234,8 @@ export function validateEnvironment() {
     process.env.OPENAI_COMPATIBLE_BASE_URL ||
     process.env.OLLAMA_HOST ||
     process.env.LOCAL_API_BASE_URL ||
-    process.env.PHONE_SECRET
+    process.env.PHONE_SECRET ||
+    process.env.ECHO_PROVIDER_ENABLED === 'true'
   );
 
   if (!hasProvider) {

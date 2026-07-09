@@ -157,6 +157,18 @@ const BASE_MODEL_OPTIONS = [
     // this is just a fallback before the device connects.
     contextWindow: parseInt(process.env.PHONE_CONTEXT_WINDOW || '4096', 10),
     maxOutputTokens: parseInt(process.env.PHONE_MAX_OUTPUT_TOKENS || '2048', 10)
+  },
+  {
+    id: 'echo',
+    name: 'Echo (offline fallback)',
+    provider: 'echo',
+    model: 'echo-local',
+    speed: 'instant',
+    speedLabel: '🪢',
+    bestFor: ['offline', 'demo', 'testing'],
+    description: 'Deterministic offline fallback — no API key needed. Generates plausible files for demo purposes.',
+    contextWindow: 32000,
+    maxOutputTokens: 4096
   }
 ];
 
