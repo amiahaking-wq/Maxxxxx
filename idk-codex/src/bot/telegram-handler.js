@@ -38,12 +38,16 @@ export async function handleTelegramMessage(ctx) {
       await handleStatusCommand(ctx, userId);
     } else if (text.startsWith('/repos')) {
       await handleReposCommand(ctx, userId, text);
+    } else if (text.startsWith('/repo ')) {
+      await handleRepoCloneCommand(ctx, userId, text);
     } else if (text.startsWith('/model')) {
       await handleModelCommand(ctx, userId);
     } else if (text.startsWith('/agents')) {
       await handleAgentsCommand(ctx, userId);
     } else if (text.startsWith('/task')) {
       await handleTaskCommand(ctx, userId, text);
+    } else if (text.startsWith('/push')) {
+      await handlePushCommand(ctx, userId, text);
     } else if (text.startsWith('/fix')) {
       await handleFixCommand(ctx, userId, text);
     } else if (text.startsWith('/review_pr')) {
@@ -101,6 +105,11 @@ async function handleHelpCommand(ctx) {
   const helpMessage = `
 📚 *MAX System Commands*
 
+*Repository (work on real repos like Claude Code):*
+/repo [url] - Clone a GitHub repo into the workspace
+/push [msg] - Commit and push changes back to GitHub
+/repos - List GitHub repositories
+
 *Task Management:*
 /task [text] - Execute a development task
 /fix [text] - Fix an issue (auto-prefixed)
@@ -110,7 +119,6 @@ async function handleHelpCommand(ctx) {
 *Configuration:*
 /model - Select AI model
 /agents - Choose agent role
-/repos - List and switch repositories
 
 *Utilities:*
 /review\\_pr [number] - Review a pull request
@@ -118,9 +126,10 @@ async function handleHelpCommand(ctx) {
 /help - Show this message
 
 *Examples:*
+\`/repo https://github.com/user/myproject\`
 \`/task Add a login page with validation\`
+\`/push Fix the login bug\`
 \`/fix The navbar isn't responsive on mobile\`
-\`/review_pr 42\`
   `.trim();
 
   await ctx.reply(helpMessage, { parse_mode: 'Markdown' });
@@ -230,6 +239,220 @@ async function handleReposCommand(ctx, userId, text) {
       error: err.message
     });
     await ctx.reply('❌ Failed to fetch repositories: ' + err.message);
+  }
+}
+
+/**
+ * /repo <url> — Clone a GitHub repo into the sandbox and set it as the active
+ * workspace for all future /task commands.
+ *
+ * After cloning, MAX works just like Claude Code does:
+ *   1. Clones the repo into /app/sandbox-workspace/<repo-name>/
+ *   2. All future /task commands read from and write to that repo
+ *   3. /push commits and pushes changes back to GitHub
+ *
+ * Examples:
+ *   /repo https://github.com/amiahaking-wq/Maxxxxx
+ *   /repo https://github.com/user/project.git
+ *
+ * For private repos, set GITHUB_TOKEN in the environment — MAX will use it
+ * for both clone and push.
+ */
+async function handleRepoCloneCommand(ctx, userId, text) {
+  const url = text.replace('/repo', '').trim();
+
+  if (!url) {
+    await ctx.reply(
+      '📦 *Clone a Repository*\n\n' +
+      'Usage: `/repo <github-url>`\n\n' +
+      'Examples:\n' +
+      '`/repo https://github.com/amiahaking-wq/Maxxxxx`\n' +
+      '`/repo https://github.com/user/project.git`\n\n' +
+      'After cloning, all `/task` commands will work on that repo.\n' +
+      'Use `/push` to commit and push changes back to GitHub.',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  await ctx.reply('📦 Cloning repository...\n`' + url + '`', { parse_mode: 'Markdown' });
+
+  try {
+    const { execSync } = await import('child_process');
+    const path = await import('path');
+    const fs = await import('fs');
+
+    // Extract repo name from URL
+    const repoName = url.replace(/\.git$/, '').split('/').pop() || 'cloned-repo';
+    const sandboxBase = process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
+    const cloneTarget = path.resolve(sandboxBase, repoName);
+
+    // Remove if already exists
+    if (fs.existsSync(cloneTarget)) {
+      fs.rmSync(cloneTarget, { recursive: true, force: true });
+    }
+
+    // Ensure sandbox exists
+    fs.mkdirSync(sandboxBase, { recursive: true });
+
+    // Build clone URL with token if GITHUB_TOKEN is set and it's an HTTPS URL
+    let cloneUrl = url;
+    if (process.env.GITHUB_TOKEN && url.startsWith('https://github.com/')) {
+      cloneUrl = url.replace('https://', `https://x-access-token:${process.env.GITHUB_TOKEN}@`);
+    }
+
+    logger.info('Cloning repo', { url, repoName, cloneTarget });
+
+    // Clone with depth 1 for speed (full history not needed for editing)
+    execSync(`git clone --depth 1 "${cloneUrl}" "${cloneTarget}"`, {
+      stdio: 'pipe',
+      timeout: 120000,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+    });
+
+    // Count files
+    const files = execSync(`find "${cloneTarget}" -type f -not -path '*/.git/*' | wc -l`, {
+      encoding: 'utf-8'
+    }).trim();
+
+    // Store the active repo path in user_preferences
+    const { getDatabase } = await import('../database/db.js');
+    const db = getDatabase();
+    db.prepare(`
+      INSERT INTO user_preferences (user_id, repo_owner, repo_name, preferred_model, updated_at)
+      VALUES (?, ?, ?, COALESCE((SELECT preferred_model FROM user_preferences WHERE user_id = ?), NULL), ?)
+      ON CONFLICT(user_id) DO UPDATE SET
+        repo_owner = excluded.repo_owner,
+        repo_name = excluded.repo_name,
+        updated_at = excluded.updated_at
+    `).run(String(userId), url.split('/')[3] || '', repoName, String(userId), new Date().toISOString());
+
+    // Also set SANDBOX_WORKSPACE env var so the agent loop uses this repo
+    process.env.SANDBOX_WORKSPACE = cloneTarget;
+    process.env.WORKSPACE_PATH = cloneTarget;
+
+    // Invalidate any cached workspace context
+    try {
+      const { invalidateWorkspace } = await import('../agent/phases/plan.js');
+      const sessionId = await getOrCreateSession(userId, 'telegram');
+      invalidateWorkspace(sessionId);
+    } catch (e) {
+      // non-fatal
+    }
+
+    await ctx.reply(
+      `✅ *Repository cloned successfully!*\n\n` +
+      `📁 *Repo:* \`${repoName}\`\n` +
+      `📂 *Path:* \`${cloneTarget}\`\n` +
+      `📄 *Files:* ${files}\n\n` +
+      `Now all \`/task\` commands will work on this repo.\n` +
+      `Use \`/push "commit message"\` to commit and push changes.`,
+      { parse_mode: 'Markdown' }
+    );
+
+    logger.info('REPO_CLONED', { userId, repoName, cloneTarget, fileCount: files });
+  } catch (err) {
+    logger.error('REPO_CLONE_FAILED', { userId, url, error: err.message, stack: err.stack });
+    await ctx.reply(
+      `❌ *Clone failed:*\n\`${err.message}\`\n\n` +
+      `Make sure the URL is correct and the repo is public (or GITHUB_TOKEN is set for private repos).`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+}
+
+/**
+ * /push [commit message] — Commit and push changes in the active repo back to GitHub.
+ *
+ * Requires:
+ *   - GITHUB_TOKEN set in the environment
+ *   - A repo cloned via /repo first
+ *
+ * Example:
+ *   /push Fix the login bug
+ *   /push Add user authentication
+ */
+async function handlePushCommand(ctx, userId, text) {
+  const commitMessage = text.replace('/push', '').trim() || 'MAX autonomous commit';
+
+  try {
+    const { execSync } = await import('child_process');
+    const sandboxBase = process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
+
+    // Check if we're in a git repo
+    try {
+      execSync('git rev-parse --git-dir', { cwd: sandboxBase, stdio: 'pipe' });
+    } catch (e) {
+      await ctx.reply(
+        '❌ No git repository found in the workspace.\n\n' +
+        'Use `/repo <url>` to clone a repository first.',
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+
+    if (!process.env.GITHUB_TOKEN) {
+      await ctx.reply(
+        '⚠️ *GITHUB_TOKEN not set*\n\n' +
+        'Pushing to GitHub requires a personal access token.\n' +
+        'Set it in the environment variables to enable /push.',
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+
+    await ctx.reply('📤 Committing and pushing changes...');
+
+    // Configure git user
+    execSync('git config user.name "MAX Agent"', { cwd: sandboxBase, stdio: 'pipe' });
+    execSync('git config user.email "max@autonomous-agent.dev"', { cwd: sandboxBase, stdio: 'pipe' });
+
+    // Add all changes
+    execSync('git add -A', { cwd: sandboxBase, stdio: 'pipe' });
+
+    // Check if there are changes to commit
+    let hasChanges = true;
+    try {
+      execSync('git diff --cached --quiet', { cwd: sandboxBase, stdio: 'pipe' });
+      hasChanges = false;
+    } catch (e) {
+      hasChanges = true;
+    }
+
+    if (!hasChanges) {
+      await ctx.reply('ℹ️ No changes to commit. The workspace is clean.');
+      return;
+    }
+
+    // Commit
+    execSync(`git commit -m "${commitMessage.replace(/"/g, '\\"')}\n\nCo-Authored-By: MAX Agent <max@autonomous-agent.dev>"`, {
+      cwd: sandboxBase,
+      stdio: 'pipe'
+    });
+
+    // Push
+    execSync('git push origin HEAD', {
+      cwd: sandboxBase,
+      stdio: 'pipe',
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      timeout: 60000
+    });
+
+    // Get the commit hash
+    const hash = execSync('git rev-parse --short HEAD', { cwd: sandboxBase, encoding: 'utf-8' }).trim();
+
+    await ctx.reply(
+      `✅ *Pushed to GitHub!*\n\n` +
+      `📝 *Commit:* \`${hash}\`\n` +
+      `💬 *Message:* ${commitMessage}\n\n` +
+      `Changes are now live on your repository.`,
+      { parse_mode: 'Markdown' }
+    );
+
+    logger.info('REPO_PUSHED', { userId, commitMessage, hash });
+  } catch (err) {
+    logger.error('REPO_PUSH_FAILED', { userId, error: err.message, stack: err.stack });
+    await ctx.reply(`❌ *Push failed:*\n\`${err.message}\``, { parse_mode: 'Markdown' });
   }
 }
 
