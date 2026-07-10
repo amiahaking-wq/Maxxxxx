@@ -192,12 +192,14 @@ router.get('/content', authenticate, async (req, res) => {
  * Path is resolved against SANDBOX_WORKSPACE. Only files within the sandbox
  * can be read — path traversal attempts are rejected.
  */
-router.get('/sandbox/:filePath(*)?', async (req, res) => {
+// Express 5 uses path-to-regexp v8 which has different wildcard syntax.
+// The old '*' and '(:param(*))' patterns no longer work.
+// Correct v8 syntax for a catch-all is: '/sandbox/:filePath{(.*)}?'
+// But the simplest cross-version approach is a regex-based route.
+router.get(/^\/sandbox\/?(.*)$/, async (req, res) => {
   try {
-    // In Express 5, named params with (*) capture everything including slashes.
-    // req.params.filePath will be undefined (root listing), a string (single segment),
-    // or a multi-segment path like "dir/file.txt".
-    const requestedPath = req.params.filePath || '';
+    // req.params[0] captures everything after /sandbox/ (or empty string for root)
+    const requestedPath = req.params[0] || '';
     if (!requestedPath) {
       // List the sandbox root
       const sandboxRoot = path.resolve(process.env.SANDBOX_WORKSPACE || './sandbox-workspace');
