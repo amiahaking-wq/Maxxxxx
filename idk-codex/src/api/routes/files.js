@@ -192,11 +192,25 @@ router.get('/content', authenticate, async (req, res) => {
  * Path is resolved against SANDBOX_WORKSPACE. Only files within the sandbox
  * can be read — path traversal attempts are rejected.
  */
-router.get('/sandbox/*', async (req, res) => {
+router.get('/sandbox/:filePath(*)?', async (req, res) => {
   try {
-    const requestedPath = req.params[0]; // everything after /sandbox/
+    // In Express 5, named params with (*) capture everything including slashes.
+    // req.params.filePath will be undefined (root listing), a string (single segment),
+    // or a multi-segment path like "dir/file.txt".
+    const requestedPath = req.params.filePath || '';
     if (!requestedPath) {
-      return res.status(400).json({ error: 'File path is required' });
+      // List the sandbox root
+      const sandboxRoot = path.resolve(process.env.SANDBOX_WORKSPACE || './sandbox-workspace');
+      if (!fs.existsSync(sandboxRoot)) {
+        return res.json({ success: true, type: 'directory', path: '', entries: [] });
+      }
+      const entries = fs.readdirSync(sandboxRoot, { withFileTypes: true });
+      return res.json({
+        success: true,
+        type: 'directory',
+        path: '',
+        entries: entries.map(e => ({ name: e.name, type: e.isDirectory() ? 'directory' : 'file' }))
+      });
     }
 
     const sandboxRoot = path.resolve(process.env.SANDBOX_WORKSPACE || './sandbox-workspace');
