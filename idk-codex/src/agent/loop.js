@@ -35,13 +35,16 @@ const MAX_RETRY_COUNT = parseInt(process.env.MAX_RETRY_COUNT || '10', 10);
  * @returns {boolean} - True if error is recoverable
  */
 function isRecoverableError(error) {
+  // Defensive: error might be undefined, null, or an object, not a string
+  const errorStr = (typeof error === 'string' ? error :
+                    error?.message || error?.error || String(error || '')).toLowerCase();
   const nonRecoverable = [
-    'EACCES',           // Permission denied
-    'ENOENT',           // File not found (workspace issue)
-    'MODULE_NOT_FOUND', // Dependency missing (need npm install)
-    'SyntaxError'       // Code syntax error (need code fix)
+    'eacces',           // Permission denied
+    'enoent',           // File not found (workspace issue)
+    'module_not_found', // Dependency missing (need npm install)
+    'syntaxerror'       // Code syntax error (need code fix)
   ];
-  return !nonRecoverable.some(pattern => error.includes(pattern));
+  return !nonRecoverable.some(pattern => errorStr.includes(pattern));
 }
 
 /**

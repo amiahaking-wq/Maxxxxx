@@ -135,7 +135,7 @@ export async function buildEnrichedContext(sessionId, repoInfo = null) {
   if (repoInfo) {
     // Add repository context as system message if not already present
     const hasRepoContext = context.some(msg =>
-      msg.role === 'system' && msg.content.includes('Repository:')
+      msg.role === 'system' && typeof msg.content === 'string' && msg.content.includes('Repository:')
     );
 
     if (!hasRepoContext && context.length > 0) {
