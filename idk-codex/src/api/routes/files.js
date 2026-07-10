@@ -185,6 +185,70 @@ router.get('/content', authenticate, async (req, res) => {
 });
 
 /**
+ * GET /api/files/sandbox/:filename
+ * Public (no-auth) endpoint to read a file from the sandbox workspace.
+ * Used by the Telegram bot to show generated files to the user.
+ *
+ * Path is resolved against SANDBOX_WORKSPACE. Only files within the sandbox
+ * can be read — path traversal attempts are rejected.
+ */
+router.get('/sandbox/*', async (req, res) => {
+  try {
+    const requestedPath = req.params[0]; // everything after /sandbox/
+    if (!requestedPath) {
+      return res.status(400).json({ error: 'File path is required' });
+    }
+
+    const sandboxRoot = path.resolve(process.env.SANDBOX_WORKSPACE || './sandbox-workspace');
+    const fullPath = path.resolve(sandboxRoot, requestedPath);
+
+    // Prevent path traversal — must be inside the sandbox
+    if (!fullPath.startsWith(sandboxRoot)) {
+      return res.status(403).json({ error: 'Access denied — path outside sandbox' });
+    }
+
+    if (!fs.existsSync(fullPath)) {
+      return res.status(404).json({ error: 'File not found', path: requestedPath, sandboxRoot });
+    }
+
+    const stats = fs.statSync(fullPath);
+    if (stats.isDirectory()) {
+      // List directory contents
+      const entries = fs.readdirSync(fullPath, { withFileTypes: true });
+      return res.json({
+        success: true,
+        type: 'directory',
+        path: requestedPath,
+        entries: entries.map(e => ({ name: e.name, type: e.isDirectory() ? 'directory' : 'file' }))
+      });
+    }
+
+    if (stats.size > 1024 * 1024) {
+      return res.status(413).json({ error: 'File too large (max 1MB)' });
+    }
+
+    const content = fs.readFileSync(fullPath, 'utf-8');
+
+    // Return as JSON with content, or as raw text if ?raw=true
+    if (req.query.raw === 'true') {
+      res.type('text/plain').send(content);
+    } else {
+      res.json({
+        success: true,
+        type: 'file',
+        path: requestedPath,
+        content,
+        size: stats.size,
+        modified: stats.mtime
+      });
+    }
+  } catch (error) {
+    logger.error('Failed to read sandbox file', { error: error.message });
+    res.status(500).json({ error: 'Failed to read file', details: error.message });
+  }
+});
+
+/**
  * POST /api/files/content
  * Write file contents
  */
