@@ -121,9 +121,26 @@ export async function executeAgentLoop(task, sessionId, progressCallback = null,
   );
 
   // V4: Cognitive Reflection - Step 1: Pushback & Clarification
-  const clarificationCheck = await cognitiveLoop.pushback.analyzePrompt(task, budgetManager);
+  // Disabled by default — the pushback engine expects JSON responses from the LLM
+  // but local models (Qwen via phone, Ollama) often return plain text, causing
+  // JSON.parse failures and downstream 'Cannot read properties of undefined' errors.
+  // Enable explicitly with ENABLE_PUSHBACK_ENGINE=true when using a cloud LLM.
+  const pushbackEnabled = process.env.ENABLE_PUSHBACK_ENGINE === 'true';
 
-  if (clarificationCheck.needsClarification && process.env.ENABLE_PUSHBACK_ENGINE !== 'false') {
+  let clarificationCheck = { needsClarification: false, analysis: { isVague: false } };
+
+  if (pushbackEnabled) {
+    try {
+      clarificationCheck = await cognitiveLoop.pushback.analyzePrompt(task, budgetManager);
+    } catch (err) {
+      logger.warn('Pushback engine failed, continuing without clarification', { error: err.message });
+      clarificationCheck = { needsClarification: false, analysis: { isVague: false } };
+    }
+  } else {
+    logger.debug('Pushback engine disabled (set ENABLE_PUSHBACK_ENGINE=true to enable)');
+  }
+
+  if (clarificationCheck.needsClarification && pushbackEnabled) {
     logger.info('Task needs clarification, generating menu');
 
     const menu = await cognitiveLoop.pushback.generateClarificationMenu(
@@ -380,7 +397,10 @@ export async function executeAgentLoop(task, sessionId, progressCallback = null,
     }
 
     // V4: Cognitive Reflection - Step 2: Auto-Validation
-    if (process.env.ENABLE_AUTO_VALIDATION !== 'false' && results.execute?.filesModified?.length > 0) {
+    // Disabled by default for local models — validation calls the LLM for code review
+    // which fails when local models return plain text instead of JSON.
+    // Enable with ENABLE_AUTO_VALIDATION=true when using a cloud LLM.
+    if (process.env.ENABLE_AUTO_VALIDATION === 'true' && results.execute?.filesModified?.length > 0) {
       logger.info('Running auto-validation on modified files');
 
       const validation = await cognitiveLoop.validator.validateFiles(
@@ -473,7 +493,9 @@ export async function executeAgentLoop(task, sessionId, progressCallback = null,
     logger.info('Task completion protocol activated', { sessionId });
 
     // V4: Cognitive Reflection - Step 3: Architecture Documentation
-    if (process.env.ENABLE_ARCH_DOCUMENTATION !== 'false') {
+    // Disabled by default — calls the LLM which may fail with local models.
+    // Enable with ENABLE_ARCH_DOCUMENTATION=true when using a cloud LLM.
+    if (process.env.ENABLE_ARCH_DOCUMENTATION === 'true') {
       logger.info('Documenting architecture');
 
       const docResult = await cognitiveLoop.archWriter.documentDecision(

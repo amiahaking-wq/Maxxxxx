@@ -83,7 +83,8 @@ export async function generateCode(prompt, context = [], budgetManager = null) {
     budgetManager
   });
 
-  return result.content;
+  // Defensive: some providers may return undefined content
+  return result?.content || '';
 }
 
 /**
@@ -131,11 +132,11 @@ export async function generatePlan(task, repoContext = '', budgetManager = null)
   const messages = [
     {
       role: 'system',
-      content: 'You are a software architect. Create detailed implementation plans. Break down tasks into concrete steps with file paths and descriptions.'
+      content: 'You are a software architect. Create detailed implementation plans. Break down tasks into concrete steps with file paths and descriptions. You MUST respond with ONLY a JSON object, no markdown, no explanation.'
     },
     {
       role: 'user',
-      content: `Repository context:\n${repoContext}\n\nTask: ${task}\n\nCreate a detailed plan in JSON format with fields: steps (array of {file, action, description}), estimated_complexity (low/medium/high), risks (array).`
+      content: `Repository context:\n${repoContext}\n\nTask: ${task}\n\nCreate a detailed plan in JSON format with fields: steps (array of {file, action, description}), estimated_complexity (low/medium/high), risks (array). Respond with ONLY the JSON.`
     }
   ];
 
@@ -145,21 +146,41 @@ export async function generatePlan(task, repoContext = '', budgetManager = null)
     budgetManager
   });
 
+  // Defensive: some providers (phone/Ollama) may return undefined content
+  const content = result?.content || '';
+
   try {
-    const jsonMatch = result.content.match(/\{[\s\S]*\}/);
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
+      const parsed = JSON.parse(jsonMatch[0]);
+      // Validate the plan has steps
+      if (parsed.steps && Array.isArray(parsed.steps) && parsed.steps.length > 0) {
+        return parsed;
+      }
     }
   } catch (error) {
-    logger.warn('Failed to parse plan JSON', { error: error.message });
+    logger.warn('Failed to parse plan JSON', { error: error.message, contentPreview: content.substring(0, 200) });
   }
+
+  // Fallback: create a single-step plan based on the task
+  // Detect file type from the task text
+  const t = (task || '').toLowerCase();
+  let fileName = 'output.txt';
+  if (t.includes('html') || t.includes('web page') || t.includes('landing')) fileName = 'index.html';
+  else if (t.includes('python') || t.includes('.py')) fileName = 'main.py';
+  else if (t.includes('javascript') || t.includes('.js') || t.includes('node')) fileName = 'index.js';
+  else if (t.includes('react') || t.includes('component')) fileName = 'Component.jsx';
+  else if (t.includes('css') || t.includes('style')) fileName = 'styles.css';
+  else if (t.includes('readme') || t.includes('documentation')) fileName = 'README.md';
+
+  logger.info('Using fallback plan', { fileName, taskPreview: (task || '').substring(0, 100) });
 
   return {
     steps: [
       {
-        file: 'implementation.js',
+        file: fileName,
         action: 'create',
-        description: task
+        description: task || 'Create the requested file'
       }
     ],
     estimated_complexity: 'medium',
