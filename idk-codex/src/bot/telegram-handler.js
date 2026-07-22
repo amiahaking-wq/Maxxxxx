@@ -487,14 +487,14 @@ async function handleTaskCommand(ctx, userId, text) {
       summary = '💬 ' + (results.clarificationMenu || 'Task needs clarification.');
     } else {
       summary = '⚠️ Task finished with errors.\n\n';
-      summary += `Error: ${results?.error || 'unknown'}\n\n';
-      if (!planOk) summary += `Plan phase: ${results?.plan?.error || 'failed'}\n`;
-      if (!execOk) summary += `Execute phase: ${results?.execute?.error || 'failed'}\n`;
+      summary += 'Error: ' + (results?.error || 'unknown') + '\n\n';
+      if (!planOk) summary += 'Plan phase: ' + (results?.plan?.error || 'failed') + '\n';
+      if (!execOk) summary += 'Execute phase: ' + (results?.execute?.error || 'failed') + '\n';
     }
 
-    summary += `Phases: ${planOk ? '✓' : '✗'} plan · ${execOk ? '✓' : '✗'} execute · ${testOk ? '✓' : (testSkipped ? '⊘' : '✗')} test · ${deployOk ? '✓' : (deploySkipped ? '⊘' : '✗')} deploy\n`;
+    summary += 'Phases: ' + (planOk ? '✓' : '✗') + ' plan · ' + (execOk ? '✓' : '✗') + ' execute · ' + (testOk ? '✓' : (testSkipped ? '⊘' : '✗')) + ' test · ' + (deployOk ? '✓' : (deploySkipped ? '⊘' : '✗')) + ' deploy\n';
     if (filesWritten.length > 0) {
-      summary += `\nFiles written:\n${filesWritten.map(f => `  • ${f}`).join('\n')}`;
+      summary += '\nFiles written:\n' + filesWritten.map(f => '  • ' + f).join('\n');
     }
     await ctx.reply(summary);
   } catch (err) {
