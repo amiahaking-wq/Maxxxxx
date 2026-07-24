@@ -13,6 +13,7 @@ import maxRouter from './max.js';
 import configRouter from './config.js';
 import reposRouter from './repos.js';
 import conversationsRouter from './conversations.js';
+import connectorsRouter from './connectors.js';
 
 const router = Router();
 
@@ -51,6 +52,7 @@ router.use('/max', maxRouter);
 router.use('/config', configRouter);
 router.use('/repos', reposRouter);
 router.use('/conversations', conversationsRouter);
+router.use('/connectors', connectorsRouter);
 
 // Expose runtime endpoint at /api/runtime (from agent router)
 import { getDatabase } from '../../database/db.js';
