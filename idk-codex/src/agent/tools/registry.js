@@ -1,692 +1,496 @@
 /**
- * Tool Registry for Agent Loop
+ * MAX 2.0 — Tool Registry
  *
- * Provides 12 tool functions that agents can use:
- * 1. read_file - Read file contents
- * 2. write_file - Write file contents
- * 3. edit_file - Edit specific parts of file
- * 4. run_command - Execute shell commands
- * 5. list_files - List files in directory
- * 6. search_code - Search for code patterns
- * 7. install_package - Install npm/pip packages
- * 8. run_tests - Run test suites
- * 9. git_operations - Git commands
- * 10. create_directory - Create directories
- * 11. web_fetch - Fetch web content
- * 12. check_syntax - Validate code syntax
+ * Tools that the LLM can call during a ReAct loop. Each tool:
+ *   - Has a name, description, and parameter spec
+ *   - Executes synchronously and returns a result string
+ *   - Is designed for LLM consumption (concise, bounded output)
+ *
+ * The tool protocol is text-based (XML-like tags) so it works with ANY model,
+ * not just ones that support function calling. Inspired by SWE-agent and Aider.
+ *
+ * Tools available:
+ *   - bash         Run a shell command (with timeout, sandboxed)
+ *   - read_file    Read a file (with line numbers, max 200 lines)
+ *   - write_file   Create or overwrite a file
+ *   - edit_file    Search/replace in a file (Aider-style)
+ *   - list_files   List files in a directory
+ *   - search       grep/find across the workspace
+ *   - web_search   Search the web (if available)
+ *   - web_fetch    Fetch a URL and extract text
  */
 
-import { promises as fs } from 'fs';
-import { join, dirname, extname, basename } from 'path';
-import { readFileSafe, writeFileSafe, existsSafe } from '../../utils/filesystem.js';
-import logger from '../../utils/logger.js';
+import { execSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+import logger from '../utils/logger.js';
 
-// Command whitelist for security
-const ALLOWED_PREFIXES = [
-  'npm', 'node', 'npx', 'git', 'python', 'python3', 'pip', 'pip3',
-  'ls', 'cat', 'echo', 'mkdir', 'cp', 'mv', 'rm', 'find', 'grep',
-  'curl', 'wget', 'yarn', 'pnpm', 'cargo', 'go', 'tsc', 'jest',
-  'vitest', 'eslint', 'prettier', 'docker', 'pwd', 'cd', 'which',
-  'chmod', 'touch', 'sed', 'awk', 'sort', 'head', 'tail', 'wc',
-  'du', 'df', 'ps', 'kill', 'env', 'export', 'unset'
-];
+const SANDBOX = process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
+const MAX_OUTPUT_CHARS = 8000; // Truncate tool output to keep context manageable
+const BASH_TIMEOUT_MS = 30000; // 30 second timeout for bash commands
 
-// Command blocklist for security
-const BLOCKED_COMMANDS = [
-  'rm -rf /',
-  'sudo',
-  'su ',
-  'passwd',
-  'chmod 777 /',
-  'mkfs',
-  'dd if=',
-  'shutdown',
-  'reboot',
-  'init 0',
-  'halt'
-];
+// ============================================================================
+// TOOL DEFINITIONS
+// ============================================================================
 
-/**
- * Build tool registry with all available tools
- * @param {Object} terminal - AgentTerminal instance
- * @param {string} workspacePath - Workspace directory path
- * @param {Function} streamCallback - Callback for streaming updates
- * @returns {Object} Tool registry object
- */
-export function buildToolRegistry(terminal, workspacePath, streamCallback) {
-  logger.info('Building tool registry', { workspacePath });
+export const TOOLS = {
+  bash: {
+    name: 'bash',
+    description: 'Run a shell command in the sandbox workspace. Returns stdout and stderr. Use for: running tests, installing packages, building code, git operations, checking file contents with cat/head/tail, etc. Output is truncated to 8000 chars.',
+    params: { command: 'string (required) — the shell command to run' },
+    execute: async (args) => {
+      const command = args.command;
+      if (!command) return 'Error: command is required';
 
-  /**
-   * Stream tool usage event
-   * @param {string} toolName - Tool name
-   * @param {Object} details - Tool execution details
-   */
-  function streamToolUse(toolName, details) {
-    if (streamCallback) {
       try {
-        streamCallback('tool:use', { tool: toolName, ...details });
-      } catch (error) {
-        logger.warn('Stream callback failed', { error: error.message });
-      }
-    }
-  }
+        logger.info('TOOL:bash', { command: command.substring(0, 100) });
 
-  /**
-   * Get absolute path from relative path
-   * @param {string} path - Relative or absolute path
-   * @returns {string} Absolute path
-   */
-  function getAbsolutePath(path) {
-    if (path.startsWith('/')) {
-      return path;
-    }
-    return join(workspacePath, path);
-  }
-
-  return {
-    /**
-     * TOOL 1: Read file contents
-     * @param {Object} input - {path: string}
-     * @returns {Promise<Object>} {content, lines, size} or {error}
-     */
-    async read_file(input) {
-      try {
-        logger.info('Tool: read_file', { path: input.path });
-        streamToolUse('read_file', { path: input.path });
-
-        const absolutePath = getAbsolutePath(input.path);
-        const content = await fs.readFile(absolutePath, 'utf8');
-
-        if (!content) {
-          throw new Error('File is empty or could not be read');
-        }
-
-        const lines = content.split('\n').length;
-        const size = Buffer.byteLength(content, 'utf8');
-
-        logger.info('File read successfully', { path: input.path, lines, size });
-
-        return {
-          success: true,
-          content,
-          lines,
-          size
-        };
-      } catch (error) {
-        logger.error('Failed to read file', { path: input.path, error: error.message });
-        return { success: false, error: error.message };
-      }
-    },
-
-    /**
-     * TOOL 2: Write file contents
-     * @param {Object} input - {path: string, content: string}
-     * @returns {Promise<Object>} {success, path, bytesWritten}
-     */
-    async write_file(input) {
-      try {
-        logger.info('Tool: write_file', { path: input.path });
-        streamToolUse('write_file', { path: input.path });
-
-        const absolutePath = getAbsolutePath(input.path);
-        const dir = dirname(absolutePath);
-
-        // Create parent directories
-        await fs.mkdir(dir, { recursive: true });
-
-        // Write file
-        await fs.writeFile(absolutePath, input.content, 'utf8');
-        const bytesWritten = Buffer.byteLength(input.content, 'utf8');
-
-        logger.info('File written successfully', {
-          path: input.path,
-          bytesWritten
+        // Run with timeout, capture stdout+stderr
+        const result = execSync(command, {
+          cwd: SANDBOX,
+          timeout: BASH_TIMEOUT_MS,
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env, TERM: 'dumb' },
+          maxBuffer: 1024 * 1024 // 1MB
         });
 
-        return {
-          success: true,
-          path: input.path,
-          bytesWritten
-        };
-      } catch (error) {
-        logger.error('Failed to write file', { path: input.path, error: error.message });
-        return { success: false, error: error.message };
+        let output = result || '(no output)';
+        if (output.length > MAX_OUTPUT_CHARS) {
+          output = output.substring(0, MAX_OUTPUT_CHARS) + '\n... (output truncated)';
+        }
+        return output;
+      } catch (err) {
+        // Command failed — return stderr so the agent can see the error
+        let output = '';
+        if (err.stdout) output += err.stdout;
+        if (err.stderr) output += '\n' + err.stderr;
+        if (err.killed && err.signal === 'SIGTERM') {
+          output += '\n(command timed out after 30s)';
+        }
+        output = output || ('Error: ' + err.message);
+        if (output.length > MAX_OUTPUT_CHARS) {
+          output = output.substring(0, MAX_OUTPUT_CHARS) + '\n... (output truncated)';
+        }
+        return output.trim();
       }
+    }
+  },
+
+  read_file: {
+    name: 'read_file',
+    description: 'Read the contents of a file. Returns the file with line numbers (1-based). Max 200 lines shown — use offset/limit for large files.',
+    params: {
+      path: 'string (required) — path to the file (relative to workspace)',
+      offset: 'number (optional) — starting line number, default 1',
+      limit: 'number (optional) — max lines to read, default 200'
     },
+    execute: async (args) => {
+      const filePath = args.path;
+      if (!filePath) return 'Error: path is required';
 
-    /**
-     * TOOL 3: Edit file by replacing text
-     * @param {Object} input - {path: string, oldStr: string, newStr: string}
-     * @returns {Promise<Object>} {success, path, linesChanged}
-     */
-    async edit_file(input) {
+      const offset = parseInt(args.offset || '1', 10);
+      const limit = parseInt(args.limit || '200', 10);
+
+      const fullPath = path.resolve(SANDBOX, filePath);
+
+      // Security: must be inside sandbox
+      if (!fullPath.startsWith(path.resolve(SANDBOX))) {
+        return 'Error: path is outside the sandbox workspace';
+      }
+
       try {
-        logger.info('Tool: edit_file', { path: input.path });
-        streamToolUse('edit_file', { path: input.path });
+        if (!fs.existsSync(fullPath)) {
+          return `Error: file not found: ${filePath}`;
+        }
 
-        const content = await readFileSafe(input.path);
+        const content = fs.readFileSync(fullPath, 'utf-8');
+        const lines = content.split('\n');
 
-        // Check if oldStr exists
-        if (!content.includes(input.oldStr)) {
+        const start = Math.max(0, offset - 1);
+        const end = Math.min(lines.length, start + limit);
+        const slice = lines.slice(start, end);
+
+        // Add line numbers
+        const numbered = slice.map((line, i) => {
+          const lineNum = start + i + 1;
+          return `${String(lineNum).padStart(4)}: ${line}`;
+        }).join('\n');
+
+        let result = numbered;
+        if (end < lines.length) {
+          result += `\n... (${lines.length - end} more lines, use offset=${end + 1} to continue)`;
+        }
+        return result || '(empty file)';
+      } catch (err) {
+        return `Error reading file: ${err.message}`;
+      }
+    }
+  },
+
+  write_file: {
+    name: 'write_file',
+    description: 'Create or overwrite a file with the given content. Creates parent directories if needed.',
+    params: {
+      path: 'string (required) — path to the file (relative to workspace)',
+      content: 'string (required) — the full file content'
+    },
+    execute: async (args) => {
+      const filePath = args.path;
+      const content = args.content;
+
+      if (!filePath) return 'Error: path is required';
+      if (content === undefined || content === null) return 'Error: content is required';
+
+      const fullPath = path.resolve(SANDBOX, filePath);
+      if (!fullPath.startsWith(path.resolve(SANDBOX))) {
+        return 'Error: path is outside the sandbox workspace';
+      }
+
+      try {
+        // Create parent directories
+        const dir = path.dirname(fullPath);
+        fs.mkdirSync(dir, { recursive: true });
+
+        fs.writeFileSync(fullPath, content, 'utf-8');
+        const size = Buffer.byteLength(content, 'utf-8');
+        logger.info('TOOL:write_file', { path: filePath, size });
+        return `Successfully wrote ${size} bytes to ${filePath}`;
+      } catch (err) {
+        return `Error writing file: ${err.message}`;
+      }
+    }
+  },
+
+  edit_file: {
+    name: 'edit_file',
+    description: 'Edit a file using search/replace. Finds old_text in the file and replaces it with new_text. The old_text must match exactly (including whitespace). Use this for precise edits without rewriting the whole file.',
+    params: {
+      path: 'string (required) — path to the file',
+      old_text: 'string (required) — the exact text to find',
+      new_text: 'string (required) — the text to replace it with'
+    },
+    execute: async (args) => {
+      const filePath = args.path;
+      const oldText = args.old_text;
+      const newText = args.new_text;
+
+      if (!filePath) return 'Error: path is required';
+      if (oldText === undefined) return 'Error: old_text is required';
+      if (newText === undefined) return 'Error: new_text is required';
+
+      const fullPath = path.resolve(SANDBOX, filePath);
+      if (!fullPath.startsWith(path.resolve(SANDBOX))) {
+        return 'Error: path is outside the sandbox workspace';
+      }
+
+      try {
+        if (!fs.existsSync(fullPath)) {
+          return `Error: file not found: ${filePath}`;
+        }
+
+        const content = fs.readFileSync(fullPath, 'utf-8');
+
+        // Check if old_text exists
+        if (!content.includes(oldText)) {
+          // Try to find a close match to help the LLM
           const lines = content.split('\n');
-          const contextLines = lines.slice(0, 10).join('\n');
-          return {
-            success: false,
-            error: `String not found in file. First 10 lines:\n${contextLines}`
-          };
+          const oldLines = oldText.split('\n');
+          let foundSimilar = false;
+          for (let i = 0; i < lines.length; i++) {
+            if (lines[i].trim() === oldLines[0].trim()) {
+              foundSimilar = true;
+              break;
+            }
+          }
+          if (foundSimilar) {
+            return `Error: old_text not found exactly. The first line matches but the full text doesn't. Check whitespace and exact characters.`;
+          }
+          return `Error: old_text not found in file. Make sure the text matches exactly (including whitespace and indentation).`;
         }
 
         // Check for multiple matches
-        const matches = content.split(input.oldStr).length - 1;
-        if (matches > 1) {
-          return {
-            success: false,
-            error: `Found ${matches} matches. Please provide more specific oldStr to target exact location.`
-          };
+        const matchCount = content.split(oldText).length - 1;
+        if (matchCount > 1) {
+          return `Error: old_text found ${matchCount} times in the file. Please provide more context to make the match unique.`;
         }
 
-        // Replace text
-        const newContent = content.replace(input.oldStr, input.newStr);
-        const absolutePath = getAbsolutePath(input.path);
-        await fs.writeFile(absolutePath, newContent, 'utf8');
-
-        const linesChanged = input.newStr.split('\n').length;
-
-        logger.info('File edited successfully', {
-          path: input.path,
-          linesChanged
-        });
-
-        return {
-          success: true,
-          path: input.path,
-          linesChanged
-        };
-      } catch (error) {
-        logger.error('Failed to edit file', { path: input.path, error: error.message });
-        return { success: false, error: error.message };
-      }
-    },
-
-    /**
-     * TOOL 4: Run command in terminal
-     * @param {Object} input - {command: string, timeout?: number}
-     * @returns {Promise<Object>} {output, exitCode}
-     */
-    async run_command(input) {
-      try {
-        logger.info('Tool: run_command', { command: input.command.substring(0, 100) });
-        streamToolUse('run_command', { command: input.command });
-
-        // Security: Check whitelist
-        const commandStart = input.command.trim().split(' ')[0];
-        const isAllowed = ALLOWED_PREFIXES.some(prefix => commandStart.startsWith(prefix));
-
-        if (!isAllowed) {
-          logger.warn('Command blocked by whitelist', { command: input.command });
-          return {
-            success: false,
-            error: `Command '${commandStart}' not allowed. Allowed prefixes: ${ALLOWED_PREFIXES.join(', ')}`
-          };
-        }
-
-        // Security: Check blocklist
-        const isBlocked = BLOCKED_COMMANDS.some(blocked =>
-          input.command.toLowerCase().includes(blocked.toLowerCase())
-        );
-
-        if (isBlocked) {
-          logger.warn('Command blocked by blocklist', { command: input.command });
-          return {
-            success: false,
-            error: 'Command contains blocked pattern for security reasons'
-          };
-        }
-
-        // Execute command
-        const result = await terminal.exec(input.command, input.timeout || 30000);
-
-        logger.info('Command executed', {
-          command: input.command.substring(0, 100),
-          outputLength: result.output.length
-        });
-
-        return {
-          success: true,
-          output: result.output,
-          exitCode: result.exitCode
-        };
-      } catch (error) {
-        logger.error('Failed to run command', {
-          command: input.command,
-          error: error.message
-        });
-        return { success: false, error: error.message, exitCode: 1 };
-      }
-    },
-
-    /**
-     * TOOL 5: List files in directory
-     * @param {Object} input - {path?: string, pattern?: string}
-     * @returns {Promise<Object>} {files: [], count}
-     */
-    async list_files(input) {
-      try {
-        const searchPath = input.path || '.';
-        logger.info('Tool: list_files', { path: searchPath, pattern: input.pattern });
-        streamToolUse('list_files', { path: searchPath });
-
-        const findCmd = input.pattern
-          ? `find ${searchPath} -type f -name "${input.pattern}" ! -path "*/node_modules/*" ! -path "*/.git/*"`
-          : `find ${searchPath} -type f ! -path "*/node_modules/*" ! -path "*/.git/*"`;
-
-        const result = await terminal.exec(findCmd, 10000);
-
-        const files = result.output
-          .split('\n')
-          .filter(line => line.trim() && !line.includes('$'))
-          .map(line => line.trim());
-
-        logger.info('Files listed', { count: files.length });
-
-        return {
-          success: true,
-          files,
-          count: files.length
-        };
-      } catch (error) {
-        logger.error('Failed to list files', { error: error.message });
-        return { success: false, error: error.message, files: [], count: 0 };
-      }
-    },
-
-    /**
-     * TOOL 6: Search code for pattern
-     * @param {Object} input - {query: string, path?: string, fileType?: string}
-     * @returns {Promise<Object>} {matches: [{file, line, content}], count}
-     */
-    async search_code(input) {
-      try {
-        const searchPath = input.path || '.';
-        logger.info('Tool: search_code', { query: input.query, path: searchPath });
-        streamToolUse('search_code', { query: input.query });
-
-        let grepCmd = `grep -r -n "${input.query}" ${searchPath} --exclude-dir=node_modules --exclude-dir=.git`;
-
-        if (input.fileType) {
-          grepCmd += ` --include="*.${input.fileType}"`;
-        }
-
-        const result = await terminal.exec(grepCmd, 15000);
-
-        const matches = result.output
-          .split('\n')
-          .filter(line => line.trim() && !line.includes('$') && line.includes(':'))
-          .map(line => {
-            const [filePath, ...rest] = line.split(':');
-            const lineNum = rest[0];
-            const content = rest.slice(1).join(':');
-            return {
-              file: filePath.trim(),
-              line: parseInt(lineNum) || 0,
-              content: content.trim()
-            };
-          })
-          .filter(m => m.file && m.content);
-
-        logger.info('Code search completed', { count: matches.length });
-
-        return {
-          success: true,
-          matches,
-          count: matches.length
-        };
-      } catch (error) {
-        logger.error('Failed to search code', { error: error.message });
-        return { success: false, error: error.message, matches: [], count: 0 };
-      }
-    },
-
-    /**
-     * TOOL 7: Install package
-     * @param {Object} input - {packages: string[], manager?: string}
-     * @returns {Promise<Object>} {success, output, installed: []}
-     */
-    async install_package(input) {
-      try {
-        logger.info('Tool: install_package', { packages: input.packages });
-        streamToolUse('install_package', { packages: input.packages });
-
-        let manager = input.manager;
-
-        // Auto-detect package manager
-        if (!manager) {
-          const hasPackageJson = await existsSafe('package.json');
-          const hasYarnLock = await existsSafe('yarn.lock');
-          const hasPnpmLock = await existsSafe('pnpm-lock.yaml');
-
-          if (hasPnpmLock) {
-            manager = 'pnpm';
-          } else if (hasYarnLock) {
-            manager = 'yarn';
-          } else if (hasPackageJson) {
-            manager = 'npm';
-          } else {
-            manager = 'npm';
-          }
-        }
-
-        const packagesStr = input.packages.join(' ');
-        const installCmd = `${manager} install ${packagesStr}`;
-
-        const result = await terminal.exec(installCmd, 120000);
-
-        logger.info('Packages installed', { packages: input.packages, manager });
-
-        return {
-          success: true,
-          output: result.output,
-          installed: input.packages,
-          manager
-        };
-      } catch (error) {
-        logger.error('Failed to install packages', {
-          packages: input.packages,
-          error: error.message
-        });
-        return { success: false, error: error.message, installed: [] };
-      }
-    },
-
-    /**
-     * TOOL 8: Run tests
-     * @param {Object} input - {command?: string, path?: string}
-     * @returns {Promise<Object>} {passed, failed, output, success}
-     */
-    async run_tests(input) {
-      try {
-        logger.info('Tool: run_tests', { command: input.command });
-        streamToolUse('run_tests', { command: input.command });
-
-        let testCmd = input.command;
-
-        // Auto-detect test command
-        if (!testCmd) {
-          const hasPackageJson = await existsSafe('package.json');
-          if (hasPackageJson) {
-            const pkgContent = await readFileSafe('package.json');
-            const pkg = JSON.parse(pkgContent);
-
-            if (pkg.scripts?.test) {
-              testCmd = 'npm test';
-            } else if (pkg.devDependencies?.jest || pkg.dependencies?.jest) {
-              testCmd = 'npx jest';
-            } else if (pkg.devDependencies?.vitest || pkg.dependencies?.vitest) {
-              testCmd = 'npx vitest run';
-            } else {
-              testCmd = 'npm test';
-            }
-          } else {
-            testCmd = 'npm test';
-          }
-        }
-
-        const result = await terminal.exec(testCmd, 60000);
-
-        // Parse test results
-        let passed = 0;
-        let failed = 0;
-
-        // Try to extract test counts from output
-        const passMatch = result.output.match(/(\d+)\s+passed/i);
-        const failMatch = result.output.match(/(\d+)\s+failed/i);
-
-        if (passMatch) passed = parseInt(passMatch[1]);
-        if (failMatch) failed = parseInt(failMatch[1]);
-
-        const success = failed === 0 && result.exitCode === 0;
-
-        logger.info('Tests completed', { passed, failed, success });
-
-        return {
-          success,
-          passed,
-          failed,
-          output: result.output
-        };
-      } catch (error) {
-        logger.error('Failed to run tests', { error: error.message });
-        return {
-          success: false,
-          passed: 0,
-          failed: 1,
-          output: error.message
-        };
-      }
-    },
-
-    /**
-     * TOOL 9: Git operations
-     * @param {Object} input - {operation: string, files?: [], message?: string}
-     * @returns {Promise<Object>} {output, success}
-     */
-    async git_operations(input) {
-      try {
-        logger.info('Tool: git_operations', { operation: input.operation });
-        streamToolUse('git_operations', { operation: input.operation });
-
-        let gitCmd;
-
-        switch (input.operation) {
-          case 'status':
-            gitCmd = 'git status';
-            break;
-          case 'diff':
-            gitCmd = 'git diff';
-            break;
-          case 'add':
-            gitCmd = input.files?.length
-              ? `git add ${input.files.join(' ')}`
-              : 'git add .';
-            break;
-          case 'commit':
-            if (!input.message) {
-              return { success: false, error: 'Commit message required' };
-            }
-            gitCmd = `git commit -m "${input.message}"`;
-            break;
-          case 'push':
-            gitCmd = 'git push';
-            break;
-          case 'log':
-            gitCmd = 'git log --oneline -10';
-            break;
-          default:
-            return { success: false, error: `Unknown git operation: ${input.operation}` };
-        }
-
-        const result = await terminal.exec(gitCmd, 30000);
-
-        logger.info('Git operation completed', { operation: input.operation });
-
-        return {
-          success: true,
-          output: result.output,
-          operation: input.operation
-        };
-      } catch (error) {
-        logger.error('Git operation failed', {
-          operation: input.operation,
-          error: error.message
-        });
-        return { success: false, error: error.message };
-      }
-    },
-
-    /**
-     * TOOL 10: Create directory
-     * @param {Object} input - {path: string}
-     * @returns {Promise<Object>} {success, path}
-     */
-    async create_directory(input) {
-      try {
-        logger.info('Tool: create_directory', { path: input.path });
-        streamToolUse('create_directory', { path: input.path });
-
-        const result = await terminal.exec(`mkdir -p ${input.path}`, 5000);
-
-        logger.info('Directory created', { path: input.path });
-
-        return {
-          success: true,
-          path: input.path
-        };
-      } catch (error) {
-        logger.error('Failed to create directory', {
-          path: input.path,
-          error: error.message
-        });
-        return { success: false, error: error.message };
-      }
-    },
-
-    /**
-     * TOOL 11: Fetch web content
-     * @param {Object} input - {url: string, type?: string}
-     * @returns {Promise<Object>} {content, length}
-     */
-    async web_fetch(input) {
-      try {
-        logger.info('Tool: web_fetch', { url: input.url });
-        streamToolUse('web_fetch', { url: input.url });
-
-        // Security: Block local network addresses
-        const blockedPatterns = [
-          'localhost',
-          '127.0.0.1',
-          '0.0.0.0',
-          '192.168.',
-          '10.',
-          '172.16.',
-          '172.17.',
-          '172.18.',
-          '172.19.',
-          '172.20.',
-          '172.21.',
-          '172.22.',
-          '172.23.',
-          '172.24.',
-          '172.25.',
-          '172.26.',
-          '172.27.',
-          '172.28.',
-          '172.29.',
-          '172.30.',
-          '172.31.'
-        ];
-
-        const isBlocked = blockedPatterns.some(pattern =>
-          input.url.toLowerCase().includes(pattern)
-        );
-
-        if (isBlocked) {
-          logger.warn('Blocked local network access', { url: input.url });
-          return {
-            success: false,
-            error: 'Access to local network addresses is blocked for security'
-          };
-        }
-
-        const result = await terminal.exec(`curl -s -L "${input.url}"`, 30000);
-
-        logger.info('Web content fetched', {
-          url: input.url,
-          length: result.output.length
-        });
-
-        return {
-          success: true,
-          content: result.output,
-          length: result.output.length
-        };
-      } catch (error) {
-        logger.error('Failed to fetch web content', {
-          url: input.url,
-          error: error.message
-        });
-        return { success: false, error: error.message };
-      }
-    },
-
-    /**
-     * TOOL 12: Check syntax
-     * @param {Object} input - {path: string}
-     * @returns {Promise<Object>} {valid, errors: []}
-     */
-    async check_syntax(input) {
-      try {
-        logger.info('Tool: check_syntax', { path: input.path });
-        streamToolUse('check_syntax', { path: input.path });
-
-        const ext = extname(input.path);
-        let checkCmd;
-
-        switch (ext) {
-          case '.js':
-          case '.mjs':
-            checkCmd = `node --check ${input.path}`;
-            break;
-          case '.ts':
-            checkCmd = `npx tsc --noEmit --skipLibCheck ${input.path}`;
-            break;
-          case '.py':
-            checkCmd = `python3 -m py_compile ${input.path}`;
-            break;
-          case '.json':
-            // Read and parse JSON
-            try {
-              const content = await readFileSafe(input.path);
-              JSON.parse(content);
-              return { success: true, valid: true, errors: [] };
-            } catch (error) {
-              return {
-                success: true,
-                valid: false,
-                errors: [error.message]
-              };
-            }
-          default:
-            return {
-              success: false,
-              error: `Syntax checking not supported for ${ext} files`
-            };
-        }
-
-        const result = await terminal.exec(checkCmd, 15000);
-
-        const valid = result.exitCode === 0;
-        const errors = valid ? [] : [result.output];
-
-        logger.info('Syntax check completed', { path: input.path, valid });
-
-        return {
-          success: true,
-          valid,
-          errors
-        };
-      } catch (error) {
-        logger.error('Failed to check syntax', {
-          path: input.path,
-          error: error.message
-        });
-        return {
-          success: true,
-          valid: false,
-          errors: [error.message]
-        };
+        // Replace
+        const newContent = content.replace(oldText, newText);
+        fs.writeFileSync(fullPath, newContent, 'utf-8');
+
+        logger.info('TOOL:edit_file', { path: filePath });
+        return `Successfully edited ${filePath} (replaced ${oldText.split('\n').length} line(s))`;
+      } catch (err) {
+        return `Error editing file: ${err.message}`;
       }
     }
-  };
+  },
+
+  list_files: {
+    name: 'list_files',
+    description: 'List files in a directory. Returns file names with [DIR] or [FILE] markers. Max 100 entries.',
+    params: {
+      path: 'string (optional) — directory path, default is workspace root',
+      recursive: 'boolean (optional) — if true, list recursively (max 3 levels)'
+    },
+    execute: async (args) => {
+      const dirPath = args.path || '.';
+      const recursive = args.recursive === 'true' || args.recursive === true;
+
+      const fullPath = path.resolve(SANDBOX, dirPath);
+      if (!fullPath.startsWith(path.resolve(SANDBOX))) {
+        return 'Error: path is outside the sandbox workspace';
+      }
+
+      try {
+        if (!fs.existsSync(fullPath)) {
+          return `Error: directory not found: ${dirPath}`;
+        }
+
+        const entries = [];
+        const maxEntries = 100;
+
+        function listDir(dir, prefix, depth) {
+          if (entries.length >= maxEntries) return;
+          if (depth > 3) return;
+
+          const items = fs.readdirSync(dir, { withFileTypes: true });
+          for (const item of items) {
+            if (entries.length >= maxEntries) break;
+            if (item.name.startsWith('.') || item.name === 'node_modules') continue;
+
+            const relPath = prefix ? `${prefix}/${item.name}` : item.name;
+            if (item.isDirectory()) {
+              entries.push(`[DIR]  ${relPath}/`);
+              if (recursive) {
+                listDir(path.join(dir, item.name), relPath, depth + 1);
+              }
+            } else {
+              entries.push(`[FILE] ${relPath}`);
+            }
+          }
+        }
+
+        listDir(fullPath, '', 0);
+
+        if (entries.length === 0) {
+          return '(empty directory)';
+        }
+
+        let result = entries.join('\n');
+        if (entries.length >= maxEntries) {
+          result += '\n... (truncated at 100 entries)';
+        }
+        return result;
+      } catch (err) {
+        return `Error listing files: ${err.message}`;
+      }
+    }
+  },
+
+  search: {
+    name: 'search',
+    description: 'Search for text in files (grep) or find files by name (glob). Returns matching lines with file:line:content format.',
+    params: {
+      query: 'string (required) — text to search for (or glob pattern with pattern:)',
+      path: 'string (optional) — directory to search in, default is workspace root',
+      max_results: 'number (optional) — max results, default 30'
+    },
+    execute: async (args) => {
+      const query = args.query;
+      if (!query) return 'Error: query is required';
+
+      const searchPath = args.path || '.';
+      const maxResults = parseInt(args.max_results || '30', 10);
+
+      const fullPath = path.resolve(SANDBOX, searchPath);
+      if (!fullPath.startsWith(path.resolve(SANDBOX))) {
+        return 'Error: path is outside the sandbox workspace';
+      }
+
+      try {
+        let command;
+        if (query.startsWith('pattern:')) {
+          // Glob pattern — use find
+          const pattern = query.replace('pattern:', '');
+          command = `find "${fullPath}" -name "${pattern}" -not -path '*/node_modules/*' -not -path '*/.git/*' | head -${maxResults}`;
+        } else {
+          // Text search — use grep -rn
+          command = `grep -rn --include='*' --exclude-dir=node_modules --exclude-dir=.git "${query.replace(/"/g, '\\"')}" "${fullPath}" 2>/dev/null | head -${maxResults}`;
+        }
+
+        const result = execSync(command, {
+          encoding: 'utf-8',
+          timeout: 10000,
+          stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        if (!result || result.trim() === '') {
+          return '(no matches found)';
+        }
+
+        // Make paths relative to sandbox
+        const sandboxPath = path.resolve(SANDBOX);
+        const relativeResult = result.split('\n').map(line => {
+          return line.replace(sandboxPath + '/', '');
+        }).join('\n');
+
+        return relativeResult.trim();
+      } catch (err) {
+        if (err.status === 1) {
+          return '(no matches found)';
+        }
+        return `Error searching: ${err.message}`;
+      }
+    }
+  },
+
+  web_search: {
+    name: 'web_search',
+    description: 'Search the web for information. Returns search results with titles, URLs, and snippets. Use for looking up documentation, APIs, or current information.',
+    params: {
+      query: 'string (required) — search query'
+    },
+    execute: async (args) => {
+      const query = args.query;
+      if (!query) return 'Error: query is required';
+
+      try {
+        // Use a simple web search via DuckDuckGo HTML (no API key needed)
+        const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+        const response = await fetch(url, {
+          headers: { 'User-Agent': 'Mozilla/5.0' }
+        });
+
+        if (!response.ok) {
+          return `Error: web search failed (${response.status})`;
+        }
+
+        const html = await response.text();
+
+        // Extract results (simple parsing)
+        const results = [];
+        const resultRegex = /<a rel="nofollow" class="result__a" href="([^"]+)">(.*?)<\/a>[\s\S]*?<a class="result__snippet"[^>]*>(.*?)<\/a>/g;
+        let match;
+        let count = 0;
+        while ((match = resultRegex.exec(html)) !== null && count < 5) {
+          const url = match[1].replace(/&amp;/g, '&');
+          const title = match[2].replace(/<[^>]+>/g, '').trim();
+          const snippet = match[3].replace(/<[^>]+>/g, '').trim();
+          results.push(`${count + 1}. ${title}\n   ${url}\n   ${snippet.substring(0, 200)}`);
+          count++;
+        }
+
+        if (results.length === 0) {
+          return '(no search results found)';
+        }
+
+        return results.join('\n\n');
+      } catch (err) {
+        return `Error: web search failed: ${err.message}`;
+      }
+    }
+  },
+
+  web_fetch: {
+    name: 'web_fetch',
+    description: 'Fetch a URL and return the text content (HTML stripped to text). Max 5000 chars. Use for reading documentation pages or API responses.',
+    params: {
+      url: 'string (required) — the URL to fetch'
+    },
+    execute: async (args) => {
+      const url = args.url;
+      if (!url) return 'Error: url is required';
+
+      try {
+        const response = await fetch(url, {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          signal: AbortSignal.timeout(15000)
+        });
+
+        if (!response.ok) {
+          return `Error: fetch failed (${response.status} ${response.statusText})`;
+        }
+
+        const contentType = response.headers.get('content-type') || '';
+
+        let text;
+        if (contentType.includes('application/json')) {
+          const json = await response.json();
+          text = JSON.stringify(json, null, 2);
+        } else {
+          text = await response.text();
+          // Strip HTML tags
+          text = text
+            .replace(/<script[\s\S]*?<\/script>/gi, '')
+            .replace(/<style[\s\S]*?<\/style>/gi, '')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        }
+
+        if (text.length > 5000) {
+          text = text.substring(0, 5000) + '\n... (truncated)';
+        }
+
+        return text || '(empty response)';
+      } catch (err) {
+        return `Error: fetch failed: ${err.message}`;
+      }
+    }
+  }
+};
+
+// ============================================================================
+// TOOL EXECUTION
+// ============================================================================
+
+/**
+ * Execute a tool by name with the given arguments.
+ * @param {string} toolName - name of the tool
+ * @param {Object} args - arguments object
+ * @returns {Promise<string>} result string
+ */
+export async function executeTool(toolName, args) {
+  const tool = TOOLS[toolName];
+  if (!tool) {
+    return `Error: unknown tool "${toolName}". Available tools: ${Object.keys(TOOLS).join(', ')}`;
+  }
+
+  try {
+    const result = await tool.execute(args || {});
+    return result;
+  } catch (err) {
+    logger.error('TOOL_ERROR', { tool: toolName, error: err.message });
+    return `Error executing ${toolName}: ${err.message}`;
+  }
 }
 
-export default buildToolRegistry;
+/**
+ * Get the tool descriptions for the system prompt.
+ * @returns {string}
+ */
+export function getToolDescriptions() {
+  return Object.values(TOOLS).map(tool => {
+    const params = Object.entries(tool.params)
+      .map(([name, desc]) => `    - ${name}: ${desc}`)
+      .join('\n');
+    return `<tool name="${tool.name}">\n  Description: ${tool.description}\n  Parameters:\n${params}\n</tool>`;
+  }).join('\n\n');
+}
+
+/**
+ * Get list of available tool names.
+ * @returns {string[]}
+ */
+export function getToolNames() {
+  return Object.keys(TOOLS);
+}
+
+export default {
+  TOOLS,
+  executeTool,
+  getToolDescriptions,
+  getToolNames
+};
