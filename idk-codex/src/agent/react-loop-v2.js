@@ -24,6 +24,7 @@ import { generateCompletion } from '../groq/client.js';
 import { executeTool, getToolDescriptions } from './tools/registry.js';
 import { broadcastProgress, broadcastMessage } from '../api/websocket.js';
 import { addMessage } from '../database/queries.js';
+import { condenseMessages } from './condenser.js';
 import logger from '../utils/logger.js';
 
 const MAX_ITERATIONS = parseInt(process.env.MAX_AGENT_ITERATIONS || '15', 10);
@@ -210,7 +211,13 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
     // Call the LLM
     let llmResponse;
     try {
-      const result = await generateCompletion(messages, {
+      // Condense messages if the conversation is getting too long
+      const condensedMessages = await condenseMessages(messages, {
+        maxTokens: 8000,
+        keepRecent: 10
+      });
+
+      const result = await generateCompletion(condensedMessages, {
         temperature: 0.3,
         maxTokens: MAX_ACTION_TOKENS
       });

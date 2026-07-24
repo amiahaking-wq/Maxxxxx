@@ -23,7 +23,8 @@
 import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import logger from '../utils/logger.js';
+import logger from '../../utils/logger.js';
+import { backupFile, validateAndRevert } from '../guardrails.js';
 
 const SANDBOX = process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
 const MAX_OUTPUT_CHARS = 8000; // Truncate tool output to keep context manageable
@@ -152,9 +153,21 @@ export const TOOLS = {
         const dir = path.dirname(fullPath);
         fs.mkdirSync(dir, { recursive: true });
 
+        // Backup existing file before overwriting (for guardrail revert)
+        if (fs.existsSync(fullPath)) {
+          backupFile(filePath);
+        }
+
         fs.writeFileSync(fullPath, content, 'utf-8');
         const size = Buffer.byteLength(content, 'utf-8');
         logger.info('TOOL:write_file', { path: filePath, size });
+
+        // Guardrail: validate the file after writing
+        const validation = validateAndRevert(filePath);
+        if (!validation.valid && validation.reverted) {
+          return `Warning: ${validation.error}`;
+        }
+
         return `Successfully wrote ${size} bytes to ${filePath}`;
       } catch (err) {
         return `Error writing file: ${err.message}`;
@@ -217,9 +230,20 @@ export const TOOLS = {
 
         // Replace
         const newContent = content.replace(oldText, newText);
+
+        // Backup before writing (for guardrail revert)
+        backupFile(filePath);
+
         fs.writeFileSync(fullPath, newContent, 'utf-8');
 
         logger.info('TOOL:edit_file', { path: filePath });
+
+        // Guardrail: validate the file after editing
+        const validation = validateAndRevert(filePath);
+        if (!validation.valid && validation.reverted) {
+          return `Warning: ${validation.error}`;
+        }
+
         return `Successfully edited ${filePath} (replaced ${oldText.split('\n').length} line(s))`;
       } catch (err) {
         return `Error editing file: ${err.message}`;
