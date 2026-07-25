@@ -5,7 +5,6 @@ import {
   useState,
   type ChangeEvent as ReactChangeEvent,
   type FormEvent as ReactFormEvent,
-  type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
 } from 'react';
 import { io, type Socket } from 'socket.io-client';
@@ -14,6 +13,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import {
   Bot,
   Brain,
+  Camera,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -22,16 +22,17 @@ import {
   Download,
   File as FileIcon,
   Folder,
+  Image as ImageIcon,
   Loader2,
   Menu,
   MessageSquare,
-  Paperclip,
   Plus,
   RefreshCw,
   Search,
   Send,
   Server,
   Settings,
+  Square,
   Terminal as TerminalIcon,
   Trash2,
   User,
@@ -389,6 +390,8 @@ export default function App() {
   // Image upload state
   const [pendingImage, setPendingImage] = useState<MessageImage | null>(null);
   const [uploadingImage, setUploadingImage] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadFileSize, setUploadFileSize] = useState(0);
 
   // Connection status (finer-grained than `connected`)
   const [connectionStatus, setConnectionStatus] =
@@ -408,9 +411,11 @@ export default function App() {
   const fitRef = useRef<FitAddon | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const galleryInputRef = useRef<HTMLInputElement>(null);
   const activeConversationIdRef = useRef<string | null>(null);
   const previousConversationIdRef = useRef<string | null>(null);
+  const cancelledRef = useRef(false);
 
   // Derived
   const filteredConversations = useMemo(() => {
@@ -572,6 +577,21 @@ export default function App() {
       if (data.sessionId !== activeConversationIdRef.current) return;
       const content = data.content || '';
       if (!content) return;
+      // Push notification when the app is in the background
+      if (
+        document.hidden &&
+        'Notification' in window &&
+        Notification.permission === 'granted'
+      ) {
+        try {
+          new Notification('MAX', {
+            body: content.substring(0, 100),
+            icon: '/manifest.json',
+          });
+        } catch {
+          // ignore notification errors
+        }
+      }
       setMessages((prev) => {
         const last = prev[prev.length - 1];
         if (last && last.role === 'assistant' && last.content === content) {
@@ -638,6 +658,18 @@ export default function App() {
 
     // Load conversations list
     void refreshConversations();
+
+    // Request notification permission for PWA background alerts
+    if ('Notification' in window && Notification.permission === 'default') {
+      void Notification.requestPermission();
+    }
+
+    // Register service worker for PWA / background notifications
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {
+        // ignore registration errors (non-PWA environment)
+      });
+    }
 
     return () => {
       s.close();
@@ -876,6 +908,7 @@ export default function App() {
   };
 
   const sendMessage = async (convId: string, text: string, image?: MessageImage) => {
+    cancelledRef.current = false;
     const userMsg: ConversationMessage = {
       id: `user-${Date.now()}`,
       role: 'user',
@@ -965,37 +998,82 @@ export default function App() {
     await sendMessage(convId, text || '(image)', image ?? undefined);
   };
 
-  const handleImageSelect = async (e: ReactChangeEvent<HTMLInputElement>) => {
+  const handleImageSelect = (e: ReactChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = ''; // reset so the same file can be re-selected
     if (!file) return;
     setUploadingImage(true);
+    setUploadProgress(0);
+    setUploadFileSize(file.size);
     setError(null);
-    try {
-      const base64 = await fileToBase64(file);
-      const res = await fetch(`${API_BASE}/api/upload`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+
+    void (async () => {
+      try {
+        const base64 = await fileToBase64(file);
+        const body = JSON.stringify({
           image: base64,
           filename: file.name,
           mimeType: file.type || 'image/octet-stream',
-        }),
-      });
-      if (!res.ok) throw new Error('Upload failed');
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Upload failed');
-      setPendingImage({
-        filename: data.filename || file.name,
-        path: data.path,
-        url: data.url,
-        mimeType: file.type || 'image/octet-stream',
-      });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to upload image');
-    } finally {
-      setUploadingImage(false);
-    }
+        });
+
+        await new Promise<void>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.upload.addEventListener('progress', (ev) => {
+            if (ev.lengthComputable) {
+              const percent = Math.round((ev.loaded / ev.total) * 100);
+              setUploadProgress(percent);
+            }
+          });
+          xhr.addEventListener('load', () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              try {
+                const data = JSON.parse(xhr.responseText) as {
+                  success?: boolean;
+                  error?: string;
+                  filename?: string;
+                  path?: string;
+                  url?: string;
+                };
+                if (!data.success) {
+                  reject(new Error(data.error || 'Upload failed'));
+                  return;
+                }
+                setPendingImage({
+                  filename: data.filename || file.name,
+                  path: data.path || '',
+                  url: data.url || '',
+                  mimeType: file.type || 'image/octet-stream',
+                });
+                resolve();
+              } catch {
+                reject(new Error('Invalid response from server'));
+              }
+            } else {
+              let msg = `Upload failed (${xhr.status})`;
+              try {
+                const errBody = JSON.parse(xhr.responseText) as { error?: string };
+                if (errBody.error) msg = errBody.error;
+              } catch {
+                if (xhr.responseText) msg = xhr.responseText.slice(0, 200);
+              }
+              reject(new Error(msg));
+            }
+          });
+          xhr.addEventListener('error', () =>
+            reject(new Error('Network error during upload')),
+          );
+          xhr.addEventListener('abort', () => reject(new Error('Upload aborted')));
+          xhr.open('POST', `${API_BASE}/api/upload`);
+          xhr.setRequestHeader('Content-Type', 'application/json');
+          xhr.send(body);
+        });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to upload image');
+      } finally {
+        setUploadingImage(false);
+        setUploadProgress(0);
+      }
+    })();
   };
 
   const handleSuggestionClick = (suggestion: string) => {
@@ -1003,11 +1081,19 @@ export default function App() {
     textareaRef.current?.focus();
   };
 
-  const handleKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      void handleSend();
-    }
+  const handleStop = () => {
+    cancelledRef.current = true;
+    setIsLoading(false);
+    setAgentRun((prev) => (prev ? { ...prev, active: false } : prev));
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `cancelled-${Date.now()}`,
+        role: 'assistant',
+        content: 'Cancelled by user',
+        createdAt: new Date().toISOString(),
+      },
+    ]);
   };
 
   const handleTerminalSubmit = (e: ReactFormEvent) => {
@@ -1442,12 +1528,28 @@ export default function App() {
             {(pendingImage || uploadingImage) && (
               <div className="mb-2 flex items-center gap-2 rounded-xl border border-[#1f1f2e] bg-[#13131f] p-2">
                 {uploadingImage ? (
-                  <>
+                  <div className="flex min-w-0 flex-1 items-center gap-3">
                     <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-[#1e293b]">
                       <Loader2 size={16} className="animate-spin text-indigo-400" />
                     </div>
-                    <span className="text-xs text-[#94a3b8]">Uploading image…</span>
-                  </>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs text-[#94a3b8]">Uploading image…</span>
+                        <span className="text-[10px] text-[#64748b]">
+                          {formatFileSize(uploadFileSize)}
+                        </span>
+                      </div>
+                      <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-[#1e293b]">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all duration-200"
+                          style={{ width: `${uploadProgress}%` }}
+                        />
+                      </div>
+                      <div className="mt-1 text-[10px] text-[#64748b]">
+                        {uploadProgress}%
+                      </div>
+                    </div>
+                  </div>
                 ) : pendingImage ? (
                   <>
                     <img
@@ -1471,21 +1573,37 @@ export default function App() {
             )}
             <div className="flex items-end gap-2 rounded-2xl border border-[#1f1f2e] bg-[#13131f] px-3 py-2 transition-colors focus-within:border-indigo-500/50">
               <input
-                ref={fileInputRef}
+                ref={cameraInputRef}
                 type="file"
                 accept="image/*"
                 capture="environment"
-                onChange={(e) => void handleImageSelect(e)}
+                onChange={(e) => handleImageSelect(e)}
+                className="hidden"
+              />
+              <input
+                ref={galleryInputRef}
+                type="file"
+                accept="image/*"
+                onChange={(e) => handleImageSelect(e)}
                 className="hidden"
               />
               <button
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => cameraInputRef.current?.click()}
                 disabled={uploadingImage || isLoading}
                 className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-[#94a3b8] transition-colors hover:bg-[#1e293b] hover:text-indigo-400 disabled:cursor-not-allowed disabled:opacity-40"
-                aria-label="Attach image"
-                title="Attach image (camera / gallery)"
+                aria-label="Take photo"
+                title="Camera"
               >
-                <Paperclip size={17} />
+                <Camera size={17} />
+              </button>
+              <button
+                onClick={() => galleryInputRef.current?.click()}
+                disabled={uploadingImage || isLoading}
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-[#94a3b8] transition-colors hover:bg-[#1e293b] hover:text-indigo-400 disabled:cursor-not-allowed disabled:opacity-40"
+                aria-label="Pick image from gallery"
+                title="Gallery"
+              >
+                <ImageIcon size={17} />
               </button>
               <textarea
                 ref={textareaRef}
@@ -1493,7 +1611,6 @@ export default function App() {
                 onChange={(e: ReactChangeEvent<HTMLTextAreaElement>) =>
                   setInput(e.target.value)
                 }
-                onKeyDown={handleKeyDown}
                 placeholder="Ask MAX to build something…"
                 rows={1}
                 disabled={isLoading}
@@ -1501,18 +1618,25 @@ export default function App() {
                 autoComplete="off"
                 spellCheck={false}
               />
-              <button
-                onClick={() => void handleSend()}
-                disabled={isLoading || (!input.trim() && !pendingImage)}
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/30 transition-all hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
-                aria-label="Send message"
-              >
-                {isLoading ? (
-                  <Loader2 size={17} className="animate-spin" />
-                ) : (
+              {isLoading ? (
+                <button
+                  onClick={handleStop}
+                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-500 text-white shadow-lg shadow-red-500/30 transition-all hover:bg-red-600 active:scale-[0.98]"
+                  aria-label="Stop generation"
+                  title="Stop"
+                >
+                  <Square size={16} fill="currentColor" />
+                </button>
+              ) : (
+                <button
+                  onClick={() => void handleSend()}
+                  disabled={!input.trim() && !pendingImage}
+                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/30 transition-all hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
+                  aria-label="Send message"
+                >
                   <Send size={17} />
-                )}
-              </button>
+                </button>
+              )}
             </div>
             <div className="mt-1.5 flex items-center justify-between px-1 text-[10px] text-[#64748b]">
               <span className="truncate">
@@ -1532,12 +1656,10 @@ export default function App() {
                 )}
               </span>
               <span className="hidden shrink-0 items-center gap-1 sm:flex">
-                <kbd className="rounded border border-[#1f1f2e] px-1 py-0.5">Enter</kbd>
-                to send ·
                 <kbd className="rounded border border-[#1f1f2e] px-1 py-0.5">
-                  Shift+Enter
+                  Send
                 </kbd>
-                for newline
+                to submit · Enter for newline
               </span>
             </div>
           </div>

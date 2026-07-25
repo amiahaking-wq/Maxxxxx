@@ -36,7 +36,7 @@ class LLMAdapter {
 
     logger.info('Initializing LLM Adapter');
 
-    const priorityList = (process.env.LLM_PROVIDER_PRIORITY || 'ollama,openai,openai-compatible,groq,anthropic,gemini,phone,echo')
+    const priorityList = (process.env.LLM_PROVIDER_PRIORITY || 'openai-compatible,ollama,openai,groq,anthropic,gemini,phone,echo')
       .split(',')
       .map(p => p.trim())
       .filter(p => p);
