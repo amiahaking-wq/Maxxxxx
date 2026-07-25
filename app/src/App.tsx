@@ -19,10 +19,15 @@ import {
   ChevronRight,
   ChevronUp,
   Circle,
+  Download,
+  File as FileIcon,
+  Folder,
   Loader2,
   Menu,
   MessageSquare,
+  Paperclip,
   Plus,
+  RefreshCw,
   Search,
   Send,
   Server,
@@ -42,6 +47,7 @@ import '@xterm/xterm/css/xterm.css';
 const API_BASE = '';
 const USER_ID = 'default-user';
 const MAX_ITERATIONS_DEFAULT = 15;
+const MAX_SELECTED_MODEL_KEY = 'max-selected-model';
 
 const SUGGESTIONS = [
   'Create a REST API with Express',
@@ -104,12 +110,20 @@ interface MessageMetadata {
   filesModified?: string[];
 }
 
+interface MessageImage {
+  filename: string;
+  path: string;
+  url: string;
+  mimeType: string;
+}
+
 interface ConversationMessage {
   id: string;
   role: 'user' | 'assistant' | 'system' | 'tool';
   content: string;
   metadata?: MessageMetadata | null;
   createdAt: string;
+  images?: MessageImage[];
 }
 
 interface ConversationDetail extends ConversationSummary {
@@ -139,6 +153,7 @@ interface MessagePayload {
   type?: string;
   id?: string;
   timestamp?: string;
+  images?: MessageImage[];
 }
 
 interface TerminalOutputPayload {
@@ -182,6 +197,23 @@ interface AgentRunState {
   startedAt: number;
 }
 
+interface FileEntry {
+  name: string;
+  type: 'file' | 'directory';
+  size?: number;
+}
+
+interface FileViewerState {
+  path: string;
+  content: string;
+  size?: number;
+  loading: boolean;
+}
+
+type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
+
+type SidebarTab = 'chats' | 'files';
+
 // ============================================================================
 // HELPERS
 // ============================================================================
@@ -216,6 +248,26 @@ function formatArgs(args?: Record<string, unknown>): string {
       return `${k}: ${truncated}`;
     })
     .join(' · ');
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      const commaIdx = result.indexOf(',');
+      resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
+    };
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
 }
 
 function applyProgress(prev: AgentRunState, data: ProgressPayload): AgentRunState {
@@ -301,11 +353,17 @@ function applyProgress(prev: AgentRunState, data: ProgressPayload): AgentRunStat
 export default function App() {
   // Socket + connection state
   const [socket, setSocket] = useState<Socket | null>(null);
-  const [connected, setConnected] = useState(false);
 
   // Config
   const [models, setModels] = useState<ModelOption[]>([]);
-  const [selectedModel, setSelectedModel] = useState('');
+  const [selectedModel, setSelectedModel] = useState(() => {
+    if (typeof window === 'undefined') return '';
+    try {
+      return window.localStorage.getItem(MAX_SELECTED_MODEL_KEY) || '';
+    } catch {
+      return '';
+    }
+  });
   const [config, setConfig] = useState<AppConfig | null>(null);
 
   // Conversations
@@ -328,6 +386,21 @@ export default function App() {
   const [terminalInput, setTerminalInput] = useState('');
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
 
+  // Image upload state
+  const [pendingImage, setPendingImage] = useState<MessageImage | null>(null);
+  const [uploadingImage, setUploadingImage] = useState(false);
+
+  // Connection status (finer-grained than `connected`)
+  const [connectionStatus, setConnectionStatus] =
+    useState<ConnectionStatus>('connecting');
+
+  // File browser state
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('chats');
+  const [files, setFiles] = useState<FileEntry[]>([]);
+  const [filesLoading, setFilesLoading] = useState(false);
+  const [filesError, setFilesError] = useState<string | null>(null);
+  const [fileViewer, setFileViewer] = useState<FileViewerState | null>(null);
+
   // Refs
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const terminalContainerRef = useRef<HTMLDivElement>(null);
@@ -335,6 +408,7 @@ export default function App() {
   const fitRef = useRef<FitAddon | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const activeConversationIdRef = useRef<string | null>(null);
   const previousConversationIdRef = useRef<string | null>(null);
 
@@ -380,15 +454,109 @@ export default function App() {
     }
   };
 
+  const loadFiles = async () => {
+    setFilesLoading(true);
+    setFilesError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/files/sandbox/`);
+      if (!res.ok) throw new Error('Failed to load files');
+      const data = await res.json();
+      if (!data.success) throw new Error('Failed to load files');
+      const rawEntries: Array<{ name: string; type: string; size?: number }> =
+        data.entries || [];
+      const entries: FileEntry[] = rawEntries.map((e) => ({
+        name: e.name,
+        type: e.type === 'directory' ? 'directory' : 'file',
+        size: typeof e.size === 'number' ? e.size : undefined,
+      }));
+      entries.sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+      setFiles(entries);
+    } catch (err) {
+      setFilesError(err instanceof Error ? err.message : 'Failed to load files');
+    } finally {
+      setFilesLoading(false);
+    }
+  };
+
+  const viewFile = async (entry: FileEntry) => {
+    if (entry.type !== 'file') return;
+    setFileViewer({ path: entry.name, content: '', loading: true });
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/files/sandbox/${encodeURIComponent(entry.name)}`,
+      );
+      if (!res.ok) throw new Error('Failed to load file');
+      const data = await res.json();
+      if (!data.success) throw new Error('Failed to load file');
+      const content =
+        typeof data.content === 'string'
+          ? data.content
+          : JSON.stringify(data.content, null, 2);
+      setFileViewer({
+        path: entry.name,
+        content,
+        size: typeof data.size === 'number' ? data.size : undefined,
+        loading: false,
+      });
+    } catch (err) {
+      setFileViewer({
+        path: entry.name,
+        content: err instanceof Error ? err.message : 'Failed to load file',
+        loading: false,
+      });
+    }
+  };
+
+  const downloadFile = (path: string) => {
+    const url = `${API_BASE}/api/files/download/${encodeURIComponent(path)}`;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = path;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
   useEffect(() => {
-    const s = io({ transports: ['websocket', 'polling'] });
+    const s = io({ transports: ['polling', 'websocket'] });
     setSocket(s);
 
-    s.on('connect', () => setConnected(true));
-    s.on('disconnect', () => setConnected(false));
+    s.on('connect', () => {
+      setConnectionStatus('connected');
+    });
+    s.on('disconnect', () => {
+      setConnectionStatus('disconnected');
+    });
+    s.on('connect_error', () => {
+      setConnectionStatus('reconnecting');
+    });
 
     s.on('progress', (data: ProgressPayload) => {
       if (!data.sessionId) return;
+      // When the task completes, push the summary as a regular assistant message
+      if (data.status === 'complete' && data.summary) {
+        const summary = data.summary;
+        if (data.sessionId === activeConversationIdRef.current) {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last && last.role === 'assistant' && last.content === summary) {
+              return prev; // avoid duplicate if 'message' event already added it
+            }
+            return [
+              ...prev,
+              {
+                id: `assistant-summary-${data.sessionId}-${Date.now()}`,
+                role: 'assistant' as const,
+                content: summary,
+                createdAt: new Date().toISOString(),
+              },
+            ];
+          });
+        }
+      }
       setAgentRun((prev) => {
         if (!prev || prev.conversationId !== data.sessionId) return prev;
         return applyProgress(prev, data);
@@ -403,16 +571,24 @@ export default function App() {
       if (!data.sessionId || data.role !== 'assistant') return;
       if (data.sessionId !== activeConversationIdRef.current) return;
       const content = data.content || '';
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: data.id || `assistant-${Date.now()}`,
-          role: 'assistant',
-          content,
-          metadata: data.type ? { type: data.type } : null,
-          createdAt: data.timestamp || new Date().toISOString(),
-        },
-      ]);
+      if (!content) return;
+      setMessages((prev) => {
+        const last = prev[prev.length - 1];
+        if (last && last.role === 'assistant' && last.content === content) {
+          return prev; // avoid duplicate if 'progress' complete already added it
+        }
+        return [
+          ...prev,
+          {
+            id: data.id || `assistant-${Date.now()}`,
+            role: 'assistant',
+            content,
+            metadata: data.type ? { type: data.type } : null,
+            createdAt: data.timestamp || new Date().toISOString(),
+            images: data.images,
+          },
+        ];
+      });
       setIsLoading(false);
     });
 
@@ -443,7 +619,10 @@ export default function App() {
         const list = data.models || [];
         setModels(list);
         if (list.length > 0) {
-          setSelectedModel((prev) => prev || list[0].id);
+          setSelectedModel((prev) => {
+            if (prev && list.some((m) => m.id === prev)) return prev;
+            return list[0].id;
+          });
         }
       })
       .catch(() => setModels([]));
@@ -453,9 +632,7 @@ export default function App() {
       .then((r) => r.json())
       .then((data: AppConfig) => {
         setConfig(data);
-        if (data.model) {
-          setSelectedModel(data.model);
-        }
+        setSelectedModel((prev) => prev || data.model || '');
       })
       .catch(() => null);
 
@@ -508,6 +685,19 @@ export default function App() {
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [modelMenuOpen]);
+
+  // Load sandbox files when the Files tab is first opened
+  useEffect(() => {
+    if (
+      sidebarTab === 'files' &&
+      files.length === 0 &&
+      !filesLoading &&
+      !filesError
+    ) {
+      void loadFiles();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sidebarTab]);
 
   // ------------------------------------------------------------------------
   // TERMINAL INITIALIZATION
@@ -685,12 +875,13 @@ export default function App() {
     }
   };
 
-  const sendMessage = async (convId: string, text: string) => {
+  const sendMessage = async (convId: string, text: string, image?: MessageImage) => {
     const userMsg: ConversationMessage = {
       id: `user-${Date.now()}`,
       role: 'user',
       content: text,
       createdAt: new Date().toISOString(),
+      images: image ? [image] : undefined,
     };
     setMessages((prev) => [...prev, userMsg]);
 
@@ -707,14 +898,23 @@ export default function App() {
     socket?.emit('subscribe', convId);
 
     try {
+      const payload: Record<string, unknown> = {
+        message: text,
+        runAgent: true,
+        userId: USER_ID,
+      };
+      if (image) {
+        payload.image = {
+          filename: image.filename,
+          path: image.path,
+          url: image.url,
+          mimeType: image.mimeType,
+        };
+      }
       const res = await fetch(`${API_BASE}/api/conversations/${convId}/messages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: text,
-          runAgent: true,
-          userId: USER_ID,
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!res.ok) {
@@ -748,8 +948,10 @@ export default function App() {
 
   const handleSend = async () => {
     const text = input.trim();
-    if (!text || isLoading) return;
+    const image = pendingImage;
+    if ((!text && !image) || isLoading) return;
     setInput('');
+    setPendingImage(null);
 
     let convId = activeConversationId;
     if (!convId) {
@@ -760,7 +962,40 @@ export default function App() {
         return;
       }
     }
-    await sendMessage(convId, text);
+    await sendMessage(convId, text || '(image)', image ?? undefined);
+  };
+
+  const handleImageSelect = async (e: ReactChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // reset so the same file can be re-selected
+    if (!file) return;
+    setUploadingImage(true);
+    setError(null);
+    try {
+      const base64 = await fileToBase64(file);
+      const res = await fetch(`${API_BASE}/api/upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image: base64,
+          filename: file.name,
+          mimeType: file.type || 'image/octet-stream',
+        }),
+      });
+      if (!res.ok) throw new Error('Upload failed');
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Upload failed');
+      setPendingImage({
+        filename: data.filename || file.name,
+        path: data.path,
+        url: data.url,
+        mimeType: file.type || 'image/octet-stream',
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to upload image');
+    } finally {
+      setUploadingImage(false);
+    }
   };
 
   const handleSuggestionClick = (suggestion: string) => {
@@ -844,107 +1079,148 @@ export default function App() {
           </button>
         </div>
 
-        {/* Search */}
-        <div className="shrink-0 px-3 pb-2">
-          <div className="flex items-center gap-2 rounded-lg border border-[#1f1f2e] bg-[#13131f] px-3 py-2 focus-within:border-indigo-500/50">
-            <Search size={14} className="shrink-0 text-[#64748b]" />
-            <input
-              value={searchQuery}
-              onChange={(e: ReactChangeEvent<HTMLInputElement>) =>
-                setSearchQuery(e.target.value)
-              }
-              placeholder="Search conversations"
-              className="min-w-0 flex-1 bg-transparent text-base text-[#f1f5f9] outline-none placeholder:text-[#64748b] md:text-sm"
-              autoComplete="off"
-            />
-            {searchQuery && (
-              <button
-                onClick={() => setSearchQuery('')}
-                className="shrink-0 text-[#64748b] hover:text-white"
-                aria-label="Clear search"
-              >
-                <X size={14} />
-              </button>
-            )}
+        {/* Search (chats tab only) */}
+        {sidebarTab === 'chats' && (
+          <div className="shrink-0 px-3 pb-2">
+            <div className="flex items-center gap-2 rounded-lg border border-[#1f1f2e] bg-[#13131f] px-3 py-2 focus-within:border-indigo-500/50">
+              <Search size={14} className="shrink-0 text-[#64748b]" />
+              <input
+                value={searchQuery}
+                onChange={(e: ReactChangeEvent<HTMLInputElement>) =>
+                  setSearchQuery(e.target.value)
+                }
+                placeholder="Search conversations"
+                className="min-w-0 flex-1 bg-transparent text-base text-[#f1f5f9] outline-none placeholder:text-[#64748b] md:text-sm"
+                autoComplete="off"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="shrink-0 text-[#64748b] hover:text-white"
+                  aria-label="Clear search"
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </div>
           </div>
+        )}
+
+        {/* Tabs */}
+        <div className="flex shrink-0 gap-1 px-3 pb-2">
+          <button
+            onClick={() => setSidebarTab('chats')}
+            className={cn(
+              'flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors',
+              sidebarTab === 'chats'
+                ? 'bg-[#1e293b] text-white'
+                : 'text-[#94a3b8] hover:bg-[#13131f] hover:text-white',
+            )}
+          >
+            <MessageSquare size={13} />
+            Chats
+          </button>
+          <button
+            onClick={() => setSidebarTab('files')}
+            className={cn(
+              'flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors',
+              sidebarTab === 'files'
+                ? 'bg-[#1e293b] text-white'
+                : 'text-[#94a3b8] hover:bg-[#13131f] hover:text-white',
+            )}
+          >
+            <Folder size={13} />
+            Files
+          </button>
         </div>
 
-        {/* Conversation list */}
+        {/* Tab content */}
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-          {loadingConversations ? (
-            <div className="flex items-center justify-center py-8">
-              <Loader2 size={18} className="animate-spin text-[#64748b]" />
-            </div>
-          ) : filteredConversations.length === 0 ? (
-            <div className="px-3 py-8 text-center text-xs text-[#64748b]">
-              {searchQuery ? 'No conversations match' : 'No conversations yet'}
-            </div>
-          ) : (
-            <ul className="space-y-1">
-              {filteredConversations.map((conv) => {
-                const isActive = conv.id === activeConversationId;
-                return (
-                  <li key={conv.id}>
-                    <button
-                      onClick={() => void handleSelectConversation(conv.id)}
-                      className={cn(
-                        'group flex w-full items-start gap-2 rounded-lg px-3 py-2.5 text-left transition-colors',
-                        isActive
-                          ? 'bg-gradient-to-r from-indigo-500/15 to-purple-500/10 text-white'
-                          : 'text-[#cbd5e1] hover:bg-[#13131f]',
-                      )}
-                    >
-                      <MessageSquare
-                        size={14}
+          {sidebarTab === 'chats' ? (
+            loadingConversations ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 size={18} className="animate-spin text-[#64748b]" />
+              </div>
+            ) : filteredConversations.length === 0 ? (
+              <div className="px-3 py-8 text-center text-xs text-[#64748b]">
+                {searchQuery ? 'No conversations match' : 'No conversations yet'}
+              </div>
+            ) : (
+              <ul className="space-y-1">
+                {filteredConversations.map((conv) => {
+                  const isActive = conv.id === activeConversationId;
+                  return (
+                    <li key={conv.id}>
+                      <button
+                        onClick={() => void handleSelectConversation(conv.id)}
                         className={cn(
-                          'mt-0.5 shrink-0',
-                          isActive ? 'text-indigo-400' : 'text-[#64748b]',
+                          'group flex w-full items-start gap-2 rounded-lg px-3 py-2.5 text-left transition-colors',
+                          isActive
+                            ? 'bg-gradient-to-r from-indigo-500/15 to-purple-500/10 text-white'
+                            : 'text-[#cbd5e1] hover:bg-[#13131f]',
                         )}
-                      />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center justify-between gap-2">
-                          <span
-                            className={cn(
-                              'truncate text-sm',
-                              isActive && 'font-medium text-white',
-                            )}
-                          >
-                            {conv.title || 'New Conversation'}
-                          </span>
-                          <span className="shrink-0 text-[10px] text-[#64748b]">
-                            {formatRelativeTime(conv.updatedAt)}
-                          </span>
+                      >
+                        <MessageSquare
+                          size={14}
+                          className={cn(
+                            'mt-0.5 shrink-0',
+                            isActive ? 'text-indigo-400' : 'text-[#64748b]',
+                          )}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span
+                              className={cn(
+                                'truncate text-sm',
+                                isActive && 'font-medium text-white',
+                              )}
+                            >
+                              {conv.title || 'New Conversation'}
+                            </span>
+                            <span className="shrink-0 text-[10px] text-[#64748b]">
+                              {formatRelativeTime(conv.updatedAt)}
+                            </span>
+                          </div>
+                          {conv.preview && (
+                            <p className="mt-0.5 truncate text-xs text-[#64748b]">
+                              {conv.preview}
+                            </p>
+                          )}
                         </div>
-                        {conv.preview && (
-                          <p className="mt-0.5 truncate text-xs text-[#64748b]">
-                            {conv.preview}
-                          </p>
-                        )}
-                      </div>
-                      <span
-                        role="button"
-                        tabIndex={0}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleDeleteConversation(conv.id);
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault();
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          onClick={(e) => {
                             e.stopPropagation();
                             void handleDeleteConversation(conv.id);
-                          }
-                        }}
-                        className="shrink-0 rounded p-1 text-[#64748b] opacity-0 transition-opacity hover:bg-red-500/10 hover:text-red-400 focus:opacity-100 group-hover:opacity-100"
-                        aria-label="Delete conversation"
-                      >
-                        <Trash2 size={13} />
-                      </span>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              void handleDeleteConversation(conv.id);
+                            }
+                          }}
+                          className="shrink-0 rounded p-1 text-[#64748b] opacity-0 transition-opacity hover:bg-red-500/10 hover:text-red-400 focus:opacity-100 group-hover:opacity-100"
+                          aria-label="Delete conversation"
+                        >
+                          <Trash2 size={13} />
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )
+          ) : (
+            <FileBrowser
+              files={files}
+              loading={filesLoading}
+              error={filesError}
+              onRefresh={loadFiles}
+              onView={viewFile}
+              onDownload={(entry) => downloadFile(entry.name)}
+            />
           )}
         </div>
 
@@ -955,12 +1231,20 @@ export default function App() {
               <Circle
                 size={8}
                 className={cn(
-                  connected
+                  connectionStatus === 'connected'
                     ? 'fill-emerald-500 text-emerald-500'
-                    : 'fill-red-500 text-red-500',
+                    : connectionStatus === 'reconnecting'
+                      ? 'fill-amber-500 text-amber-500'
+                      : 'fill-red-500 text-red-500',
                 )}
               />
-              <span>{connected ? 'Connected' : 'Offline'}</span>
+              <span>
+                {connectionStatus === 'connected'
+                  ? 'Connected'
+                  : connectionStatus === 'reconnecting'
+                    ? 'Reconnecting…'
+                    : 'Disconnected'}
+              </span>
             </div>
             <span className="flex items-center gap-1">
               <Server size={11} />
@@ -1035,6 +1319,14 @@ export default function App() {
                             key={m.id}
                             onClick={() => {
                               setSelectedModel(m.id);
+                              try {
+                                window.localStorage.setItem(
+                                  MAX_SELECTED_MODEL_KEY,
+                                  m.id,
+                                );
+                              } catch {
+                                // ignore storage errors
+                              }
                               setModelMenuOpen(false);
                             }}
                             className={cn(
@@ -1146,7 +1438,55 @@ export default function App() {
         {/* Input bar */}
         <footer className="relative shrink-0 border-t border-[#1f1f2e] bg-[#0f0f1a] px-3 py-2.5 md:px-4 md:py-3">
           <div className="mx-auto w-full max-w-3xl">
+            {/* Pending image preview / uploading state */}
+            {(pendingImage || uploadingImage) && (
+              <div className="mb-2 flex items-center gap-2 rounded-xl border border-[#1f1f2e] bg-[#13131f] p-2">
+                {uploadingImage ? (
+                  <>
+                    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-[#1e293b]">
+                      <Loader2 size={16} className="animate-spin text-indigo-400" />
+                    </div>
+                    <span className="text-xs text-[#94a3b8]">Uploading image…</span>
+                  </>
+                ) : pendingImage ? (
+                  <>
+                    <img
+                      src={pendingImage.url}
+                      alt={pendingImage.filename}
+                      className="h-12 w-12 shrink-0 rounded-lg object-cover"
+                    />
+                    <span className="min-w-0 flex-1 truncate text-xs text-[#94a3b8]">
+                      {pendingImage.filename}
+                    </span>
+                    <button
+                      onClick={() => setPendingImage(null)}
+                      className="shrink-0 rounded p-1 text-[#64748b] transition-colors hover:bg-[#1e293b] hover:text-red-400"
+                      aria-label="Remove image"
+                    >
+                      <X size={14} />
+                    </button>
+                  </>
+                ) : null}
+              </div>
+            )}
             <div className="flex items-end gap-2 rounded-2xl border border-[#1f1f2e] bg-[#13131f] px-3 py-2 transition-colors focus-within:border-indigo-500/50">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                onChange={(e) => void handleImageSelect(e)}
+                className="hidden"
+              />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploadingImage || isLoading}
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-[#94a3b8] transition-colors hover:bg-[#1e293b] hover:text-indigo-400 disabled:cursor-not-allowed disabled:opacity-40"
+                aria-label="Attach image"
+                title="Attach image (camera / gallery)"
+              >
+                <Paperclip size={17} />
+              </button>
               <textarea
                 ref={textareaRef}
                 value={input}
@@ -1163,7 +1503,7 @@ export default function App() {
               />
               <button
                 onClick={() => void handleSend()}
-                disabled={isLoading || !input.trim()}
+                disabled={isLoading || (!input.trim() && !pendingImage)}
                 className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/30 transition-all hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
                 aria-label="Send message"
               >
@@ -1203,6 +1543,61 @@ export default function App() {
           </div>
         </footer>
       </div>
+
+      {/* File viewer modal */}
+      {fileViewer && (
+        <div
+          className="max-fade-in fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+          onClick={() => setFileViewer(null)}
+        >
+          <div
+            className="flex max-h-[80vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[#1f1f2e] bg-[#13131f] shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-2 border-b border-[#1f1f2e] px-4 py-3">
+              <div className="flex min-w-0 items-center gap-2">
+                <FileIcon size={16} className="shrink-0 text-indigo-400" />
+                <span className="truncate text-sm font-medium text-white">
+                  {fileViewer.path}
+                </span>
+                {fileViewer.size !== undefined && (
+                  <span className="shrink-0 text-[10px] text-[#64748b]">
+                    {formatFileSize(fileViewer.size)}
+                  </span>
+                )}
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                <button
+                  onClick={() => downloadFile(fileViewer.path)}
+                  className="rounded-lg p-1.5 text-[#94a3b8] transition-colors hover:bg-[#1e293b] hover:text-indigo-400"
+                  aria-label="Download file"
+                  title="Download"
+                >
+                  <Download size={16} />
+                </button>
+                <button
+                  onClick={() => setFileViewer(null)}
+                  className="rounded-lg p-1.5 text-[#94a3b8] transition-colors hover:bg-[#1e293b] hover:text-white"
+                  aria-label="Close file viewer"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto p-4">
+              {fileViewer.loading ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 size={20} className="animate-spin text-[#64748b]" />
+                </div>
+              ) : (
+                <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-[#cbd5e1]">
+                  {fileViewer.content}
+                </pre>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Error toast */}
       {error && (
@@ -1273,6 +1668,7 @@ function EmptyState({
 function MessageBubble({ message }: { message: ConversationMessage }) {
   const isUser = message.role === 'user';
   const isError = message.content.startsWith('⚠️');
+  const hasImages = Boolean(message.images && message.images.length > 0);
 
   return (
     <div
@@ -1288,7 +1684,7 @@ function MessageBubble({ message }: { message: ConversationMessage }) {
       )}
       <div
         className={cn(
-          'max-w-[85%] whitespace-pre-wrap break-words rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed md:max-w-[75%]',
+          'max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed md:max-w-[75%]',
           isUser
             ? 'rounded-br-md bg-gradient-to-br from-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/20'
             : isError
@@ -1296,7 +1692,27 @@ function MessageBubble({ message }: { message: ConversationMessage }) {
               : 'rounded-bl-md border border-[#1f1f2e] bg-[#13131f] text-[#f1f5f9]',
         )}
       >
-        {message.content}
+        {hasImages && message.images && (
+          <div
+            className={cn(
+              'flex flex-wrap gap-2',
+              message.content && 'mb-2',
+            )}
+          >
+            {message.images.map((img, idx) => (
+              <img
+                key={`${img.filename}-${idx}`}
+                src={img.url}
+                alt={img.filename}
+                className="max-h-48 max-w-full rounded-lg object-cover"
+                loading="lazy"
+              />
+            ))}
+          </div>
+        )}
+        {message.content && (
+          <p className="whitespace-pre-wrap break-words">{message.content}</p>
+        )}
       </div>
       {isUser && (
         <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[#1f1f2e] bg-[#1e293b] md:h-8 md:w-8">
@@ -1373,16 +1789,6 @@ function ReActLoopCard({ run }: { run: AgentRunState }) {
               <IterationCard key={iter.iteration} iteration={iter} />
             ))}
           </div>
-
-          {run.summary && !run.active && (
-            <div className="mt-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3 text-xs text-emerald-100">
-              <div className="mb-1 flex items-center gap-1.5 font-medium">
-                <CheckCircle2 size={12} className="text-emerald-400" />
-                Summary
-              </div>
-              <p className="whitespace-pre-wrap leading-relaxed">{run.summary}</p>
-            </div>
-          )}
         </>
       )}
     </div>
@@ -1584,5 +1990,87 @@ function TerminalDrawer({
         </div>
       )}
     </section>
+  );
+}
+
+function FileBrowser({
+  files,
+  loading,
+  error,
+  onRefresh,
+  onView,
+  onDownload,
+}: {
+  files: FileEntry[];
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+  onView: (entry: FileEntry) => void;
+  onDownload: (entry: FileEntry) => void;
+}) {
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center justify-between px-1 pb-2">
+        <span className="text-xs font-medium text-[#94a3b8]">Sandbox Files</span>
+        <button
+          onClick={onRefresh}
+          disabled={loading}
+          className="rounded p-1 text-[#64748b] transition-colors hover:bg-[#1e293b] hover:text-white disabled:opacity-50"
+          aria-label="Refresh files"
+          title="Refresh"
+        >
+          <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+        </button>
+      </div>
+      {loading ? (
+        <div className="flex items-center justify-center py-8">
+          <Loader2 size={18} className="animate-spin text-[#64748b]" />
+        </div>
+      ) : error ? (
+        <div className="px-3 py-6 text-center text-xs text-red-400">{error}</div>
+      ) : files.length === 0 ? (
+        <div className="px-3 py-8 text-center text-xs text-[#64748b]">
+          No files in sandbox
+        </div>
+      ) : (
+        <ul className="space-y-0.5">
+          {files.map((f) => (
+            <li key={f.name}>
+              <div className="group flex items-center gap-2 rounded-lg px-2 py-2 transition-colors hover:bg-[#13131f]">
+                {f.type === 'directory' ? (
+                  <Folder size={14} className="shrink-0 text-amber-400" />
+                ) : (
+                  <FileIcon size={14} className="shrink-0 text-[#64748b]" />
+                )}
+                <button
+                  onClick={() => onView(f)}
+                  disabled={f.type !== 'file'}
+                  className="min-w-0 flex-1 text-left disabled:cursor-default"
+                >
+                  <span className="block truncate text-xs text-[#cbd5e1]">
+                    {f.name}
+                  </span>
+                  {f.size !== undefined && (
+                    <span className="text-[10px] text-[#64748b]">
+                      {formatFileSize(f.size)}
+                    </span>
+                  )}
+                </button>
+                {f.type === 'file' && (
+                  <button
+                    onClick={() => onDownload(f)}
+                    className="shrink-0 rounded p-1 text-[#64748b] opacity-0 transition-opacity hover:bg-[#1e293b] hover:text-indigo-400 focus:opacity-100 group-hover:opacity-100"
+                    aria-label={`Download ${f.name}`}
+                    title="Download"
+                  >
+                    <Download size={13} />
+                  </button>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }

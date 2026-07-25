@@ -25,6 +25,7 @@ import { executeTool, getToolDescriptions } from './tools/registry.js';
 import { broadcastProgress, broadcastMessage } from '../api/websocket.js';
 import { addConversationMessage } from '../database/conversations.js';
 import { condenseMessages } from './condenser.js';
+import { uploadToSupabase, isSupabaseConfigured } from './supabase-storage.js';
 import logger from '../utils/logger.js';
 
 const MAX_ITERATIONS = parseInt(process.env.MAX_AGENT_ITERATIONS || '15', 10);
@@ -332,8 +333,23 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
   broadcastMessage(sessionId, {
     role: 'assistant',
     content: finalSummary,
-    type: 'task_complete'
+    type: 'task_complete',
+    filesModified: Array.from(filesModified)
   });
+
+  // Upload modified files to Supabase for persistent storage (if configured)
+  if (isSupabaseConfigured() && filesModified.size > 0) {
+    for (const filePath of filesModified) {
+      try {
+        const result = await uploadToSupabase(filePath, sessionId);
+        if (result.success) {
+          logger.info('File saved to Supabase', { filePath, url: result.url });
+        }
+      } catch (e) {
+        logger.warn('Failed to upload to Supabase', { filePath, error: e.message });
+      }
+    }
+  }
 
   logger.info('REACT_LOOP_COMPLETE', {
     sessionId,

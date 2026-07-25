@@ -287,7 +287,8 @@ export class WebGateway {
     this.app.use(express.static(frontendDistPath));
 
     // SPA fallback with error handling
-    this.app.get(/.*/, (req, res) => {
+    // Skip /socket.io/ requests — Socket.IO handles those at the server level
+    this.app.get(/^(?!\/socket\.io\/).*$/, (req, res) => {
       const indexPath = path.resolve(frontendDistPath, 'index.html');
       if (fs.existsSync(indexPath)) {
         res.sendFile(indexPath);

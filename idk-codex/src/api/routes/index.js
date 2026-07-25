@@ -14,6 +14,7 @@ import configRouter from './config.js';
 import reposRouter from './repos.js';
 import conversationsRouter from './conversations.js';
 import connectorsRouter from './connectors.js';
+import uploadRouter from './upload.js';
 
 const router = Router();
 
@@ -53,6 +54,8 @@ router.use('/config', configRouter);
 router.use('/repos', reposRouter);
 router.use('/conversations', conversationsRouter);
 router.use('/connectors', connectorsRouter);
+router.use('/upload', uploadRouter);
+router.use('/files/download', uploadRouter); // mount download at /api/files/download too
 
 // Expose runtime endpoint at /api/runtime (from agent router)
 import { getDatabase } from '../../database/db.js';
