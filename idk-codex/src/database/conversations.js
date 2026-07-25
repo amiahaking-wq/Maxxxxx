@@ -35,8 +35,7 @@ export function migrateConversations() {
         title TEXT DEFAULT 'New Conversation',
         platform TEXT DEFAULT 'web',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES sessions(user_id) ON DELETE CASCADE
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at DESC);
