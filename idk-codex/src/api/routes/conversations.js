@@ -208,7 +208,14 @@ router.post('/:id/messages', async (req, res) => {
           });
         } catch (err) {
           logger.error('Chat response failed', { error: err.message });
-          const fallback = 'I heard you! If you want me to build something, just tell me what to create — like "build a snake game" or "create a Python script".';
+          const fallback = '⚠️ All AI providers are currently rate-limited or unavailable.\n\n' +
+            'Groq: daily token limit reached (resets in a few minutes)\n' +
+            'Gemini: quota exceeded (limit is 0 in this region)\n' +
+            'Phone: not connected\n\n' +
+            'To fix this permanently, add a free OpenRouter API key:\n' +
+            '1. Go to https://openrouter.ai/keys\n' +
+            '2. Create a free key\n' +
+            '3. Add OPENAI_COMPATIBLE_BASE_URL and OPENAI_COMPATIBLE_API_KEY to Railway';
           addConversationMessage(conversationId, 'assistant', fallback);
           broadcastMessage(conversationId, {
             role: 'assistant',
