@@ -72,9 +72,9 @@ router.post('/upload', (req, res) => {
 // ============================================================================
 // DOWNLOAD FILE FROM SANDBOX
 // ============================================================================
-router.get('/download/*', (req, res) => {
+router.get(/^\/download\/?(.*)$/, (req, res) => {
   try {
-    const requestedPath = req.params[0] || req.path.replace('/download/', '');
+    const requestedPath = req.params[0] || '';
     const fullPath = path.resolve(SANDBOX, requestedPath);
 
     if (!fullPath.startsWith(path.resolve(SANDBOX))) {
