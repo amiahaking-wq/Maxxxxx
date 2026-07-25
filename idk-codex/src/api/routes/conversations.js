@@ -187,8 +187,7 @@ router.post('/:id/messages', async (req, res) => {
             { role: 'user', content: message }
           ];
 
-          // Disable Echo for chat
-          const prevEcho = process.env.ECHO_PROVIDER_ENABLED;
+          // Disable Echo for chat — the adapter checks ECHO_PROVIDER_ENABLED at call time
           process.env.ECHO_PROVIDER_ENABLED = 'false';
 
           const result = await generateCompletion(messages, {
@@ -196,7 +195,8 @@ router.post('/:id/messages', async (req, res) => {
             maxTokens: 800
           });
 
-          process.env.ECHO_PROVIDER_ENABLED = prevEcho;
+          // Restore Echo for the ReAct agent loop (which may still need it as last resort)
+          process.env.ECHO_PROVIDER_ENABLED = 'true';
 
           const response = result?.content || 'Sorry, I could not generate a response.';
 

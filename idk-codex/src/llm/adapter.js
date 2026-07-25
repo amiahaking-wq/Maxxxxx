@@ -430,18 +430,28 @@ class LLMAdapter {
 
     // Legacy fallback logic
     const autoFallback = process.env.LLM_AUTO_FALLBACK !== 'false';
-    const maxAttempts = autoFallback ? this.providers.length : 1;
+
+    // Filter out Echo provider unless explicitly enabled at call time
+    // This prevents Echo from being used as a fallback for real tasks/chat
+    const availableProviders = this.providers.filter(p => {
+      if (p.name === 'echo') {
+        return process.env.ECHO_PROVIDER_ENABLED === 'true';
+      }
+      return true;
+    });
+
+    const maxAttempts = autoFallback ? availableProviders.length : 1;
 
     // Start fallback from the currently selected provider
-    const currentProviderIndex = this.providers.findIndex(p => p.name === this.currentProvider?.name);
+    const currentProviderIndex = availableProviders.findIndex(p => p.name === this.currentProvider?.name);
     const startIndex = currentProviderIndex >= 0 ? currentProviderIndex : 0;
 
     let lastError = null;
     const attemptedProviders = [];
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const providerIndex = (startIndex + attempt) % this.providers.length;
-      const provider = this.providers[providerIndex] || this.currentProvider;
+      const providerIndex = (startIndex + attempt) % availableProviders.length;
+      const provider = availableProviders[providerIndex] || this.currentProvider;
       attemptedProviders.push(provider.name);
 
       // The model we'll actually send to this provider:
@@ -477,10 +487,10 @@ class LLMAdapter {
         });
 
         if (attempt < maxAttempts - 1) {
-          const nextIndex = (startIndex + attempt + 1) % this.providers.length;
+          const nextIndex = (startIndex + attempt + 1) % availableProviders.length;
           logger.info('Falling back to next provider', {
             from: provider.name,
-            to: this.providers[nextIndex]?.name
+            to: availableProviders[nextIndex]?.name
           });
         }
       }
