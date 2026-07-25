@@ -23,7 +23,7 @@
 import { generateCompletion } from '../groq/client.js';
 import { executeTool, getToolDescriptions } from './tools/registry.js';
 import { broadcastProgress, broadcastMessage } from '../api/websocket.js';
-import { addMessage } from '../database/queries.js';
+import { addConversationMessage } from '../database/conversations.js';
 import { condenseMessages } from './condenser.js';
 import logger from '../utils/logger.js';
 
@@ -355,11 +355,15 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
     filesModified: Array.from(filesModified)
   });
 
-  // Save the summary as an assistant message
+  // Save the summary as an assistant message in the conversation
   try {
-    await addMessage(sessionId, 'assistant', finalSummary);
+    addConversationMessage(sessionId, 'assistant', finalSummary, {
+      type: 'task_complete',
+      iterations: iteration,
+      filesModified: Array.from(filesModified)
+    });
   } catch (e) {
-    logger.warn('Failed to save react summary', { error: e.message });
+    logger.warn('Failed to save react summary to conversation', { error: e.message });
   }
 
   // Broadcast the final message
