@@ -512,9 +512,18 @@ export function getToolNames() {
   return Object.keys(TOOLS);
 }
 
+/**
+ * Build the tool registry (compatibility export for old react-loop.js).
+ * Returns the TOOLS object in the format the old code expects.
+ */
+export function buildToolRegistry() {
+  return TOOLS;
+}
+
 export default {
   TOOLS,
   executeTool,
   getToolDescriptions,
-  getToolNames
+  getToolNames,
+  buildToolRegistry
 };
