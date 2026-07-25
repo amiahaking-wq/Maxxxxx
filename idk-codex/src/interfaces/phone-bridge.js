@@ -275,8 +275,8 @@ class PhoneBridge {
         reject,
         timeout: setTimeout(() => {
           this.pendingRequests.delete(requestId);
-          reject(new Error('Phone inference timeout (300s)'));
-        }, 300000) // 5 minute timeout — phone inference (Qwen on Android CPU) is slow
+          reject(new Error('Phone inference timeout (120s)'));
+        }, 120000) // 2 minute timeout — phone inference is slow but 5 min was too long for chat
       });
 
       // Send request to phone

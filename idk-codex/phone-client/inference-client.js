@@ -175,7 +175,7 @@ class PhoneInferenceClient {
           num_predict: maxTokens
         }
       }, {
-        timeout: 300000 // 5 minute timeout — phone inference is slow
+        timeout: 120000 // 2 minute timeout
       });
 
       const { response: text, eval_count: tokensUsed } = response.data;

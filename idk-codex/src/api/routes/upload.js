@@ -23,7 +23,7 @@ try { fs.mkdirSync(UPLOADS_DIR, { recursive: true }); } catch (e) { /* ok */ }
 // ============================================================================
 // UPLOAD IMAGE/FILE
 // ============================================================================
-router.post('/upload', (req, res) => {
+router.post('/', (req, res) => {
   try {
     // Express 5 body parser for raw data
     const contentType = req.headers['content-type'] || '';
