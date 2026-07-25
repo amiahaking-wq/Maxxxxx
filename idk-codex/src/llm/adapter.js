@@ -312,7 +312,11 @@ class LLMAdapter {
       maxOutputTokens = parseInt(process.env.DEFAULT_MAX_OUTPUT_TOKENS || '4096', 10);
     }
 
-    // 2. Honor caller-specified max_tokens but cap to the model's output reservation
+    // 2. Set the model to the provider's model (not the original request's model)
+    //    This fixes the bug where falling back to Gemini sends Groq's model name
+    opts.model = model;
+
+    // 3. Honor caller-specified max_tokens but cap to the model's output reservation
     const requestedOutput = opts.max_tokens || opts.maxTokens || maxOutputTokens;
     const effectiveOutput = Math.min(requestedOutput, maxOutputTokens);
     opts.max_tokens = effectiveOutput;

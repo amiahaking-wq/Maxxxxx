@@ -222,24 +222,11 @@ export async function handleTelegramMessage(ctx) {
 // ============================================================================
 
 /**
- * Handle greeting — friendly reply
+ * Handle greeting — use LLM for natural response
  */
 async function handleGreeting(ctx, userId, text) {
-  const hour = new Date().getHours();
-  const timeGreeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
-  const name = ctx.from?.first_name || ctx.from?.username || 'there';
-
-  await ctx.reply(
-    `${timeGreeting}, ${name}! 👋\n\n` +
-    `I'm MAX, your autonomous coding agent. I can:\n\n` +
-    `🛠️ *Build things* — just tell me what to make (e.g. "build a snake game")\n` +
-    `💬 *Chat* — ask me questions about code, programming, or anything\n` +
-    `📦 *Work on repos* — say "clone https://github.com/user/repo"\n` +
-    `🚀 *Push changes* — say "push the changes to github"\n` +
-    `📊 *Show status* — say "what's my status?"\n\n` +
-    `No commands needed — just talk to me like a normal assistant. What can I help you with?`,
-    { parse_mode: 'Markdown' }
-  );
+  // Use the same chat handler — let the LLM respond naturally
+  await handleChat(ctx, userId, text);
 }
 
 /**
@@ -289,28 +276,32 @@ The user's Telegram user ID is ${userId}. Be casual and friendly.`
       }
     ];
 
-    // Try to get a response from the LLM
+    // Try to get a response from the LLM — NEVER use Echo for chat
     let response;
     try {
+      // Temporarily disable Echo
+      const prevEcho = process.env.ECHO_PROVIDER_ENABLED;
+      process.env.ECHO_PROVIDER_ENABLED = 'false';
+
       const result = await generateCompletion(messages, {
         temperature: 0.7,
         maxTokens: 1000
       });
+
+      process.env.ECHO_PROVIDER_ENABLED = prevEcho;
       response = result?.content || null;
     } catch (llmErr) {
-      logger.warn('LLM chat failed, using fallback', { error: llmErr.message });
+      logger.warn('LLM chat failed', { error: llmErr.message });
       response = null;
     }
 
-    // Fallback response if LLM failed
-    if (!response || response.trim() === '' || response === 'OK') {
-      response = `I heard you say: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"\n\n` +
-        `I'm not sure how to respond to that. If you want me to build something, just say what you want — ` +
-        `for example:\n\n` +
-        `• "build a snake game in HTML"\n` +
-        `• "create a Python script that scrapes a website"\n` +
-        `• "write a React login component"\n\n` +
-        `Or ask me a question about programming!`;
+    // If LLM failed, be honest — don't fake it with Echo
+    if (!response || response.trim() === '') {
+      response = 'I couldn\'t reach any LLM provider right now. This usually means:\n\n' +
+        '- Groq rate limit hit (wait a minute)\n' +
+        '- Gemini quota exceeded\n' +
+        '- Phone not connected\n\n' +
+        'Try again in a moment, or connect your phone with Ollama for local inference.';
     }
 
     // Save the assistant's response

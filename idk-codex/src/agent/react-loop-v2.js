@@ -38,73 +38,26 @@ const MAX_ACTION_TOKENS = parseInt(process.env.MAX_ACTION_TOKENS || '6000', 10);
 function buildSystemPrompt(workspacePath) {
   const toolDescs = getToolDescriptions();
 
-  return `You are MAX, an autonomous AI coding agent. You work in a sandbox workspace at ${workspacePath}.
+  return `You are MAX, an autonomous AI coding agent working in ${workspacePath}.
 
-You can use tools to interact with the filesystem, run commands, and search the web. When you need to do something, call a tool by writing XML-like tags in your response.
+Use tools by writing XML tags:
+<tool name="bash"><arg name="command">ls -la</arg></tool>
 
-## Available Tools
-
+Tools:
 ${toolDescs}
 
-## How to Call Tools
+Rules:
+1. Think, then act. One tool at a time.
+2. Observe results and adapt.
+3. When done, say: DONE: <summary>
 
-Write your reasoning first, then call a tool using this format:
-
-<tool name="tool_name">
-<arg name="param_name">param_value</arg>
-</tool>
-
-You can call multiple tools in one response. After each tool call, you'll see the result and can decide what to do next.
-
-## Important Rules
-
-1. **Think before acting.** Explain your reasoning, then call a tool.
-2. **One step at a time.** Don't try to do everything in one tool call.
-3. **Observe results.** After each tool call, look at the output and decide the next step.
-4. **Be precise.** When editing files, use exact text matches.
-5. **When done, say "DONE:" followed by a summary.** This signals task completion.
-
-## Example Conversation
-
-User: Create a Python script that prints hello world
-
-MAX: I'll create a Python script that prints hello world.
-
-<tool name="write_file">
-<arg name="path">hello.py</arg>
-<arg name="content">#!/usr/bin/env python3
-"""Hello world script."""
-
-def main():
-    print("Hello, World!")
-
-if __name__ == "__main__":
-    main()
-</arg>
-</tool>
-
-(Result: Successfully wrote 150 bytes to hello.py)
-
-MAX: Let me verify the script works by running it.
-
-<tool name="bash">
-<arg name="command">python3 hello.py</arg>
-</tool>
-
-(Result: Hello, World!)
-
-MAX: DONE: Created hello.py — a Python script that prints "Hello, World!". Verified it works correctly.
-
-## When to Stop
-
-Say "DONE: <summary>" when:
-- The task is complete
-- You've verified the result works
-- You can't make further progress
-
-If you get stuck after several attempts, explain what went wrong and say "DONE: <partial summary>".
-
-Remember: you're working in ${workspacePath}. All file paths are relative to that directory.`;
+Example:
+User: Create hello.py
+MAX: <tool name="write_file"><arg name="path">hello.py</arg><arg name="content">print("hello")</arg></tool>
+(Result: wrote hello.py)
+MAX: <tool name="bash"><arg name="command">python3 hello.py</arg></tool>
+(Result: hello)
+MAX: DONE: Created hello.py, verified output.`;
 }
 
 // ============================================================================
@@ -208,23 +161,32 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
     });
     onProgress({ phase: 'react', status: 'thinking', iteration });
 
-    // Call the LLM
+    // Call the LLM — NEVER use Echo provider for the ReAct loop
     let llmResponse;
     try {
       // Condense messages if the conversation is getting too long
       const condensedMessages = await condenseMessages(messages, {
-        maxTokens: 8000,
-        keepRecent: 10
+        maxTokens: 6000,
+        keepRecent: 8
       });
 
+      // Temporarily disable Echo so the adapter doesn't fall back to it
+      const prevEchoEnabled = process.env.ECHO_PROVIDER_ENABLED;
+      process.env.ECHO_PROVIDER_ENABLED = 'false';
+
+      // Force using the adapter's current provider (don't let it fall back to Echo)
       const result = await generateCompletion(condensedMessages, {
         temperature: 0.3,
         maxTokens: MAX_ACTION_TOKENS
       });
+
+      // Restore Echo setting
+      process.env.ECHO_PROVIDER_ENABLED = prevEchoEnabled;
+
       llmResponse = result?.content || '';
     } catch (err) {
       logger.error('REACT_LLM_ERROR', { iteration, error: err.message });
-      finalSummary = `LLM error at iteration ${iteration}: ${err.message}`;
+      finalSummary = `I couldn't process this because all LLM providers failed: ${err.message}. Please check your API keys or connect your phone.`;
       break;
     }
 
