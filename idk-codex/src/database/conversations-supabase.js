@@ -50,13 +50,16 @@ export async function createConversation(userId, platform = 'web', title = 'New 
 
   if (isSupabaseConfigured()) {
     try {
+      // Include session_id in case the table has that column (from old schema)
       const result = await supabaseFetch('conversations', 'POST', {
-        id, user_id: String(userId), title, platform
+        id, user_id: String(userId), title, platform,
+        session_id: id  // some Supabase tables have this from old schema
       });
       logger.info('Conversation created in Supabase', { id });
       return { id, userId, title, platform };
     } catch (err) {
       logger.warn('Supabase create failed, using SQLite', { error: err.message });
+      // Fall through to SQLite
     }
   }
 
