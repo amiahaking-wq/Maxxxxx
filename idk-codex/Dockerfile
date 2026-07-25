@@ -48,7 +48,7 @@ RUN find /app/node_modules -name "*.md" -delete 2>/dev/null; \
 # ============================================================================
 FROM node:22-alpine
 
-RUN apk add --no-cache git wget && rm -rf /var/cache/apk/*
+RUN apk add --no-cache git wget python3 py3-pip && rm -rf /var/cache/apk/*
 
 WORKDIR /app
 

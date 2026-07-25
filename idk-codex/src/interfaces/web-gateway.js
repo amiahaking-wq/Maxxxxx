@@ -227,11 +227,14 @@ export class WebGateway {
     this.io = new SocketIO(this.server, {
       cors: {
         origin: process.env.WEB_UI_ORIGIN || '*',
-        methods: ['GET', 'POST']
+        methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+        credentials: false
       },
-      pingTimeout: 60000,   // Wait 60 seconds for pong response before considering connection dead
-      pingInterval: 25000,  // Send ping every 25 seconds to keep connection alive
-      transports: ['websocket', 'polling']  // Allow fallback to polling if WebSocket fails
+      pingTimeout: 60000,
+      pingInterval: 25000,
+      transports: ['websocket', 'polling'],
+      allowEIO3: true,
+      maxHttpBufferSize: 1e8
     });
 
     // Middleware
