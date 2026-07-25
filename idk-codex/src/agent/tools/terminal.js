@@ -49,7 +49,7 @@ class AgentTerminal {
       logger.info('Initializing terminal session', { sessionId: this.sessionId });
 
       // Spawn bash shell in the workspace
-      this.process = spawn('/bin/bash', [], {
+      this.process = spawn('/bin/sh', [], {
         cwd: this.workspacePath,
         env: {
           ...process.env,

@@ -131,7 +131,7 @@ router.post('/:id/messages', async (req, res) => {
   try {
     const conversationId = req.params.id;
     const userId = req.body.userId || USER_ID;
-    const { message, runAgent = true } = req.body;
+    const { message, runAgent } = req.body;
 
     if (!message) {
       return res.status(400).json({ error: 'message is required' });
@@ -153,22 +153,80 @@ router.post('/:id/messages', async (req, res) => {
       conversationId
     });
 
-    // If this is just a chat (not a task), return immediately
-    // The frontend can decide whether to run the agent
-    if (!runAgent) {
-      return res.json({
+    // INTENT DETECTION — decide if this is a task or just chat
+    // This prevents "Hi" from triggering a 15-iteration agent loop
+    const lowerMsg = message.toLowerCase().trim();
+    const isTask = detectTaskIntent(lowerMsg, message);
+
+    if (!isTask) {
+      // This is a chat message — respond with LLM directly, no agent loop
+      res.json({
         success: true,
         messageId: userMsg.id,
-        agentStarted: false
+        agentStarted: false,
+        intent: 'chat'
       });
+
+      // Generate a chat response in the background
+      setImmediate(async () => {
+        try {
+          const { generateCompletion } = await import('../../groq/client.js');
+
+          // Build conversation context from recent messages
+          const recentMessages = (conv.messages || []).slice(-6).map(m => ({
+            role: m.role,
+            content: m.content
+          }));
+
+          const messages = [
+            {
+              role: 'system',
+              content: 'You are MAX, a helpful AI assistant. You are also an autonomous coding agent, but right now you are just chatting. Be friendly, concise, and natural. If the user asks you to build something, tell them to be more specific about what they want to create.'
+            },
+            ...recentMessages,
+            { role: 'user', content: message }
+          ];
+
+          // Disable Echo for chat
+          const prevEcho = process.env.ECHO_PROVIDER_ENABLED;
+          process.env.ECHO_PROVIDER_ENABLED = 'false';
+
+          const result = await generateCompletion(messages, {
+            temperature: 0.7,
+            maxTokens: 800
+          });
+
+          process.env.ECHO_PROVIDER_ENABLED = prevEcho;
+
+          const response = result?.content || 'Sorry, I could not generate a response.';
+
+          addConversationMessage(conversationId, 'assistant', response);
+          broadcastMessage(conversationId, {
+            role: 'assistant',
+            content: response,
+            conversationId
+          });
+        } catch (err) {
+          logger.error('Chat response failed', { error: err.message });
+          const fallback = 'I heard you! If you want me to build something, just tell me what to create — like "build a snake game" or "create a Python script".';
+          addConversationMessage(conversationId, 'assistant', fallback);
+          broadcastMessage(conversationId, {
+            role: 'assistant',
+            content: fallback,
+            conversationId
+          });
+        }
+      });
+      return;
     }
 
-    // Run the ReAct agent loop in the background
+    // This is a task — run the ReAct agent loop
     res.json({
       success: true,
       messageId: userMsg.id,
       agentStarted: true,
-      conversationId
+      conversationId,
+      intent: 'task'
     });
 
     // Execute the agent loop asynchronously
@@ -178,7 +236,6 @@ router.post('/:id/messages', async (req, res) => {
           workspacePath: process.env.SANDBOX_WORKSPACE || './sandbox-workspace'
         });
 
-        // Save the agent's summary
         addConversationMessage(conversationId, 'assistant', result.summary, {
           type: 'task_complete',
           iterations: result.iterations,
@@ -195,7 +252,7 @@ router.post('/:id/messages', async (req, res) => {
         addConversationMessage(conversationId, 'assistant', 'Error: ' + err.message, { type: 'error' });
         broadcastMessage(conversationId, {
           role: 'assistant',
-          content: '❌ ' + err.message,
+          content: 'Error: ' + err.message,
           type: 'error'
         });
       }
@@ -205,5 +262,54 @@ router.post('/:id/messages', async (req, res) => {
     res.status(500).json({ error: 'Failed to send message' });
   }
 });
+
+/**
+ * Detect if a message is a task (should trigger agent) or chat (just respond)
+ */
+function detectTaskIntent(lowerMsg, originalMsg) {
+  // Short messages (< 15 chars) are almost always chat
+  if (originalMsg.trim().length < 15) return false;
+
+  // Greetings and social
+  const greetings = ['hi', 'hey', 'hello', 'sup', 'yo', 'how are you', 'good morning', 'good afternoon', 'good evening', 'whats up', "what's up", 'howdy', 'thanks', 'thank you', 'bye', 'goodbye', 'ok', 'okay', 'cool', 'nice', 'great', 'awesome'];
+  if (greetings.some(g => lowerMsg === g || lowerMsg.startsWith(g + ' ') || lowerMsg === g.replace(' ', ''))) {
+    return false;
+  }
+
+  // Questions (not about building something)
+  if (lowerMsg.startsWith('what is') || lowerMsg.startsWith('what are') || lowerMsg.startsWith('how do') || lowerMsg.startsWith('how does') || lowerMsg.startsWith('why') || lowerMsg.startsWith('can you explain') || lowerMsg.startsWith('what\'s') || lowerMsg.startsWith('whats')) {
+    // But if it contains task keywords, it's still a task
+    const taskKeywords = ['build', 'create', 'make', 'write', 'generate', 'implement', 'code', 'script', 'file', 'app', 'page'];
+    if (!taskKeywords.some(kw => lowerMsg.includes(kw))) {
+      return false;
+    }
+  }
+
+  // Task keywords — if present, it's a task
+  const taskKeywords = [
+    'build', 'create', 'make', 'write', 'generate', 'implement', 'develop',
+    'fix', 'refactor', 'update', 'modify', 'edit', 'change', 'delete',
+    'design', 'setup', 'set up', 'configure', 'deploy', 'install',
+    'code', 'function', 'component', 'page', 'app', 'script',
+    'api', 'endpoint', 'route', 'database', 'schema',
+    'html', 'css', 'javascript', 'python', 'react', 'node',
+    'bug', 'error', 'broken', 'not working', 'failing',
+    'test', 'feature', 'login', 'signup', 'dashboard',
+    'landing page', 'website', 'web app', 'backend', 'frontend',
+    'clone', 'repo', 'push', 'commit', 'git'
+  ];
+
+  if (taskKeywords.some(kw => lowerMsg.includes(kw))) {
+    return true;
+  }
+
+  // Imperative verbs at the start
+  if (/^(build|create|make|write|generate|fix|add|remove|delete|update|refactor|deploy|run|test|install|set up|configure)/i.test(originalMsg.trim())) {
+    return true;
+  }
+
+  // Default: treat as chat
+  return false;
+}
 
 export default router;
