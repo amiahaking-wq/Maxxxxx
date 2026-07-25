@@ -18,8 +18,8 @@ import {
   addConversationMessage,
   deleteConversation,
   renameConversation,
-  migrateConversations
-} from '../../database/conversations.js';
+  isSupabaseConfigured
+} from '../../database/conversations-supabase.js';
 import { executeReActLoop } from '../../agent/react-loop-v2.js';
 import { broadcastMessage } from '../websocket.js';
 import logger from '../../utils/logger.js';
@@ -27,18 +27,25 @@ import logger from '../../utils/logger.js';
 const router = express.Router();
 
 // Run migration on first load
-try { migrateConversations(); } catch (e) { logger.warn('Conversation migration skipped', { error: e.message }); }
+// Initialize SQLite migration (for fallback when Supabase not configured)
+try {
+  const { migrateConversations } = await import('../../database/conversations.js');
+  migrateConversations();
+} catch (e) { /* ok */ }
 
-const USER_ID = 'default-user'; // TODO: real auth
+const USER_ID = 'default-user';
+
+// Log storage mode on startup
+logger.info('Conversation storage', { supabase: isSupabaseConfigured() ? 'ENABLED (persistent)' : 'DISABLED (SQLite ephemeral)' });
 
 // ============================================================================
 // LIST CONVERSATIONS
 // ============================================================================
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const userId = req.query.userId || USER_ID;
-    const conversations = listConversations(userId);
-    res.json({ success: true, conversations });
+    const conversations = await listConversations(userId);
+    res.json({ success: true, conversations, storage: isSupabaseConfigured() ? 'supabase' : 'sqlite' });
   } catch (err) {
     logger.error('Failed to list conversations', { error: err.message });
     res.status(500).json({ error: 'Failed to list conversations' });
@@ -48,13 +55,13 @@ router.get('/', (req, res) => {
 // ============================================================================
 // CREATE CONVERSATION
 // ============================================================================
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const userId = req.body.userId || USER_ID;
     const platform = req.body.platform || 'web';
     const title = req.body.title || 'New Conversation';
 
-    const conv = createConversation(userId, platform, title);
+    const conv = await createConversation(userId, platform, title);
     res.json({ success: true, conversation: conv });
   } catch (err) {
     logger.error('Failed to create conversation', { error: err.message });
@@ -65,10 +72,10 @@ router.post('/', (req, res) => {
 // ============================================================================
 // GET CONVERSATION + MESSAGES
 // ============================================================================
-router.get('/:id', (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
     const userId = req.query.userId || USER_ID;
-    const conv = getConversation(req.params.id, userId);
+    const conv = await getConversation(req.params.id, userId);
 
     if (!conv) {
       return res.status(404).json({ error: 'Conversation not found' });
@@ -84,10 +91,10 @@ router.get('/:id', (req, res) => {
 // ============================================================================
 // DELETE CONVERSATION
 // ============================================================================
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
     const userId = req.query.userId || USER_ID;
-    const deleted = deleteConversation(req.params.id, userId);
+    const deleted = await deleteConversation(req.params.id, userId);
 
     if (!deleted) {
       return res.status(404).json({ error: 'Conversation not found' });
@@ -103,7 +110,7 @@ router.delete('/:id', (req, res) => {
 // ============================================================================
 // RENAME CONVERSATION
 // ============================================================================
-router.patch('/:id', (req, res) => {
+router.patch('/:id', async (req, res) => {
   try {
     const userId = req.body.userId || USER_ID;
     const title = req.body.title;
@@ -112,7 +119,7 @@ router.patch('/:id', (req, res) => {
       return res.status(400).json({ error: 'title is required' });
     }
 
-    const renamed = renameConversation(req.params.id, userId, title);
+    const renamed = await renameConversation(req.params.id, userId, title);
     if (!renamed) {
       return res.status(404).json({ error: 'Conversation not found' });
     }
@@ -138,13 +145,13 @@ router.post('/:id/messages', async (req, res) => {
     }
 
     // Verify conversation exists
-    const conv = getConversation(conversationId, userId);
+    const conv = await getConversation(conversationId, userId);
     if (!conv) {
       return res.status(404).json({ error: 'Conversation not found' });
     }
 
     // Save the user's message
-    const userMsg = addConversationMessage(conversationId, 'user', message);
+    const userMsg = await addConversationMessage(conversationId, 'user', message);
 
     // Broadcast the user message
     broadcastMessage(conversationId, {
@@ -200,7 +207,7 @@ router.post('/:id/messages', async (req, res) => {
 
           const response = result?.content || 'Sorry, I could not generate a response.';
 
-          addConversationMessage(conversationId, 'assistant', response);
+          await addConversationMessage(conversationId, 'assistant', response);
           broadcastMessage(conversationId, {
             role: 'assistant',
             content: response,
@@ -216,7 +223,7 @@ router.post('/:id/messages', async (req, res) => {
             '1. Go to https://openrouter.ai/keys\n' +
             '2. Create a free key\n' +
             '3. Add OPENAI_COMPATIBLE_BASE_URL and OPENAI_COMPATIBLE_API_KEY to Railway';
-          addConversationMessage(conversationId, 'assistant', fallback);
+          await addConversationMessage(conversationId, 'assistant', fallback);
           broadcastMessage(conversationId, {
             role: 'assistant',
             content: fallback,
@@ -243,7 +250,7 @@ router.post('/:id/messages', async (req, res) => {
           workspacePath: process.env.SANDBOX_WORKSPACE || './sandbox-workspace'
         });
 
-        addConversationMessage(conversationId, 'assistant', result.summary, {
+        await addConversationMessage(conversationId, 'assistant', result.summary, {
           type: 'task_complete',
           iterations: result.iterations,
           filesModified: result.filesModified
@@ -256,7 +263,7 @@ router.post('/:id/messages', async (req, res) => {
         });
       } catch (err) {
         logger.error('Agent loop failed', { conversationId, error: err.message });
-        addConversationMessage(conversationId, 'assistant', 'Error: ' + err.message, { type: 'error' });
+        await addConversationMessage(conversationId, 'assistant', 'Error: ' + err.message, { type: 'error' });
         broadcastMessage(conversationId, {
           role: 'assistant',
           content: 'Error: ' + err.message,
