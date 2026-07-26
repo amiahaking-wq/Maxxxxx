@@ -359,6 +359,10 @@ class LLMAdapter {
     opts._contextWindow = contextWindow;
     opts._maxOutputTokens = effectiveOutput;
 
+    // Ensure tools and tool_choice pass through to the provider
+    if (options.tools) opts.tools = options.tools;
+    if (options.tool_choice) opts.tool_choice = options.tool_choice;
+
     return opts;
   }
 

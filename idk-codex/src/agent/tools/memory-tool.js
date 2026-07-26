@@ -1,144 +1,156 @@
 /**
- * Memory Tools — Persistent memory via Supabase
+ * Memory Tools — Persistent memory via SQLite + Supabase
  *
- * memory_save: Save something to persistent memory (survives restarts)
- * memory_get: Retrieve something from memory
- * memory_list: List all saved memories or search by tag
- *
- * Uses Supabase max_memory table. Falls back to in-memory if not configured.
+ * memory_save: Save key/value to persistent memory
+ * memory_get: Retrieve by key
+ * memory_list: List all memories
+ * memory_delete: Delete a memory
  */
 
-import { isSupabaseConfigured } from '../supabase-storage.js';
+import { getDatabase } from '../../database/db.js';
 import logger from '../../utils/logger.js';
 
-const SUPABASE_URL = process.env.SUPABASE_URL || null;
-const SUPABASE_KEY = process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY || null;
-
-// In-memory fallback
-const localMemory = new Map();
-
-async function supabaseUpsert(key, value, tags) {
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/max_memory`, {
-    method: 'POST',
-    headers: {
-      'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${SUPABASE_KEY}`,
-      'Content-Type': 'application/json',
-      'Prefer': 'return=representation,resolution=merge-duplicates'
-    },
-    body: JSON.stringify({
-      user_id: 'default-user',
-      key,
-      value,
-      tags: tags || [],
-      updated_at: new Date().toISOString()
-    })
-  });
-  if (!response.ok) throw new Error('Supabase error: ' + response.status);
-  return response.json();
+function getDB() {
+  try { return getDatabase(); } catch (e) { return null; }
 }
 
-async function supabaseGet(key) {
-  const response = await fetch(
-    `${SUPABASE_URL}/rest/v1/max_memory?user_id=eq.default-user&key=eq.${encodeURIComponent(key)}&limit=1`,
-    {
-      headers: {
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`
-      }
-    }
-  );
-  if (!response.ok) throw new Error('Supabase error: ' + response.status);
-  const data = await response.json();
-  return data[0]?.value || null;
+function ensureMemoryTable() {
+  const db = getDB();
+  if (!db) return;
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS max_memory (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL DEFAULT 'default-user',
+        memory_key TEXT NOT NULL,
+        memory_value TEXT NOT NULL,
+        tags TEXT DEFAULT '',
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(user_id, memory_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_user ON max_memory(user_id);
+    `);
+  } catch (e) { /* table may already exist */ }
 }
 
-async function supabaseList(tag) {
-  let url = `${SUPABASE_URL}/rest/v1/max_memory?user_id=eq.default-user&order=updated_at.desc&limit=20`;
-  const response = await fetch(url, {
-    headers: {
-      'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${SUPABASE_KEY}`
-    }
-  });
-  if (!response.ok) throw new Error('Supabase error: ' + response.status);
-  return response.json();
-}
+ensureMemoryTable();
 
 export const memoryTools = {
   memory_save: {
     name: 'memory_save',
-    description: 'Save something to persistent memory — survives restarts. Use for: API keys, URLs, preferences, project details.',
+    description: 'Save something to persistent memory — survives restarts',
     params: {
       key: 'string (required) — unique key name',
       value: 'string (required) — value to remember',
-      tags: 'string (optional) — comma-separated tags for categorization'
+      tags: 'string (optional) — comma-separated tags'
     },
     execute: async (args) => {
-      if (!args.key || args.value === undefined) return 'Error: key and value are required';
-      
-      const tags = args.tags ? args.tags.split(',').map(t => t.trim()) : [];
+      if (!args.key || args.value === undefined) return 'Error: key and value required';
+      const db = getDB();
+      if (!db) return 'Error: database not available';
 
-      if (isSupabaseConfigured()) {
-        try {
-          await supabaseUpsert(args.key, args.value, tags);
-          logger.info('Memory saved to Supabase', { key: args.key });
-          return 'Saved to memory: ' + args.key;
-        } catch (err) {
-          logger.warn('Supabase memory save failed, using local', { error: err.message });
-        }
+      try {
+        db.prepare(`
+          INSERT INTO max_memory (user_id, memory_key, memory_value, tags, updated_at)
+          VALUES (?, ?, ?, ?, datetime('now'))
+          ON CONFLICT(user_id, memory_key)
+          DO UPDATE SET memory_value = excluded.memory_value,
+                        tags = excluded.tags,
+                        updated_at = datetime('now')
+        `).run('default-user', args.key, args.value, args.tags || '');
+        logger.info('Memory saved', { key: args.key });
+        return 'Saved to memory: ' + args.key;
+      } catch (err) {
+        return 'Error saving memory: ' + err.message;
       }
-
-      // Local fallback
-      localMemory.set(args.key, { value: args.value, tags });
-      return 'Saved to memory (local): ' + args.key;
     }
   },
 
   memory_get: {
     name: 'memory_get',
-    description: 'Retrieve something from persistent memory by key.',
-    params: { key: 'string (required) — key to retrieve' },
+    description: 'Retrieve something from persistent memory by key',
+    params: { key: 'string (required)' },
     execute: async (args) => {
       if (!args.key) return 'Error: key is required';
+      const db = getDB();
+      if (!db) return 'Error: database not available';
 
-      if (isSupabaseConfigured()) {
-        try {
-          const value = await supabaseGet(args.key);
-          if (value) return value;
-          return 'No memory found for key: ' + args.key;
-        } catch (err) {
-          logger.warn('Supabase memory get failed, using local', { error: err.message });
-        }
+      try {
+        const row = db.prepare('SELECT memory_value FROM max_memory WHERE user_id = ? AND memory_key = ?')
+          .get('default-user', args.key);
+        return row?.memory_value || 'No memory found for key: ' + args.key;
+      } catch (err) {
+        return 'Error: ' + err.message;
       }
-
-      // Local fallback
-      const entry = localMemory.get(args.key);
-      return entry?.value || 'No memory found for key: ' + args.key;
     }
   },
 
   memory_list: {
     name: 'memory_list',
-    description: 'List all saved memories.',
-    params: { tag: 'string (optional) — filter by tag' },
-    execute: async (args) => {
-      if (isSupabaseConfigured()) {
-        try {
-          const data = await supabaseList(args.tag);
-          if (!data || data.length === 0) return 'No memories saved.';
-          return data.map(m => '- ' + m.key + ': ' + m.value.substring(0, 100) + (m.tags?.length ? ' [tags: ' + m.tags.join(', ') + ']' : '')).join('\n');
-        } catch (err) {
-          logger.warn('Supabase memory list failed, using local', { error: err.message });
-        }
-      }
+    description: 'List all saved memories',
+    params: {},
+    execute: async () => {
+      const db = getDB();
+      if (!db) return 'Error: database not available';
 
-      // Local fallback
-      if (localMemory.size === 0) return 'No memories saved.';
-      const entries = Array.from(localMemory.entries());
-      return entries.map(([k, v]) => '- ' + k + ': ' + v.value.substring(0, 100)).join('\n');
+      try {
+        const rows = db.prepare('SELECT memory_key, memory_value, updated_at FROM max_memory WHERE user_id = ? ORDER BY updated_at DESC LIMIT 30')
+          .all('default-user');
+        if (!rows.length) return 'No memories saved yet.';
+        return rows.map(r => '[' + r.memory_key + ']: ' + r.memory_value.substring(0, 100)).join('\n');
+      } catch (err) {
+        return 'Error: ' + err.message;
+      }
+    }
+  },
+
+  memory_delete: {
+    name: 'memory_delete',
+    description: 'Delete a memory by key',
+    params: { key: 'string (required)' },
+    execute: async (args) => {
+      if (!args.key) return 'Error: key is required';
+      const db = getDB();
+      if (!db) return 'Error: database not available';
+
+      try {
+        db.prepare('DELETE FROM max_memory WHERE user_id = ? AND memory_key = ?')
+          .run('default-user', args.key);
+        return 'Deleted memory: ' + args.key;
+      } catch (err) {
+        return 'Error: ' + err.message;
+      }
     }
   }
 };
+
+/**
+ * Get relevant memories for a task (for auto-injection)
+ */
+export function getRelevantMemories(task) {
+  const db = getDB();
+  if (!db) return '';
+
+  try {
+    const words = task.toLowerCase().split(/\s+/).filter(w => w.length > 4).slice(0, 10);
+    const allMemories = db.prepare('SELECT memory_key, memory_value FROM max_memory WHERE user_id = ? ORDER BY updated_at DESC LIMIT 50')
+      .all('default-user');
+
+    const relevant = allMemories.filter(m =>
+      words.some(w =>
+        m.memory_key.toLowerCase().includes(w) ||
+        m.memory_value.toLowerCase().includes(w)
+      )
+    ).slice(0, 5);
+
+    if (!relevant.length) return '';
+
+    return '\n\nRelevant memories from previous sessions:\n' +
+      relevant.map(m => '- ' + m.memory_key + ': ' + m.memory_value).join('\n');
+  } catch (e) {
+    return '';
+  }
+}
 
 export default memoryTools;

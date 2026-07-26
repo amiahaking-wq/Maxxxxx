@@ -36,6 +36,8 @@ export async function generateCompletion(messages, options = {}) {
       temperature,
       max_tokens: maxTokens,
       response_format: options.response_format,
+      tools: options.tools,
+      tool_choice: options.tool_choice,
       budgetManager
     });
 
@@ -48,6 +50,7 @@ export async function generateCompletion(messages, options = {}) {
 
     return {
       content: result.content || '',
+      tool_calls: result.tool_calls || null,
       finishReason: result.finishReason || 'stop',
       usage: {
         promptTokens: result.usage?.prompt_tokens || 0,
