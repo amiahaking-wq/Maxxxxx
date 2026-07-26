@@ -31,6 +31,7 @@ export function useWebSocket(sessionId) {
   const [message, setMessage] = useState(null);
   const [status, setStatus] = useState(null);
   const [token, setToken] = useState(null);  // { type: 'start'|'token'|'done', text?, model? }
+  const [fileCreated, setFileCreated] = useState(null);  // { path, content, language, tool, size }
   const socketRef = useRef(null);
 
   // Keep latest sessionId in a ref so the connect handler can subscribe
@@ -132,6 +133,12 @@ export function useWebSocket(sessionId) {
       window.dispatchEvent(new CustomEvent('ws:token', { detail: data }));
     });
 
+    // File creation events — fired when the agent calls write_file/edit_file
+    socket.on('file_created', (data) => {
+      setFileCreated(data);
+      window.dispatchEvent(new CustomEvent('ws:file_created', { detail: data }));
+    });
+
     socket.on('error', (error) => {
       console.error('WebSocket error:', error);
     });
@@ -190,6 +197,7 @@ export function useWebSocket(sessionId) {
     message,
     status,
     token,
+    fileCreated,
     subscribe,
     unsubscribe,
     joinRoom,

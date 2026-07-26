@@ -343,3 +343,25 @@ export function broadcastToken(sessionId, payload) {
     ...payload
   });
 }
+
+/**
+ * Broadcast a file creation event to the session room.
+ * Used by react-loop-v2.js whenever write_file/edit_file succeeds.
+ * The frontend listens for this event and stores the file in IndexedDB
+ * so the user can preview it (Claude Artifacts-style) and download it.
+ *
+ * @param {string} sessionId - Session ID
+ * @param {Object} file - { path, content, language, tool }
+ */
+export function broadcastFileCreated(sessionId, file) {
+  if (!global.wsServer) {
+    return;
+  }
+
+  const room = `session-${sessionId}`;
+  global.wsServer.to(room).emit('file_created', {
+    sessionId,
+    timestamp: new Date().toISOString(),
+    ...file
+  });
+}

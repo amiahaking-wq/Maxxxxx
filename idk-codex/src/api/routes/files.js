@@ -314,4 +314,93 @@ router.post('/content', authenticate, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/files/sandbox-download/:filePath
+ * Download a sandbox file as an attachment (Content-Disposition: attachment).
+ * Used by the frontend "Download" button on artifact cards.
+ *
+ * Express 5 path-to-regexp v8 syntax — use a regex route to capture the file path.
+ */
+router.get(/^\/sandbox-download\/(.+)$/, async (req, res) => {
+  try {
+    const requestedPath = req.params[0];
+    const sandboxRoot = path.resolve(process.env.SANDBOX_WORKSPACE || './sandbox-workspace');
+    const fullPath = path.resolve(sandboxRoot, requestedPath);
+
+    // Prevent path traversal
+    if (!fullPath.startsWith(sandboxRoot)) {
+      return res.status(403).json({ error: 'Access denied — path outside sandbox' });
+    }
+
+    if (!fs.existsSync(fullPath)) {
+      return res.status(404).json({ error: 'File not found', path: requestedPath });
+    }
+
+    const stats = fs.statSync(fullPath);
+    if (stats.isDirectory()) {
+      return res.status(400).json({ error: 'Cannot download a directory' });
+    }
+
+    if (stats.size > 10 * 1024 * 1024) {
+      return res.status(413).json({ error: 'File too large (max 10MB)' });
+    }
+
+    const filename = path.basename(fullPath);
+    res.download(fullPath, filename, (err) => {
+      if (err) {
+        logger.error('File download failed', { error: err.message, path: requestedPath });
+      }
+    });
+  } catch (error) {
+    logger.error('Failed to download sandbox file', { error: error.message });
+    res.status(500).json({ error: 'Failed to download file', details: error.message });
+  }
+});
+
+/**
+ * GET /api/files/sandbox-list
+ * Recursive listing of all files in the sandbox workspace.
+ * Returns an array of { path, size, modified } objects.
+ *
+ * Used by the frontend FilesPanel to show all files in the current session.
+ */
+router.get('/sandbox-list', async (req, res) => {
+  try {
+    const sandboxRoot = path.resolve(process.env.SANDBOX_WORKSPACE || './sandbox-workspace');
+    if (!fs.existsSync(sandboxRoot)) {
+      return res.json({ success: true, files: [] });
+    }
+
+    const files = [];
+    function walk(dir, relativeTo) {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        // Skip node_modules, .git, and other junk
+        if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.DS_Store') continue;
+        const fullPath = path.join(dir, entry.name);
+        const relPath = path.relative(relativeTo, fullPath);
+        if (entry.isDirectory()) {
+          walk(fullPath, relativeTo);
+        } else {
+          const stats = fs.statSync(fullPath);
+          // Skip files larger than 5MB
+          if (stats.size > 5 * 1024 * 1024) continue;
+          files.push({
+            path: relPath,
+            name: entry.name,
+            size: stats.size,
+            modified: stats.mtime
+          });
+        }
+      }
+    }
+    walk(sandboxRoot, sandboxRoot);
+
+    res.json({ success: true, files });
+  } catch (error) {
+    logger.error('Failed to list sandbox files', { error: error.message });
+    res.status(500).json({ error: 'Failed to list files', details: error.message });
+  }
+});
+
 export default router;

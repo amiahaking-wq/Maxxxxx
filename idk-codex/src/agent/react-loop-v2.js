@@ -17,7 +17,7 @@
  */
 
 import { executeTool } from './tools/registry.js';
-import { broadcastProgress, broadcastMessage, broadcastToken } from '../api/websocket.js';
+import { broadcastProgress, broadcastMessage, broadcastToken, broadcastFileCreated } from '../api/websocket.js';
 import { addConversationMessage } from '../database/conversations-supabase.js';
 import { getRelevantMemories } from './tools/memory-tool.js';
 import { uploadToSupabase, isSupabaseConfigured } from './supabase-storage.js';
@@ -28,23 +28,25 @@ const MAX_ITERATIONS = 20;
 // ============================================================================
 // MODEL FALLBACK CHAIN
 // ============================================================================
-// The first model is the env-configured one. If it 404s (free model removed
-// from OpenRouter), we walk down this list of known-good free models.
+// Ordered by what's KNOWN to work on OpenRouter right now.
+// The first model is the env-configured one. If it 404s (free model removed),
+// we walk down this list. gpt-oss-20b:free is currently the most reliable
+// free model on OpenRouter that supports function calling.
 const FALLBACK_MODELS = [
   // 1. Env-configured model (preferred — usually a paid model the user chose)
   null, // sentinel — replaced with process.env.OPENAI_COMPATIBLE_MODEL at call time
-  // 2. Known-good free models that support function calling
+  // 2. Last working model (cached from previous success)
+  // 3. Known-good free models (in priority order based on real availability)
+  'openai/gpt-oss-20b:free',         // ✓ known working (verified in prod logs)
+  'openai/gpt-oss-120b:free',        // larger variant — usually also works
+  'deepseek/deepseek-chat',          // paid (~$0.01/call) — very reliable
+  'meta-llama/llama-3.3-70b-instruct', // paid — reliable fallback
+  // 4. Older free slugs (sometimes still available, last resort)
   'meta-llama/llama-3.3-70b-instruct:free',
   'qwen/qwen-2.5-coder-32b-instruct:free',
-  'qwen/qwen-2.5-72b-instruct:free',
   'mistralai/mistral-small-3.1-24b-instruct:free',
   'moonshotai/kimi-k2:free',
-  'google/gemini-2.0-flash-exp:free',
-  'openai/gpt-oss-20b:free',
-  'openai/gpt-oss-120b:free',
-  // 3. Last resort — cheap paid models (only ~$0.01 per call)
-  'deepseek/deepseek-chat',
-  'meta-llama/llama-3.3-70b-instruct'
+  'google/gemini-2.0-flash-exp:free'
 ];
 
 // Track which model worked last so we skip dead models on subsequent iterations
@@ -323,6 +325,63 @@ function parseXMLTools(text) {
 }
 
 // ============================================================================
+// FILE LANGUAGE DETECTION
+// ============================================================================
+// Used by the frontend to decide how to render the artifact (HTML = iframe,
+// SVG = inline, .py = code block, etc.)
+function detectLanguage(path) {
+  const ext = (path.split('.').pop() || '').toLowerCase();
+  const map = {
+    html: 'html', htm: 'html',
+    css: 'css',
+    js: 'javascript', mjs: 'javascript', cjs: 'javascript',
+    jsx: 'jsx',
+    ts: 'typescript', tsx: 'tsx',
+    json: 'json',
+    py: 'python',
+    rb: 'ruby',
+    go: 'go',
+    rs: 'rust',
+    java: 'java',
+    c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp',
+    cs: 'csharp',
+    php: 'php',
+    sh: 'bash', bash: 'bash',
+    yml: 'yaml', yaml: 'yaml',
+    xml: 'xml',
+    svg: 'svg',
+    md: 'markdown', markdown: 'markdown',
+    txt: 'text',
+    sql: 'sql',
+    dart: 'dart',
+    swift: 'swift',
+    kt: 'kotlin',
+    vue: 'vue',
+    svelte: 'svelte'
+  };
+  return map[ext] || 'text';
+}
+
+/**
+ * Broadcast a file creation event to the WebSocket room.
+ * Called whenever write_file or edit_file succeeds.
+ */
+function notifyFileCreated(sessionId, path, content, toolName) {
+  try {
+    broadcastFileCreated(sessionId, {
+      path,
+      content,
+      language: detectLanguage(path),
+      tool: toolName,
+      size: content.length
+    });
+  } catch (e) {
+    // Non-fatal — file was still written
+    logger.debug('notifyFileCreated failed', { error: e.message });
+  }
+}
+
+// ============================================================================
 // REACT LOOP
 // ============================================================================
 
@@ -418,7 +477,13 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
         }
 
         if (toolName === 'write_file' || toolName === 'edit_file') {
-          if (toolArgs.path) filesModified.add(toolArgs.path);
+          if (toolArgs.path) {
+            filesModified.add(toolArgs.path);
+            // Broadcast file content to the WebSocket room so the frontend
+            // can save it to IndexedDB and show an artifact card.
+            const fileContent = toolArgs.content || toolArgs.new_text || '';
+            notifyFileCreated(sessionId, toolArgs.path, fileContent, toolName);
+          }
         }
 
         logger.info('REACT_TOOL_CALL', { sessionId, iteration, tool: toolName, args: JSON.stringify(toolArgs).substring(0, 200) });
@@ -463,7 +528,11 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
         }
 
         if (tc.name === 'write_file' || tc.name === 'edit_file') {
-          if (tc.args.path) filesModified.add(tc.args.path);
+          if (tc.args.path) {
+            filesModified.add(tc.args.path);
+            const fileContent = tc.args.content || tc.args.new_text || '';
+            notifyFileCreated(sessionId, tc.args.path, fileContent, tc.name);
+          }
         }
 
         logger.info('REACT_TOOL_CALL', { sessionId, iteration, tool: tc.name });
@@ -488,6 +557,8 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
         try {
           const result = await executeTool('write_file', { path: block.filename, content: block.code });
           filesModified.add(block.filename);
+          // Broadcast the auto-extracted file to the frontend
+          notifyFileCreated(sessionId, block.filename, block.code, 'write_file (auto-extracted)');
           logger.info('REACT_AUTO_WRITE', { sessionId, file: block.filename });
           broadcastProgress(sessionId, { phase: 'react', status: 'tool_result', iteration, tool: 'write_file (auto)', result: result.substring(0, 200) });
           messages.push({ role: 'user', content: '(Auto-saved to ' + block.filename + ')\n' + result });

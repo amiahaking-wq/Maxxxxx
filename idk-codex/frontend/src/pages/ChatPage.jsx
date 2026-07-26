@@ -9,26 +9,32 @@
  *  - Simple / Developer mode toggle (Developer exposes file tree + terminal)
  *  - Multiplayer share link
  *  - No Enter-to-send (button only) per user spec
+ *  - Claude-style artifacts: file_created events → ArtifactCard → ArtifactPreview
+ *  - IndexedDB file persistence: files survive restarts, work offline, on phone + PC
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   ArrowLeft, Send, Square, Paperclip, Camera, Code2, MessageSquare,
-  Share2, Settings, X, ChevronDown, Image as ImageIcon
+  Share2, Settings, X, ChevronDown, Image as ImageIcon, Folder
 } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { saveFile, downloadFile, listFiles } from '../lib/fileStore';
+import ArtifactCard from '../components/Artifact/ArtifactCard';
+import ArtifactPreview from '../components/Artifact/ArtifactPreview';
+import FilesPanel from '../components/Artifact/FilesPanel';
 
 const API_BASE = import.meta.env.VITE_API_URL || window.location.origin;
 
-// Quick model picker — top free models on OpenRouter + paid fallback
+// Quick model picker — ordered by what's KNOWN to work right now.
+// gpt-oss-20b:free is the most reliable free OpenRouter model.
 const QUICK_MODELS = [
-  { id: 'openrouter-llama',  name: 'Llama 3.3 70B',    badge: 'free',   model: 'meta-llama/llama-3.3-70b-instruct:free' },
-  { id: 'openrouter-qwen',   name: 'Qwen 2.5 Coder 32B', badge: 'free', model: 'qwen/qwen-2.5-coder-32b-instruct:free' },
-  { id: 'openrouter-glm',    name: 'GLM-4.5',           badge: 'free',   model: 'zhipuai/glm-4.5:free' },
-  { id: 'openrouter-kimi',   name: 'Kimi K2',           badge: 'free',   model: 'moonshotai/kimi-k2:free' },
-  { id: 'openrouter-deepseek', name: 'DeepSeek V3',     badge: 'paid',   model: 'deepseek/deepseek-chat' },
-  { id: 'groq-llama-70b',    name: 'Llama 3.3 70B (Groq)', badge: 'fast', model: 'llama-3.3-70b-versatile' }
+  { id: 'openrouter-gpt-oss-20b', name: 'GPT-OSS 20B',     badge: 'free',  model: 'openai/gpt-oss-20b:free' },
+  { id: 'openrouter-gpt-oss-120b', name: 'GPT-OSS 120B',    badge: 'free',  model: 'openai/gpt-oss-120b:free' },
+  { id: 'openrouter-deepseek', name: 'DeepSeek V3',         badge: 'paid',  model: 'deepseek/deepseek-chat' },
+  { id: 'openrouter-llama',  name: 'Llama 3.3 70B',         badge: 'paid',  model: 'meta-llama/llama-3.3-70b-instruct' },
+  { id: 'groq-llama-70b',    name: 'Llama 3.3 70B (Groq)',  badge: 'fast',  model: 'llama-3.3-70b-versatile' }
 ];
 
 export default function ChatPage() {
@@ -40,7 +46,7 @@ export default function ChatPage() {
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState('');
-  const [currentModel, setCurrentModel] = useState(() => localStorage.getItem('max_model') || 'openrouter-llama');
+  const [currentModel, setCurrentModel] = useState(() => localStorage.getItem('max_model') || 'openrouter-gpt-oss-20b');
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [devMode, setDevMode] = useState(() => localStorage.getItem('max_mode') === 'dev');
@@ -52,8 +58,111 @@ export default function ChatPage() {
 
   const {
     connected, isReconnecting, token, message, progress: wsProgress,
-    subscribe: wsSubscribe, joinRoom
+    fileCreated, subscribe: wsSubscribe, joinRoom
   } = useWebSocket(conversationId);
+
+  // Artifact state
+  const [sessionFiles, setSessionFiles] = useState([]);  // files for the current session (for badge count)
+  const [showFilesPanel, setShowFilesPanel] = useState(false);
+  const [previewFile, setPreviewFile] = useState(null);
+
+  // Listen for file_created events from the WebSocket.
+  // Each event contains { path, content, language, tool, size }.
+  // We save it to IndexedDB and attach an ArtifactCard to the most recent
+  // assistant message.
+  useEffect(() => {
+    if (!fileCreated || !conversationId) return;
+    if (fileCreated.sessionId && fileCreated.sessionId !== conversationId) return;
+
+    // Save to IndexedDB
+    saveFile({
+      sessionId: conversationId,
+      path: fileCreated.path,
+      content: fileCreated.content,
+      language: fileCreated.language,
+      tool: fileCreated.tool
+    }).then(() => {
+      // Update the session file count badge
+      listFiles(conversationId).then(setSessionFiles).catch(() => {});
+    }).catch(err => console.error('saveFile failed:', err));
+
+    // Attach the file as an artifact to the most recent assistant message
+    setMessages(prev => {
+      if (prev.length === 0) return prev;
+      const lastIdx = prev.length - 1;
+      const last = prev[lastIdx];
+      // Only attach to assistant messages (or system messages from the agent)
+      if (last.role !== 'assistant' && last.role !== 'system') {
+        // If the last message is the user's, add a placeholder assistant message with the artifact
+        return [...prev, {
+          id: Date.now() + Math.random(),
+          role: 'assistant',
+          content: 'I created a file:',
+          timestamp: new Date().toISOString(),
+          artifacts: [fileCreated]
+        }];
+      }
+      const artifacts = last.artifacts || [];
+      // Avoid duplicates by path
+      if (artifacts.find(a => a.path === fileCreated.path)) return prev;
+      const updated = { ...last, artifacts: [...artifacts, fileCreated] };
+      const next = [...prev];
+      next[lastIdx] = updated;
+      return next;
+    });
+  }, [fileCreated, conversationId]);
+
+  // Load files for the current session on mount (so badge count is correct
+  // and previously-saved artifacts show up)
+  useEffect(() => {
+    if (conversationId) {
+      listFiles(conversationId).then(setSessionFiles).catch(() => {});
+    }
+  }, [conversationId]);
+
+  const handleOpenArtifact = useCallback((file) => {
+    // Make sure the file has sessionId + content for the preview
+    setPreviewFile({
+      ...file,
+      sessionId: file.sessionId || conversationId,
+      content: file.content || ''  // may be empty for server-only files; preview handles that
+    });
+  }, [conversationId]);
+
+  const handleDownloadArtifact = useCallback(async (file) => {
+    await downloadFile(file.sessionId || conversationId, file.path);
+  }, [conversationId]);
+
+  // If user clicks a server-only file (no content locally), fetch it from the server first
+  const handleOpenServerFile = useCallback(async (file) => {
+    if (file.content) {
+      setPreviewFile({ ...file, sessionId: conversationId });
+      return;
+    }
+    try {
+      const r = await fetch(`${API_BASE}/api/files/sandbox/${encodeURIComponent(file.path)}`);
+      if (r.ok) {
+        const data = await r.json();
+        if (data.success && data.content) {
+          // Save to IndexedDB for next time
+          await saveFile({
+            sessionId: conversationId,
+            path: file.path,
+            content: data.content,
+            language: file.language
+          });
+          setPreviewFile({
+            ...file,
+            sessionId: conversationId,
+            content: data.content
+          });
+          return;
+        }
+      }
+    } catch (e) { /* fall through */ }
+    // Fallback: open with empty content (code tab will show empty)
+    setPreviewFile({ ...file, sessionId: conversationId, content: '' });
+  }, [conversationId]);
 
   // Listen for new messages from the WebSocket (final assembled message)
   useEffect(() => {
@@ -349,6 +458,21 @@ export default function ChatPage() {
 
         <div className="flex-1 flex items-center justify-center gap-2">
           <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'} ${isReconnecting ? 'animate-pulse' : ''}`} />
+
+          {/* Files button — shows count badge */}
+          <button
+            onClick={() => setShowFilesPanel(true)}
+            className="relative flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors text-sm"
+            title="View files"
+          >
+            <Folder size={16} />
+            {sessionFiles.length > 0 && (
+              <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-500 text-white text-xs rounded-full flex items-center justify-center font-bold">
+                {sessionFiles.length > 9 ? '9+' : sessionFiles.length}
+              </span>
+            )}
+          </button>
+
           <button
             onClick={() => setShowModelPicker(!showModelPicker)}
             className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors text-sm"
@@ -453,7 +577,7 @@ export default function ChatPage() {
             key={msg.id || idx}
             className={`flex mb-4 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
           >
-            <div className={`max-w-[85%] ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-gray-900 text-gray-100'} rounded-2xl px-4 py-3`}>
+            <div className={`max-w-[90%] ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-gray-900 text-gray-100'} rounded-2xl px-4 py-3`}>
               {msg.images && msg.images.length > 0 && (
                 <div className="flex flex-wrap gap-2 mb-2">
                   {msg.images.map((img, i) => (
@@ -461,8 +585,25 @@ export default function ChatPage() {
                   ))}
                 </div>
               )}
-              <div className="text-sm leading-relaxed">{renderContent(msg.content)}</div>
-              {msg.filesModified && msg.filesModified.length > 0 && (
+              {msg.content && (
+                <div className="text-sm leading-relaxed">{renderContent(msg.content)}</div>
+              )}
+
+              {/* Artifact cards — Claude-style file previews */}
+              {msg.artifacts && msg.artifacts.length > 0 && (
+                <div className="mt-2">
+                  {msg.artifacts.map((art, aidx) => (
+                    <ArtifactCard
+                      key={aidx}
+                      file={art}
+                      onOpen={handleOpenArtifact}
+                      onDownload={handleDownloadArtifact}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {msg.filesModified && msg.filesModified.length > 0 && !msg.artifacts && (
                 <div className="mt-2 pt-2 border-t border-gray-800 text-xs text-gray-400">
                   Files: {msg.filesModified.join(', ')}
                 </div>
@@ -598,6 +739,26 @@ export default function ChatPage() {
           )}
         </div>
       </div>
+
+      {/* ===== Files Panel (drawer) ===== */}
+      <FilesPanel
+        sessionId={conversationId}
+        open={showFilesPanel}
+        onClose={() => setShowFilesPanel(false)}
+        onOpenFile={(file) => {
+          setShowFilesPanel(false);
+          handleOpenServerFile(file);
+        }}
+      />
+
+      {/* ===== Artifact Preview modal ===== */}
+      {previewFile && (
+        <ArtifactPreview
+          file={previewFile}
+          onClose={() => setPreviewFile(null)}
+          onDownload={handleDownloadArtifact}
+        />
+      )}
     </div>
   );
 }

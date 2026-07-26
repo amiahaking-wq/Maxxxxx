@@ -223,13 +223,10 @@ router.post('/:id/messages', async (req, res) => {
             const apiKey = process.env.OPENAI_COMPATIBLE_API_KEY;
             const candidateModels = [
               process.env.OPENAI_COMPATIBLE_MODEL,
-              'meta-llama/llama-3.3-70b-instruct:free',
-              'qwen/qwen-2.5-coder-32b-instruct:free',
-              'mistralai/mistral-small-3.1-24b-instruct:free',
-              'moonshotai/kimi-k2:free',
-              'google/gemini-2.0-flash-exp:free',
-              'openai/gpt-oss-20b:free',
-              'deepseek/deepseek-chat'
+              'openai/gpt-oss-20b:free',          // ✓ known working
+              'openai/gpt-oss-120b:free',
+              'deepseek/deepseek-chat',           // paid fallback
+              'meta-llama/llama-3.3-70b-instruct' // paid fallback
             ].filter(Boolean);
 
             const headers = { 'Content-Type': 'application/json' };
