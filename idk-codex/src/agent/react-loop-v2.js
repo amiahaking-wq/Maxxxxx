@@ -1,23 +1,16 @@
 /**
- * MAX 2.0 — ReAct Agent Loop
+ * MAX 2.0 — ReAct Agent Loop with OpenAI Function Calling
  *
- * The core agent engine. Replaces the old 5-phase loop with a dynamic
- * Think → Act → Observe loop inspired by OpenHands, SWE-agent, and Aider.
+ * Triple fallback strategy:
+ *   1. OpenAI function calling (tools array) — works with most OpenRouter models
+ *   2. XML <tool> tag parsing — fallback for models without function calling
+ *   3. Markdown code block extraction — last resort for any model
  *
- * How it works:
- *   1. Send the user's task + tool descriptions to the LLM
- *   2. LLM responds with reasoning + optional tool calls (text-based protocol)
- *   3. Parse tool calls from the response
- *   4. Execute each tool, collect results
- *   5. Feed results back to the LLM as observations
- *   6. Repeat until LLM says "DONE:" or max iterations reached
- *
- * The text-based tool protocol:
- *   <tool name="bash">
- *   <arg name="command">ls -la</arg>
- *   </tool>
- *
- * This works with ANY model — no function calling needed.
+ * The agent:
+ *   1. Sends task + tools to LLM
+ *   2. LLM responds with text and/or tool_calls
+ *   3. Executes tool calls, feeds results back
+ *   4. Repeats until task_complete is called or max iterations
  */
 
 import { generateCompletion } from '../groq/client.js';
@@ -29,76 +22,262 @@ import { uploadToSupabase, isSupabaseConfigured } from './supabase-storage.js';
 import logger from '../utils/logger.js';
 
 const MAX_ITERATIONS = parseInt(process.env.MAX_AGENT_ITERATIONS || '15', 10);
-const MAX_THINKING_TOKENS = parseInt(process.env.MAX_THINKING_TOKENS || '2000', 10);
-const MAX_ACTION_TOKENS = parseInt(process.env.MAX_ACTION_TOKENS || '6000', 10);
+const MAX_ACTION_TOKENS = parseInt(process.env.MAX_ACTION_TOKENS || '8000', 10);
+
+// ============================================================================
+// FUNCTION CALLING TOOL DEFINITIONS
+// ============================================================================
+
+const FUNCTION_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'bash',
+      description: 'Run a shell command in the workspace. Returns stdout and stderr.',
+      parameters: {
+        type: 'object',
+        properties: { command: { type: 'string', description: 'Shell command to run' } },
+        required: ['command']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'write_file',
+      description: 'Create or overwrite a file with content. Creates parent dirs.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path relative to workspace' },
+          content: { type: 'string', description: 'Full file content (raw, not HTML-escaped)' }
+        },
+        required: ['path', 'content']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_file',
+      description: 'Read a file with line numbers. Max 200 lines.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path' },
+          offset: { type: 'number', description: 'Starting line (default 1)' },
+          limit: { type: 'number', description: 'Max lines (default 200)' }
+        },
+        required: ['path']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'edit_file',
+      description: 'Search and replace text in a file. old_text must match exactly.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path' },
+          old_text: { type: 'string', description: 'Text to find (must match exactly)' },
+          new_text: { type: 'string', description: 'Replacement text' }
+        },
+        required: ['path', 'old_text', 'new_text']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_files',
+      description: 'List files in a directory.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Directory path (default: workspace root)' },
+          recursive: { type: 'boolean', description: 'List recursively (default false)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search',
+      description: 'Search for text in files (grep) or find files by name (glob with pattern: prefix).',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query' },
+          path: { type: 'string', description: 'Directory to search (default: root)' }
+        },
+        required: ['query']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'web_fetch',
+      description: 'Fetch a URL and return text content. Max 5000 chars.',
+      parameters: {
+        type: 'object',
+        properties: { url: { type: 'string', description: 'URL to fetch' } },
+        required: ['url']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'task_complete',
+      description: 'Call this when the task is fully done. Provide a summary of what was accomplished.',
+      parameters: {
+        type: 'object',
+        properties: { summary: { type: 'string', description: 'What was accomplished' } },
+        required: ['summary']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_navigate',
+      description: 'Open a URL in the browser',
+      parameters: {
+        type: 'object',
+        properties: { url: { type: 'string', description: 'URL to navigate to' } },
+        required: ['url']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_screenshot',
+      description: 'Take a screenshot of the current browser page',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_click',
+      description: 'Click an element by CSS selector or text',
+      parameters: {
+        type: 'object',
+        properties: {
+          selector: { type: 'string', description: 'CSS selector or text to click' },
+          by_text: { type: 'boolean', description: 'If true, find element by text content' }
+        },
+        required: ['selector']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_type',
+      description: 'Type text into an input field',
+      parameters: {
+        type: 'object',
+        properties: {
+          selector: { type: 'string', description: 'CSS selector of input' },
+          text: { type: 'string', description: 'Text to type' },
+          clear_first: { type: 'boolean', description: 'Clear field first' }
+        },
+        required: ['selector', 'text']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_get_text',
+      description: 'Extract visible text from the page',
+      parameters: {
+        type: 'object',
+        properties: { selector: { type: 'string', description: 'CSS selector (default: body)' } }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_evaluate',
+      description: 'Run JavaScript in the browser',
+      parameters: {
+        type: 'object',
+        properties: { code: { type: 'string', description: 'JavaScript to evaluate' } },
+        required: ['code']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'memory_save',
+      description: 'Save something to persistent memory — survives restarts',
+      parameters: {
+        type: 'object',
+        properties: {
+          key: { type: 'string', description: 'Unique key name' },
+          value: { type: 'string', description: 'Value to remember' },
+          tags: { type: 'string', description: 'Comma-separated tags' }
+        },
+        required: ['key', 'value']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'memory_get',
+      description: 'Retrieve something from persistent memory',
+      parameters: {
+        type: 'object',
+        properties: { key: { type: 'string', description: 'Key to retrieve' } },
+        required: ['key']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'memory_list',
+      description: 'List all saved memories',
+      parameters: { type: 'object', properties: {} }
+    }
+  }
+];
 
 // ============================================================================
 // SYSTEM PROMPT
 // ============================================================================
 
 function buildSystemPrompt(workspacePath) {
-  const toolDescs = getToolDescriptions();
+  return `You are MAX, an autonomous software engineer. Complete the task fully using the available tools.
 
-  return `You are MAX, an autonomous software engineer. You MUST use tools to complete tasks. You work in ${workspacePath}.
+You work in: ${workspacePath}
 
-CRITICAL: You MUST call at least one tool before saying DONE. If you do not call a tool, the task fails.
-
-To call a tool, write this EXACT format:
-
-<tool name="write_file">
-<arg name="path">hello.py</arg>
-<arg name="content">print("hello")</arg>
-</tool>
-
-Available tools:
-${toolDescs}
-
-Workflow:
-1. Call write_file to create the file(s) the user asked for
-2. Call bash to verify it works
-3. Say DONE: <summary>
-
-Example for "Create hello.py":
-<tool name="write_file">
-<arg name="path">hello.py</arg>
-<arg name="content">print("Hello, World!")
-</arg>
-</tool>
-
-Example for "Build an HTML page":
-<tool name="write_file">
-<arg name="path">index.html</arg>
-<arg name="content"><!DOCTYPE html>
-<html>
-<head><title>My Page</title></head>
-<body><h1>Hello</h1></body>
-</html></arg>
-</tool>
-
-RULES:
-- ALWAYS call a tool. DO IT, do not describe it.
-- Write REAL complete code, not placeholders.
-- Do NOT HTML-escape code. Write < not &lt;
-- After writing files, say: DONE: <what you did>
-- Keep text SHORT. Tool calls do the work.`;
+Rules:
+- Use tools to actually DO things, not just describe them.
+- Write real, complete, working code — not placeholders.
+- After writing files, run them to verify they work.
+- Use memory_save to remember important details for future tasks.
+- Use browser tools to browse websites when needed.
+- When completely done, call task_complete with a summary.
+- Keep text responses short. Let tool calls do the work.`;
 }
 
 // ============================================================================
-// CODE BLOCK EXTRACTOR (fallback for models that don't use XML tool format)
+// CODE BLOCK EXTRACTOR (fallback for models without function calling)
 // ============================================================================
 
-/**
- * Extract code blocks from markdown-formatted LLM responses.
- * Works with ```python, ```javascript, ```html, ```css, ```json, etc.
- * Also works with plain code blocks without language tags.
- *
- * @param {string} text - LLM response text
- * @returns {Array<{filename, code, language}>}
- */
 function extractCodeBlocks(text) {
   const blocks = [];
-
-  // Match ```language\n...code...\n``` blocks
   const codeBlockRegex = /```(\w*)\n([\s\S]*?)```/g;
   let match;
   let blockIndex = 0;
@@ -106,42 +285,16 @@ function extractCodeBlocks(text) {
   while ((match = codeBlockRegex.exec(text)) !== null) {
     const language = match[1] || 'txt';
     const code = match[2].trim();
-
     if (!code || code.length < 10) continue;
 
-    // Determine filename from language
     let filename;
     const taskLower = text.toLowerCase();
-
-    // Try to find a filename mentioned in the text near the code block
     const filenameMatch = text.substring(Math.max(0, match.index - 200), match.index).match(/(?:file|name|save|create|path)[:\s]+([a-zA-Z0-9_\-\/]+\.\w+)/i);
     if (filenameMatch) {
       filename = filenameMatch[1];
     } else {
-      // Auto-generate filename from language
-      const extMap = {
-        python: 'py', py: 'py',
-        javascript: 'js', js: 'js',
-        typescript: 'ts', ts: 'ts',
-        html: 'html',
-        css: 'css',
-        json: 'json',
-        bash: 'sh', sh: 'sh',
-        java: 'java',
-        cpp: 'cpp', c: 'c',
-        go: 'go',
-        rust: 'rs',
-        ruby: 'rb',
-        php: 'php',
-        sql: 'sql',
-        yaml: 'yaml', yml: 'yaml',
-        xml: 'xml',
-        markdown: 'md', md: 'md'
-      };
-
+      const extMap = { python: 'py', py: 'py', javascript: 'js', js: 'js', typescript: 'ts', ts: 'ts', html: 'html', css: 'css', json: 'json', bash: 'sh', sh: 'sh', java: 'java', go: 'go', rust: 'rs', ruby: 'rb', php: 'php', sql: 'sql' };
       const ext = extMap[language.toLowerCase()] || 'txt';
-
-      // If the task mentions a specific file type, use that
       if (taskLower.includes('html') || taskLower.includes('web page') || taskLower.includes('landing')) {
         filename = blockIndex === 0 ? 'index.html' : `page${blockIndex}.html`;
       } else if (taskLower.includes('css') || taskLower.includes('style')) {
@@ -150,88 +303,48 @@ function extractCodeBlocks(text) {
         filename = blockIndex === 0 ? 'script.js' : `script${blockIndex}.js`;
       } else if (taskLower.includes('python') || language === 'python' || language === 'py') {
         filename = blockIndex === 0 ? 'main.py' : `module${blockIndex}.py`;
-      } else if (taskLower.includes('react') || taskLower.includes('component')) {
-        filename = `Component${blockIndex}.jsx`;
       } else {
         filename = `file_${blockIndex}.${ext}`;
       }
     }
-
     blocks.push({ filename, code, language });
     blockIndex++;
   }
-
   return blocks;
 }
 
 // ============================================================================
-// TOOL CALL PARSER
+// XML TOOL PARSER (fallback #2)
 // ============================================================================
 
-/**
- * Parse tool calls from LLM response text.
- * Looks for <tool name="...">...<arg name="...">...</arg>...</tool> blocks.
- *
- * @param {string} text - the LLM response
- * @returns {{ reasoning: string, toolCalls: Array<{name, args}> }}
- */
-export function parseToolCalls(text) {
+function parseToolCalls(text) {
   const toolCalls = [];
-  let reasoning = text;
-
-  // Regex to match <tool name="...">...</tool> blocks
   const toolRegex = /<tool\s+name="([^"]+)">([\s\S]*?)<\/tool>/g;
   let match;
-
   while ((match = toolRegex.exec(text)) !== null) {
     const toolName = match[1];
     const toolBody = match[2];
-
-    // Parse arguments
     const args = {};
     const argRegex = /<arg\s+name="([^"]+)">([\s\S]*?)<\/arg>/g;
     let argMatch;
     while ((argMatch = argRegex.exec(toolBody)) !== null) {
-      const argName = argMatch[1];
-      let argValue = argMatch[2];
-
-      // Remove leading/trailing whitespace from the value but preserve internal formatting
-      argValue = argValue.replace(/^\n+/, '').replace(/\n+$/, '');
-
-      args[argName] = argValue;
+      args[argMatch[1]] = argMatch[2].replace(/^\n+/, '').replace(/\n+$/, '');
     }
-
     toolCalls.push({ name: toolName, args });
   }
-
-  // Remove tool blocks from reasoning text
-  reasoning = text.replace(toolRegex, '').trim();
-
-  return { reasoning, toolCalls };
+  return { reasoning: text.replace(toolRegex, '').trim(), toolCalls };
 }
 
 // ============================================================================
 // REACT LOOP
 // ============================================================================
 
-/**
- * Execute the ReAct agent loop for a task.
- *
- * @param {string} task - the user's task
- * @param {string} sessionId - session ID for WebSocket updates
- * @param {string} userId - user ID
- * @param {Object} options - { workspacePath, model, onProgress }
- * @returns {Promise<Object>} { success, summary, iterations, filesModified }
- */
 export async function executeReActLoop(task, sessionId, userId, options = {}) {
   const workspacePath = options.workspacePath || process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
-  const onProgress = options.onProgress || (() => {});
 
-  logger.info('REACT_LOOP_START', { task: task.substring(0, 100), sessionId, workspacePath });
+  logger.info('REACT_LOOP_START', { task: task.substring(0, 100), sessionId });
 
   const systemPrompt = buildSystemPrompt(workspacePath);
-
-  // Conversation history for the LLM (system + user + observations)
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: task }
@@ -242,294 +355,195 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
   let finalSummary = '';
   let isDone = false;
 
-  // Broadcast start
-  broadcastProgress(sessionId, {
-    phase: 'react',
-    status: 'running',
-    iteration: 0,
-    maxIterations: MAX_ITERATIONS,
-    task
-  });
-  onProgress({ phase: 'react', status: 'running', iteration: 0 });
+  broadcastProgress(sessionId, { phase: 'react', status: 'running', iteration: 0, task });
+  broadcastMessage(sessionId, { role: 'assistant', content: '', type: 'streaming_start' });
 
   while (iteration < MAX_ITERATIONS && !isDone) {
     iteration++;
-    logger.info('REACT_ITERATION', { sessionId, iteration, messageCount: messages.length });
+    logger.info('REACT_ITERATION', { sessionId, iteration });
 
-    // Broadcast iteration start
-    broadcastProgress(sessionId, {
-      phase: 'react',
-      status: 'thinking',
-      iteration,
-      maxIterations: MAX_ITERATIONS
-    });
-    onProgress({ phase: 'react', status: 'thinking', iteration });
+    broadcastProgress(sessionId, { phase: 'react', status: 'thinking', iteration });
 
-    // Call the LLM — NEVER use Echo provider for the ReAct loop
-    let llmResponse;
+    // Call LLM with function calling tools
+    let llmResult;
     try {
-      // Condense messages if the conversation is getting too long
-      const condensedMessages = await condenseMessages(messages, {
-        maxTokens: 6000,
-        keepRecent: 8
-      });
+      const condensedMessages = await condenseMessages(messages, { maxTokens: 6000, keepRecent: 8 });
 
-      // Temporarily disable Echo so the adapter doesn't fall back to it
-      const prevEchoEnabled = process.env.ECHO_PROVIDER_ENABLED;
+      // Disable Echo for real tasks
+      const prevEcho = process.env.ECHO_PROVIDER_ENABLED;
       process.env.ECHO_PROVIDER_ENABLED = 'false';
 
-      // Force using the adapter's current provider (don't let it fall back to Echo)
-      const result = await generateCompletion(condensedMessages, {
-        temperature: 0.3,
-        maxTokens: MAX_ACTION_TOKENS
+      llmResult = await generateCompletion(condensedMessages, {
+        temperature: 0.2,
+        maxTokens: MAX_ACTION_TOKENS,
+        tools: FUNCTION_TOOLS,
+        tool_choice: 'auto'
       });
 
-      // Restore Echo setting
-      process.env.ECHO_PROVIDER_ENABLED = prevEchoEnabled;
-
-      llmResponse = result?.content || '';
+      process.env.ECHO_PROVIDER_ENABLED = prevEcho;
     } catch (err) {
       logger.error('REACT_LLM_ERROR', { iteration, error: err.message });
-      finalSummary = `I couldn't process this because all LLM providers failed: ${err.message}. Please check your API keys or connect your phone.`;
+      finalSummary = 'I could not process this because all LLM providers failed: ' + err.message;
       break;
     }
 
-    if (!llmResponse || llmResponse.trim() === '') {
-      finalSummary = `LLM returned empty response at iteration ${iteration}`;
-      break;
-    }
+    const llmContent = llmResult?.content || '';
+    const llmToolCalls = llmResult?.tool_calls || null;
 
-    // Check if the LLM said DONE
-    const doneMatch = llmResponse.match(/DONE:\s*([\s\S]*?)(?:$|<\/tool>)/i);
-    if (doneMatch) {
-      finalSummary = doneMatch[1].trim();
-      isDone = true;
-      logger.info('REACT_DONE', { sessionId, iteration, summary: finalSummary.substring(0, 100) });
-    }
+    messages.push({ role: 'assistant', content: llmContent, tool_calls: llmToolCalls || undefined });
 
-    // Parse tool calls
-    const { reasoning, toolCalls } = parseToolCalls(llmResponse);
+    // ===== PATH 1: Function calling (preferred) =====
+    if (llmToolCalls && Array.isArray(llmToolCalls) && llmToolCalls.length > 0) {
+      logger.info('REACT_FUNCTION_CALLS', { sessionId, iteration, count: llmToolCalls.length });
 
-    // Broadcast the LLM's reasoning (for UI display)
-    broadcastProgress(sessionId, {
-      phase: 'react',
-      status: 'acting',
-      iteration,
-      reasoning: reasoning.substring(0, 500),
-      toolCount: toolCalls.length
-    });
-    onProgress({
-      phase: 'react',
-      status: 'acting',
-      iteration,
-      reasoning,
-      toolCalls
-    });
+      for (const tc of llmToolCalls) {
+        const toolName = tc.function?.name || tc.name;
+        let toolArgs = {};
+        try { toolArgs = JSON.parse(tc.function?.arguments || '{}'); } catch (e) { toolArgs = {}; }
 
-    // Add the LLM response to conversation history
-    messages.push({ role: 'assistant', content: llmResponse });
-
-    // If no tool calls and not done, check if this is actually a chat response
-    if (toolCalls.length === 0 && !isDone) {
-      // FALLBACK: Extract code from markdown blocks and save as files
-      // This works with ANY model, even ones that don't follow the XML tool format
-      const codeBlocks = extractCodeBlocks(llmResponse);
-
-      if (codeBlocks.length > 0) {
-        logger.info('REACT_CODE_EXTRACTION', { sessionId, iteration, blocksFound: codeBlocks.length });
-
-        for (const block of codeBlocks) {
-          try {
-            const result = await executeTool('write_file', {
-              path: block.filename,
-              content: block.code
-            });
-            filesModified.add(block.filename);
-            logger.info('REACT_AUTO_WRITE', { sessionId, file: block.filename, size: block.code.length });
-
-            // Broadcast the auto-write as a tool call
-            broadcastProgress(sessionId, {
-              phase: 'react',
-              status: 'tool_result',
-              iteration,
-              tool: 'write_file (auto-extracted)',
-              result: result.substring(0, 200)
-            });
-
-            messages.push({
-              role: 'user',
-              content: '(Auto-extracted code from your response and saved to ' + block.filename + ')\n' + result
-            });
-          } catch (e) {
-            logger.warn('REACT_AUTO_WRITE_FAILED', { file: block.filename, error: e.message });
-          }
+        // Check for task_complete
+        if (toolName === 'task_complete') {
+          finalSummary = toolArgs.summary || 'Task complete';
+          isDone = true;
+          logger.info('REACT_DONE', { sessionId, iteration, summary: finalSummary.substring(0, 100) });
+          break;
         }
 
-        // Now check if we should continue or finish
-        if (llmResponse.toLowerCase().includes('done') || iteration >= 3) {
-          finalSummary = 'DONE: Created ' + codeBlocks.length + ' file(s): ' + Array.from(filesModified).join(', ');
+        // Map edit_file old_text/new_text to old_text/new_text (keep consistent)
+        if (toolName === 'edit_file' && toolArgs.old_str) {
+          toolArgs.old_text = toolArgs.old_str;
+          toolArgs.new_text = toolArgs.new_str;
+        }
+
+        logger.info('REACT_TOOL_CALL', { sessionId, iteration, tool: toolName, args: JSON.stringify(toolArgs).substring(0, 200) });
+
+        broadcastProgress(sessionId, { phase: 'react', status: 'executing_tool', iteration, tool: toolName, args: toolArgs });
+
+        if (toolName === 'write_file' || toolName === 'edit_file') {
+          if (toolArgs.path) filesModified.add(toolArgs.path);
+        }
+
+        const toolResult = await executeTool(toolName, toolArgs);
+
+        broadcastProgress(sessionId, { phase: 'react', status: 'tool_result', iteration, tool: toolName, result: toolResult.substring(0, 500) });
+
+        // Vision: if result is a screenshot (base64 image), send as vision message
+        if (toolResult.startsWith('data:image/')) {
+          messages.push({
+            role: 'user',
+            content: [
+              { type: 'text', text: '(Screenshot from ' + toolName + ') — analyze what you see and decide next action:' },
+              { type: 'image_url', image_url: { url: toolResult, detail: 'high' } }
+            ]
+          });
+        } else {
+          // Add tool result as a tool message (OpenAI format)
+          messages.push({
+            role: 'tool',
+            tool_call_id: tc.id || toolName,
+            content: toolResult
+          });
+        }
+      }
+
+      if (isDone) break;
+      continue;
+    }
+
+    // ===== PATH 2: XML tool parsing (fallback) =====
+    const { reasoning, toolCalls: xmlToolCalls } = parseToolCalls(llmContent);
+
+    if (xmlToolCalls.length > 0) {
+      logger.info('REACT_XML_TOOLS', { sessionId, iteration, count: xmlToolCalls.length });
+
+      for (const tc of xmlToolCalls) {
+        if (tc.name === 'task_complete') {
+          finalSummary = tc.args.summary || 'Task complete';
           isDone = true;
           break;
         }
 
-        // Continue the loop to let the model verify or add more
-        messages.push({
-          role: 'user',
-          content: 'I extracted and saved the code from your response. Continue if needed, or say DONE: <summary> to finish.'
-        });
-        continue;
+        if (tc.name === 'write_file' || tc.name === 'edit_file') {
+          if (tc.args.path) filesModified.add(tc.args.path);
+        }
+
+        logger.info('REACT_TOOL_CALL', { sessionId, iteration, tool: tc.name, args: JSON.stringify(tc.args).substring(0, 200) });
+
+        broadcastProgress(sessionId, { phase: 'react', status: 'executing_tool', iteration, tool: tc.name, args: tc.args });
+
+        const toolResult = await executeTool(tc.name, tc.args);
+
+        broadcastProgress(sessionId, { phase: 'react', status: 'tool_result', iteration, tool: tc.name, result: toolResult.substring(0, 500) });
+
+        messages.push({ role: 'user', content: '(Tool result for ' + tc.name + '):\n' + toolResult });
       }
 
-      // No code blocks and no tool calls — treat as conversational response
-      finalSummary = llmResponse.trim();
-      isDone = true;
-      logger.info('REACT_NO_TOOLS_DONE', { sessionId, iteration, responseLength: finalSummary.length });
-      break;
+      if (isDone) break;
+      continue;
     }
 
-    // Execute each tool call
-    for (const toolCall of toolCalls) {
-      logger.info('REACT_TOOL_CALL', {
-        sessionId,
-        iteration,
-        tool: toolCall.name,
-        args: JSON.stringify(toolCall.args).substring(0, 200)
-      });
+    // ===== PATH 3: Code block extraction (last resort) =====
+    const codeBlocks = extractCodeBlocks(llmContent);
 
-      // Broadcast tool execution
-      broadcastProgress(sessionId, {
-        phase: 'react',
-        status: 'executing_tool',
-        iteration,
-        tool: toolCall.name,
-        args: toolCall.args
-      });
-      onProgress({
-        phase: 'react',
-        status: 'executing_tool',
-        iteration,
-        tool: toolCall
-      });
+    if (codeBlocks.length > 0) {
+      logger.info('REACT_CODE_EXTRACTION', { sessionId, iteration, blocks: codeBlocks.length });
 
-      // Track file modifications
-      if (toolCall.name === 'write_file' || toolCall.name === 'edit_file') {
-        if (toolCall.args.path) {
-          filesModified.add(toolCall.args.path);
+      for (const block of codeBlocks) {
+        try {
+          const result = await executeTool('write_file', { path: block.filename, content: block.code });
+          filesModified.add(block.filename);
+          logger.info('REACT_AUTO_WRITE', { sessionId, file: block.filename, size: block.code.length });
+
+          broadcastProgress(sessionId, { phase: 'react', status: 'tool_result', iteration, tool: 'write_file (auto)', result: result.substring(0, 200) });
+          messages.push({ role: 'user', content: '(Auto-extracted and saved to ' + block.filename + ')\n' + result });
+        } catch (e) {
+          logger.warn('REACT_AUTO_WRITE_FAILED', { file: block.filename, error: e.message });
         }
       }
 
-      // Execute the tool
-      const toolResult = await executeTool(toolCall.name, toolCall.args);
+      if (iteration >= 3 || llmContent.toLowerCase().includes('done')) {
+        finalSummary = 'Created ' + codeBlocks.length + ' file(s): ' + Array.from(filesModified).join(', ');
+        isDone = true;
+        break;
+      }
 
-      // Broadcast tool result
-      broadcastProgress(sessionId, {
-        phase: 'react',
-        status: 'tool_result',
-        iteration,
-        tool: toolCall.name,
-        result: toolResult.substring(0, 500)
-      });
-      onProgress({
-        phase: 'react',
-        status: 'tool_result',
-        iteration,
-        tool: toolCall.name,
-        result: toolResult
-      });
-
-      // Add the observation to conversation history
-      messages.push({
-        role: 'user',
-        content: `(Tool result for ${toolCall.name}):\n${toolResult}`
-      });
+      messages.push({ role: 'user', content: 'Code saved. Continue if needed, or call task_complete to finish.' });
+      continue;
     }
 
-    // If done, break out of the loop
-    if (isDone) break;
+    // ===== PATH 4: No tools, no code — conversational response =====
+    finalSummary = llmContent.trim();
+    isDone = true;
+    logger.info('REACT_NO_TOOLS_DONE', { sessionId, iteration, len: finalSummary.length });
+    break;
   }
 
-  // If we hit max iterations without DONE
   if (!isDone && !finalSummary) {
-    finalSummary = `Reached max iterations (${MAX_ITERATIONS}). Last action may not have completed. Files modified: ${Array.from(filesModified).join(', ') || 'none'}`;
-    logger.warn('REACT_MAX_ITERATIONS', { sessionId, iteration });
+    finalSummary = 'Reached max iterations (' + MAX_ITERATIONS + '). Files modified: ' + (Array.from(filesModified).join(', ') || 'none');
   }
 
-  // Broadcast completion
-  broadcastProgress(sessionId, {
-    phase: 'react',
-    status: 'complete',
-    iteration,
-    summary: finalSummary,
-    filesModified: Array.from(filesModified)
-  });
-  onProgress({
-    phase: 'react',
-    status: 'complete',
-    iteration,
-    summary: finalSummary,
-    filesModified: Array.from(filesModified)
-  });
+  broadcastProgress(sessionId, { phase: 'react', status: 'complete', iteration, summary: finalSummary, filesModified: Array.from(filesModified) });
 
-  // Save the summary as an assistant message in the conversation
   try {
     await addConversationMessage(sessionId, 'assistant', finalSummary, {
-      type: 'task_complete',
-      iterations: iteration,
-      filesModified: Array.from(filesModified)
+      type: 'task_complete', iterations: iteration, filesModified: Array.from(filesModified)
     });
   } catch (e) {
-    logger.warn('Failed to save react summary to conversation', { error: e.message });
-    // If FK constraint fails (old conversation not in Supabase), try to create it first
-    if (e.message.includes('FOREIGN KEY') || e.message.includes('23503')) {
-      try {
-        await createConversation('default-user', 'web', 'Recovered Conversation');
-        await addConversationMessage(sessionId, 'assistant', finalSummary, {
-          type: 'task_complete',
-          iterations: iteration,
-          filesModified: Array.from(filesModified)
-        });
-        logger.info('Recovered conversation and saved summary', { sessionId });
-      } catch (e2) {
-        logger.warn('Recovery failed, summary not saved', { error: e2.message });
-      }
-    }
+    logger.warn('Failed to save summary', { error: e.message });
   }
 
-  // Broadcast the final message
-  broadcastMessage(sessionId, {
-    role: 'assistant',
-    content: finalSummary,
-    type: 'task_complete',
-    filesModified: Array.from(filesModified)
-  });
+  broadcastMessage(sessionId, { role: 'assistant', content: finalSummary, type: 'task_complete', filesModified: Array.from(filesModified) });
 
-  // Upload modified files to Supabase for persistent storage (if configured)
   if (isSupabaseConfigured() && filesModified.size > 0) {
     for (const filePath of filesModified) {
-      try {
-        const result = await uploadToSupabase(filePath, sessionId);
-        if (result.success) {
-          logger.info('File saved to Supabase', { filePath, url: result.url });
-        }
-      } catch (e) {
-        logger.warn('Failed to upload to Supabase', { filePath, error: e.message });
-      }
+      try { await uploadToSupabase(filePath, sessionId); } catch (e) { /* ok */ }
     }
   }
 
-  logger.info('REACT_LOOP_COMPLETE', {
-    sessionId,
-    iterations: iteration,
-    filesModified: filesModified.size,
-    success: isDone
-  });
+  logger.info('REACT_LOOP_COMPLETE', { sessionId, iterations: iteration, filesModified: filesModified.size, success: isDone });
 
-  return {
-    success: isDone,
-    summary: finalSummary,
-    iterations: iteration,
-    filesModified: Array.from(filesModified)
-  };
+  return { success: isDone, summary: finalSummary, iterations: iteration, filesModified: Array.from(filesModified) };
 }
 
-export default { executeReActLoop, parseToolCalls };
+export { parseToolCalls, extractCodeBlocks, FUNCTION_TOOLS };
+export default { executeReActLoop, parseToolCalls, extractCodeBlocks, FUNCTION_TOOLS };

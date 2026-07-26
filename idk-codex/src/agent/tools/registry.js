@@ -25,6 +25,8 @@ import fs from 'fs';
 import path from 'path';
 import logger from '../../utils/logger.js';
 import { backupFile, validateAndRevert } from '../guardrails.js';
+import { browserTools } from './browser-tool.js';
+import { memoryTools } from './memory-tool.js';
 
 const SANDBOX = process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
 const MAX_OUTPUT_CHARS = 8000; // Truncate tool output to keep context manageable
@@ -484,6 +486,16 @@ export const TOOLS = {
     }
   }
 };
+
+// Merge browser tools into TOOLS
+for (const [name, tool] of Object.entries(browserTools)) {
+  TOOLS[name] = tool;
+}
+
+// Merge memory tools into TOOLS
+for (const [name, tool] of Object.entries(memoryTools)) {
+  TOOLS[name] = tool;
+}
 
 // ============================================================================
 // TOOL EXECUTION

@@ -50,18 +50,13 @@ export class OpenAICompatibleProvider {
         temperature = 0.3,
         max_tokens = 2000,
         response_format,
+        tools,
+        tool_choice,
         budgetManager
       } = options;
 
       const modelInfo = this.getModelInfo(model);
       const requestMaxTokens = Math.min(max_tokens, modelInfo.maxTokens);
-
-      logger.debug('OpenAI-compatible completion request', {
-        provider: this.name,
-        baseURL: this.baseURL,
-        model,
-        messageCount: messages.length
-      });
 
       const body = {
         model,
@@ -74,12 +69,24 @@ export class OpenAICompatibleProvider {
         body.response_format = response_format;
       }
 
+      // Add function calling tools if provided
+      if (tools && Array.isArray(tools) && tools.length > 0) {
+        body.tools = tools;
+        body.tool_choice = tool_choice || 'auto';
+      }
+
       const headers = {
         'Content-Type': 'application/json'
       };
 
       if (this.apiKey) {
         headers.Authorization = `Bearer ${this.apiKey}`;
+      }
+
+      // Add OpenRouter-specific headers
+      if (this.baseURL.includes('openrouter.ai')) {
+        headers['HTTP-Referer'] = 'https://maxxxxx-production.up.railway.app';
+        headers['X-Title'] = 'MAX Agent';
       }
 
       const response = await fetch(`${this.baseURL}/chat/completions`, {
@@ -105,15 +112,11 @@ export class OpenAICompatibleProvider {
         budgetManager.addUsage(usage.prompt_tokens, usage.completion_tokens);
       }
 
-      logger.debug('OpenAI-compatible completion success', {
-        provider: this.name,
-        model,
-        inputTokens: usage.prompt_tokens,
-        outputTokens: usage.completion_tokens
-      });
+      const message = completion.choices?.[0]?.message;
 
       return {
-        content: completion.choices?.[0]?.message?.content || '',
+        content: message?.content || '',
+        tool_calls: message?.tool_calls || null,
         model,
         provider: this.name,
         usage,
