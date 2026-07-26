@@ -122,15 +122,51 @@ const BASE_MODEL_OPTIONS = [
   },
   {
     id: 'openai-compatible',
-    name: 'OpenAI-compatible (custom)',
+    name: 'OpenRouter / Custom',
     provider: 'openai-compatible',
     model: process.env.OPENAI_COMPATIBLE_MODEL || 'default',
     speed: 'medium',
     speedLabel: '🔌',
     bestFor: ['custom', 'local', 'self-hosted'],
-    description: 'Any OpenAI-compatible endpoint (LM Studio, vLLM, etc.)',
+    description: 'OpenRouter or any OpenAI-compatible endpoint (LM Studio, vLLM, etc.)',
     contextWindow: parseInt(process.env.OPENAI_COMPATIBLE_CONTEXT_WINDOW || '8192', 10),
     maxOutputTokens: parseInt(process.env.OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS || '4096', 10)
+  },
+  {
+    id: 'openrouter-kimi',
+    name: 'Kimi K2 (OpenRouter)',
+    provider: 'openai-compatible',
+    model: 'moonshotai/kimi-k2:free',
+    speed: 'medium',
+    speedLabel: '🧠',
+    bestFor: ['code', 'analysis', 'long-context'],
+    description: 'Kimi K2 via OpenRouter — 256k context, strong reasoning',
+    contextWindow: 256000,
+    maxOutputTokens: 8192
+  },
+  {
+    id: 'openrouter-glm',
+    name: 'GLM-4.5 (OpenRouter)',
+    provider: 'openai-compatible',
+    model: 'zhipuai/glm-4.5:free',
+    speed: 'fast',
+    speedLabel: '⚡',
+    bestFor: ['code', 'chat', 'general'],
+    description: 'GLM-4.5 via OpenRouter — fast, strong coding model',
+    contextWindow: 128000,
+    maxOutputTokens: 8192
+  },
+  {
+    id: 'openrouter-llama',
+    name: 'Llama 3.3 70B (OpenRouter)',
+    provider: 'openai-compatible',
+    model: 'meta-llama/llama-3.3-70b-instruct:free',
+    speed: 'medium',
+    speedLabel: '⚡',
+    bestFor: ['code', 'general', 'chat'],
+    description: 'Llama 3.3 70B via OpenRouter — free, no rate limits',
+    contextWindow: 128000,
+    maxOutputTokens: 8192
   },
   {
     id: 'local',

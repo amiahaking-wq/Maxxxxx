@@ -23,7 +23,7 @@
 import { generateCompletion } from '../groq/client.js';
 import { executeTool, getToolDescriptions } from './tools/registry.js';
 import { broadcastProgress, broadcastMessage } from '../api/websocket.js';
-import { addConversationMessage } from '../database/conversations.js';
+import { addConversationMessage, createConversation } from '../database/conversations-supabase.js';
 import { condenseMessages } from './condenser.js';
 import { uploadToSupabase, isSupabaseConfigured } from './supabase-storage.js';
 import logger from '../utils/logger.js';
@@ -363,13 +363,27 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
 
   // Save the summary as an assistant message in the conversation
   try {
-    addConversationMessage(sessionId, 'assistant', finalSummary, {
+    await addConversationMessage(sessionId, 'assistant', finalSummary, {
       type: 'task_complete',
       iterations: iteration,
       filesModified: Array.from(filesModified)
     });
   } catch (e) {
     logger.warn('Failed to save react summary to conversation', { error: e.message });
+    // If FK constraint fails (old conversation not in Supabase), try to create it first
+    if (e.message.includes('FOREIGN KEY') || e.message.includes('23503')) {
+      try {
+        await createConversation('default-user', 'web', 'Recovered Conversation');
+        await addConversationMessage(sessionId, 'assistant', finalSummary, {
+          type: 'task_complete',
+          iterations: iteration,
+          filesModified: Array.from(filesModified)
+        });
+        logger.info('Recovered conversation and saved summary', { sessionId });
+      } catch (e2) {
+        logger.warn('Recovery failed, summary not saved', { error: e2.message });
+      }
+    }
   }
 
   // Broadcast the final message

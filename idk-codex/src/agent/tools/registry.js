@@ -131,17 +131,27 @@ export const TOOLS = {
 
   write_file: {
     name: 'write_file',
-    description: 'Create or overwrite a file with the given content. Creates parent directories if needed.',
+    description: 'Create or overwrite a file with the given content. Creates parent directories if needed. Write RAW code — do NOT HTML-escape (use < not &lt;).',
     params: {
       path: 'string (required) — path to the file (relative to workspace)',
-      content: 'string (required) — the full file content'
+      content: 'string (required) — the full file content (raw, not HTML-escaped)'
     },
     execute: async (args) => {
       const filePath = args.path;
-      const content = args.content;
+      let content = args.content;
 
       if (!filePath) return 'Error: path is required';
       if (content === undefined || content === null) return 'Error: content is required';
+
+      // Decode HTML entities that LLMs sometimes add
+      content = content
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&#x27;/g, "'")
+        .replace(/&#x2F;/g, '/');
 
       const fullPath = path.resolve(SANDBOX, filePath);
       if (!fullPath.startsWith(path.resolve(SANDBOX))) {
@@ -185,12 +195,21 @@ export const TOOLS = {
     },
     execute: async (args) => {
       const filePath = args.path;
-      const oldText = args.old_text;
-      const newText = args.new_text;
+      let oldText = args.old_text;
+      let newText = args.new_text;
 
       if (!filePath) return 'Error: path is required';
       if (oldText === undefined) return 'Error: old_text is required';
       if (newText === undefined) return 'Error: new_text is required';
+
+      // Decode HTML entities that LLMs sometimes add
+      const decodeEntities = (str) => str
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&').replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'").replace(/&#x27;/g, "'")
+        .replace(/&#x2F;/g, '/');
+      oldText = decodeEntities(oldText);
+      newText = decodeEntities(newText);
 
       const fullPath = path.resolve(SANDBOX, filePath);
       if (!fullPath.startsWith(path.resolve(SANDBOX))) {

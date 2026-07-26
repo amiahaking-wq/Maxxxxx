@@ -723,16 +723,19 @@ async function handleModelCommand(ctx, userId) {
   if (process.env.ECHO_PROVIDER_ENABLED === 'true') availableProviders.add('echo');
 
   const allButtons = [
+    { id: 'openrouter-kimi',  label: 'Kimi K2 🧠',           provider: 'openai-compatible' },
+    { id: 'openrouter-glm',   label: 'GLM-4.5 ⚡',           provider: 'openai-compatible' },
+    { id: 'openrouter-llama', label: 'Llama 3.3 70B (OR) ⚡', provider: 'openai-compatible' },
+    { id: 'openai-compatible',label: 'Custom OpenRouter 🔌',  provider: 'openai-compatible' },
     { id: 'gemini-pro',       label: 'Gemini 2.5 Pro 🧠',  provider: 'gemini' },
     { id: 'gemini-flash',     label: 'Gemini 2.5 Flash ⚡', provider: 'gemini' },
-    { id: 'groq-llama-70b',   label: 'Llama 3.3 70B ⚡',    provider: 'groq' },
-    { id: 'groq-llama-8b',    label: 'Llama 3.1 8B ⚡⚡',   provider: 'groq' },
+    { id: 'groq-llama-70b',   label: 'Llama 3.3 70B (Groq) ⚡', provider: 'groq' },
+    { id: 'groq-llama-8b',    label: 'Llama 3.1 8B (Groq) ⚡⚡', provider: 'groq' },
     { id: 'anthropic-sonnet', label: 'Claude Sonnet 🧠',   provider: 'anthropic' },
     { id: 'openai-gpt4o',     label: 'GPT-4o 🧠',          provider: 'openai' },
     { id: 'openai-gpt4o-mini',label: 'GPT-4o Mini ⚡',     provider: 'openai' },
     { id: 'ollama',           label: 'Ollama (local) 🖥️',   provider: 'ollama' },
-    { id: 'phone',            label: 'Phone (Termux) 📱',   provider: 'phone' },
-    { id: 'echo',             label: 'Echo (offline) 🪢',   provider: 'echo' }
+    { id: 'phone',            label: 'Phone (Termux) 📱',   provider: 'phone' }
   ];
 
   const visibleButtons = allButtons.filter(b => availableProviders.has(b.provider));
@@ -815,9 +818,14 @@ export async function handleTelegramCallback(ctx) {
             updated_at = excluded.updated_at
         `).run(String(userId), model.id, new Date().toISOString());
 
+        // For OpenRouter models, also set the model name on the provider
         try {
-          const { setProvider } = await import('../llm/adapter.js');
+          const { setProvider, setModel } = await import('../llm/adapter.js');
           setProvider(model.id);
+          // If this is an OpenRouter model, also update the provider's model
+          if (model.provider === 'openai-compatible' && model.model) {
+            setModel(model.model);
+          }
         } catch (e) {
           logger.warn('Failed to set adapter provider on model select', { error: e.message });
         }
