@@ -70,6 +70,7 @@ COPY src/security ./src/security
 COPY src/skills ./src/skills
 COPY src/ui ./src/ui
 COPY src/utils ./src/utils
+COPY src/watchdog ./src/watchdog
 
 COPY server.js ./
 COPY package.json ./

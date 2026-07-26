@@ -1,9 +1,14 @@
 /**
  * Main Application Component
- * Router for MAX Dashboard with portable.dev design
+ *
+ * Default route (/) is the new consumer chat UI (ChatPage) — clean, mobile-first,
+ * streaming, with image upload and model picker.
+ *
+ /dev route exposes the full Developer Dashboard (file tree, terminal, runtime, etc).
  */
 
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import ChatPage from './pages/ChatPage';
 import HomePage from './pages/HomePage';
 import ChatListPage from './pages/ChatListPage';
 import ChatDetailPage from './pages/ChatDetailPage';
@@ -20,13 +25,18 @@ function App() {
     <BrowserRouter>
       <div className="min-h-screen bg-background">
         <Routes>
-          {/* New MAX Routes */}
-          <Route path="/" element={<HomePage />} />
-          <Route path="/chat" element={<ChatListPage />} />
-          <Route path="/chat/:sessionId" element={<ChatDetailPage />} />
-          <Route path="/runtime" element={<RuntimePage />} />
-          <Route path="/repo" element={<RepoPage />} />
-          <Route path="/tasks" element={<TasksPage />} />
+          {/* New consumer-first routes */}
+          <Route path="/" element={<ChatPage />} />
+          <Route path="/chat" element={<ChatPage />} />
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+
+          {/* Developer dashboard routes (still accessible) */}
+          <Route path="/dev" element={<HomePage />} />
+          <Route path="/dev/chat" element={<ChatListPage />} />
+          <Route path="/dev/chat/:sessionId" element={<ChatDetailPage />} />
+          <Route path="/dev/runtime" element={<RuntimePage />} />
+          <Route path="/dev/repo" element={<RepoPage />} />
+          <Route path="/dev/tasks" element={<TasksPage />} />
 
           {/* Legacy Routes */}
           <Route path="/simple" element={<SimpleChat />} />
@@ -36,11 +46,20 @@ function App() {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
 
-        {/* Bottom Navigation for Mobile */}
-        <BottomNav />
+        {/* Bottom Navigation only on /dev routes */}
+        <ConditionalBottomNav />
       </div>
     </BrowserRouter>
   );
+}
+
+// Only show BottomNav on /dev routes
+function ConditionalBottomNav() {
+  const location = useLocation();
+  if (location.pathname.startsWith('/dev')) {
+    return <BottomNav />;
+  }
+  return null;
 }
 
 export default App;

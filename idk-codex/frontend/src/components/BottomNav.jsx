@@ -6,16 +6,16 @@ export default function BottomNav() {
   const location = useLocation();
 
   const navItems = [
-    { path: '/', icon: Home, label: 'Home' },
-    { path: '/repo', icon: GitBranch, label: 'Repo' },
-    { path: '/tasks', icon: CheckSquare, label: 'Tasks' },
-    { path: '/chat', icon: MessageSquare, label: 'Chat' },
-    { path: '/runtime', icon: Smartphone, label: 'Runtime' }
+    { path: '/dev', icon: Home, label: 'Home' },
+    { path: '/dev/repo', icon: GitBranch, label: 'Repo' },
+    { path: '/dev/tasks', icon: CheckSquare, label: 'Tasks' },
+    { path: '/dev/chat', icon: MessageSquare, label: 'Chat' },
+    { path: '/dev/runtime', icon: Smartphone, label: 'Runtime' }
   ];
 
   const isActive = (path) => {
-    if (path === '/') {
-      return location.pathname === '/';
+    if (path === '/dev') {
+      return location.pathname === '/dev';
     }
     return location.pathname.startsWith(path);
   };

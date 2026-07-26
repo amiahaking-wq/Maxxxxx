@@ -8,16 +8,58 @@
  *   1. OpenAI function calling (tools array)
  *   2. XML <tool> tag parsing
  *   3. Markdown code block extraction
+ *
+ * Robust model fallback: if the env-configured model 404s (free model removed),
+ * automatically retry with a chain of known-good free OpenRouter models.
+ *
+ * Streaming: when sessionId is provided, partial tokens are streamed to the
+ * WebSocket room so the UI can render the assistant response character-by-character.
  */
 
 import { executeTool } from './tools/registry.js';
-import { broadcastProgress, broadcastMessage } from '../api/websocket.js';
+import { broadcastProgress, broadcastMessage, broadcastToken } from '../api/websocket.js';
 import { addConversationMessage } from '../database/conversations-supabase.js';
 import { getRelevantMemories } from './tools/memory-tool.js';
 import { uploadToSupabase, isSupabaseConfigured } from './supabase-storage.js';
 import logger from '../utils/logger.js';
 
 const MAX_ITERATIONS = 20;
+
+// ============================================================================
+// MODEL FALLBACK CHAIN
+// ============================================================================
+// The first model is the env-configured one. If it 404s (free model removed
+// from OpenRouter), we walk down this list of known-good free models.
+const FALLBACK_MODELS = [
+  // 1. Env-configured model (preferred — usually a paid model the user chose)
+  null, // sentinel — replaced with process.env.OPENAI_COMPATIBLE_MODEL at call time
+  // 2. Known-good free models that support function calling
+  'meta-llama/llama-3.3-70b-instruct:free',
+  'qwen/qwen-2.5-coder-32b-instruct:free',
+  'qwen/qwen-2.5-72b-instruct:free',
+  'mistralai/mistral-small-3.1-24b-instruct:free',
+  'moonshotai/kimi-k2:free',
+  'google/gemini-2.0-flash-exp:free',
+  'openai/gpt-oss-20b:free',
+  'openai/gpt-oss-120b:free',
+  // 3. Last resort — cheap paid models (only ~$0.01 per call)
+  'deepseek/deepseek-chat',
+  'meta-llama/llama-3.3-70b-instruct'
+];
+
+// Track which model worked last so we skip dead models on subsequent iterations
+let _lastWorkingModel = null;
+
+function getCandidateModels() {
+  const envModel = process.env.OPENAI_COMPATIBLE_MODEL;
+  const list = [];
+  if (envModel) list.push(envModel);
+  if (_lastWorkingModel && !list.includes(_lastWorkingModel)) list.unshift(_lastWorkingModel);
+  for (const m of FALLBACK_MODELS) {
+    if (m && !list.includes(m)) list.push(m);
+  }
+  return list;
+}
 
 // ============================================================================
 // TOOL DEFINITIONS FOR FUNCTION CALLING
@@ -47,55 +89,178 @@ const AGENT_TOOLS = [
 // DIRECT LLM CALL (bypasses adapter to ensure tools pass through)
 // ============================================================================
 
-async function callLLM(messages, tools) {
+/**
+ * Call the LLM with automatic model fallback.
+ * If the env-configured model 404s (free model removed), walk down the
+ * FALLBACK_MODELS list until one works. Cache the winner.
+ *
+ * @param {Array} messages - chat messages
+ * @param {Array|null} tools - tool definitions, or null to disable function calling
+ * @param {Object} opts - { sessionId, stream }
+ * @returns {Promise<Object>} { content, tool_calls, finishReason, usage, model }
+ */
+async function callLLM(messages, tools, opts = {}) {
   const baseURL = process.env.OPENAI_COMPATIBLE_BASE_URL || 'https://openrouter.ai/api/v1';
   const apiKey = process.env.OPENAI_COMPATIBLE_API_KEY;
-  const model = process.env.OPENAI_COMPATIBLE_MODEL || 'openai/gpt-oss-20b:free';
+  const candidates = getCandidateModels();
+  const wantStream = !!opts.sessionId;
 
-  const body = {
-    model,
-    messages,
-    temperature: 0.2,
-    max_tokens: 8000
-  };
-
-  if (tools && tools.length > 0) {
-    body.tools = tools;
-    body.tool_choice = 'auto';
-  }
-
-  // Add OpenRouter headers
-  const headers = {
-    'Content-Type': 'application/json'
-  };
+  const headers = { 'Content-Type': 'application/json' };
   if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
   if (baseURL.includes('openrouter.ai')) {
     headers['HTTP-Referer'] = 'https://maxxxxx-production.up.railway.app';
     headers['X-Title'] = 'MAX Agent';
   }
 
-  logger.info('LLM call', { model, messageCount: messages.length, hasTools: !!(tools && tools.length) });
+  let lastErr = null;
 
-  const response = await fetch(baseURL + '/chat/completions', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body)
-  });
+  for (const model of candidates) {
+    if (!model) continue;
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error('LLM returned ' + response.status + ': ' + errorText.substring(0, 500));
+    const body = {
+      model,
+      messages,
+      temperature: 0.2,
+      max_tokens: 8000
+    };
+    if (tools && tools.length > 0) {
+      body.tools = tools;
+      body.tool_choice = 'auto';
+    }
+    // Only request streaming if we have a sessionId to stream to AND this is
+    // the assistant's conversational turn (no tools), because tool-calling
+    // responses aren't really streamable in a useful way.
+    if (wantStream && !tools) {
+      body.stream = true;
+    }
+
+    logger.info('LLM call', { model, messageCount: messages.length, hasTools: !!(tools && tools.length), stream: body.stream });
+
+    try {
+      const response = await fetch(baseURL + '/chat/completions', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        // 404 = model unavailable; try next candidate
+        if (response.status === 404 || response.status === 400) {
+          logger.warn('LLM model unavailable, trying next', { model, status: response.status, error: errorText.substring(0, 200) });
+          lastErr = new Error('LLM returned ' + response.status + ': ' + errorText.substring(0, 200));
+          continue;
+        }
+        // Other errors (429, 500, etc.) — try next candidate too
+        logger.warn('LLM error, trying next', { model, status: response.status, error: errorText.substring(0, 200) });
+        lastErr = new Error('LLM returned ' + response.status + ': ' + errorText.substring(0, 200));
+        continue;
+      }
+
+      // Success — cache this model for future calls
+      if (_lastWorkingModel !== model) {
+        logger.info('LLM model selected', { model, previous: _lastWorkingModel });
+        _lastWorkingModel = model;
+      }
+
+      // ===== STREAMING RESPONSE =====
+      if (body.stream) {
+        return await consumeStream(response, opts.sessionId, model);
+      }
+
+      // ===== NON-STREAMING RESPONSE =====
+      const data = await response.json();
+      const message = data.choices?.[0]?.message;
+      return {
+        content: message?.content || '',
+        tool_calls: message?.tool_calls || null,
+        finishReason: data.choices?.[0]?.finish_reason || 'stop',
+        usage: data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        model
+      };
+    } catch (err) {
+      logger.warn('LLM fetch failed, trying next model', { model, error: err.message });
+      lastErr = err;
+      continue;
+    }
   }
 
-  const data = await response.json();
-  const message = data.choices?.[0]?.message;
+  // All candidates failed
+  throw lastErr || new Error('All LLM models failed');
+}
 
-  return {
-    content: message?.content || '',
-    tool_calls: message?.tool_calls || null,
-    finishReason: data.choices?.[0]?.finish_reason || 'stop',
-    usage: data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-  };
+/**
+ * Consume an SSE stream from the LLM, emit tokens to the WebSocket room, and
+ * return the assembled result.
+ */
+async function consumeStream(response, sessionId, model) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let content = '';
+  let toolCalls = null;
+  let finishReason = 'stop';
+  let usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+
+  // Notify UI that streaming is starting
+  if (sessionId) {
+    broadcastToken(sessionId, { type: 'start', model });
+  }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // Process complete SSE events (separated by \n\n)
+    let sepIdx;
+    while ((sepIdx = buffer.indexOf('\n\n')) >= 0) {
+      const event = buffer.slice(0, sepIdx);
+      buffer = buffer.slice(sepIdx + 2);
+
+      // Each line in the event starts with "data: "
+      for (const line of event.split('\n')) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = line.slice(6).trim();
+        if (payload === '[DONE]') continue;
+        try {
+          const chunk = JSON.parse(payload);
+          const delta = chunk.choices?.[0]?.delta;
+          if (!delta) continue;
+
+          if (delta.content) {
+            content += delta.content;
+            if (sessionId) broadcastToken(sessionId, { type: 'token', text: delta.content });
+          }
+          if (delta.tool_calls) {
+            // Accumulate tool calls across chunks
+            if (!toolCalls) toolCalls = [];
+            for (const tc of delta.tool_calls) {
+              const idx = tc.index || 0;
+              if (!toolCalls[idx]) {
+                toolCalls[idx] = { id: tc.id || ('call_' + idx), type: 'function', function: { name: '', arguments: '' } };
+              }
+              if (tc.function?.name) toolCalls[idx].function.name += tc.function.name;
+              if (tc.function?.arguments) toolCalls[idx].function.arguments += tc.function.arguments;
+            }
+          }
+          if (chunk.choices?.[0]?.finish_reason) {
+            finishReason = chunk.choices[0].finish_reason;
+          }
+          if (chunk.usage) usage = chunk.usage;
+        } catch (e) {
+          // Partial JSON — wait for more bytes
+        }
+      }
+    }
+  }
+
+  // Notify UI that streaming is done
+  if (sessionId) {
+    broadcastToken(sessionId, { type: 'done', model, contentLength: content.length });
+  }
+
+  return { content, tool_calls: toolCalls, finishReason, usage, model };
 }
 
 // ============================================================================
@@ -200,13 +365,13 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
     // Call LLM directly (bypasses adapter — ensures tools pass through)
     let llmResult;
     try {
-      llmResult = await callLLM(messages, AGENT_TOOLS);
+      llmResult = await callLLM(messages, AGENT_TOOLS, { sessionId });
 
       // CRITICAL: If model returns empty content AND no tool calls, retry WITHOUT tools
       // Some free models (gpt-oss-20b) return empty when they see function calling tools
       if (!llmResult.content && !llmResult.tool_calls) {
-        logger.warn('REACT_EMPTY_RESPONSE_RETRY', { sessionId, iteration, model: process.env.OPENAI_COMPATIBLE_MODEL });
-        llmResult = await callLLM(messages, null); // retry without tools
+        logger.warn('REACT_EMPTY_RESPONSE_RETRY', { sessionId, iteration, model: llmResult.model });
+        llmResult = await callLLM(messages, null, { sessionId }); // retry without tools
       }
     } catch (err) {
       logger.error('REACT_LLM_ERROR', { iteration, error: err.message });
@@ -214,7 +379,7 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
       // If tools call failed, try without tools as fallback
       try {
         logger.warn('REACT_FALLBACK_NO_TOOLS', { sessionId, iteration });
-        llmResult = await callLLM(messages, null);
+        llmResult = await callLLM(messages, null, { sessionId });
       } catch (err2) {
         finalSummary = 'LLM error: ' + err2.message;
         break;
@@ -372,5 +537,5 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
   return { success: isDone, summary: finalSummary, iterations: iteration, filesModified: Array.from(filesModified) };
 }
 
-export { AGENT_TOOLS, extractCodeBlocks, parseXMLTools };
+export { AGENT_TOOLS, extractCodeBlocks, parseXMLTools, callLLM };
 export default { executeReActLoop, AGENT_TOOLS };

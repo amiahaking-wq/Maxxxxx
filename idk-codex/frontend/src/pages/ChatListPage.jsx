@@ -42,7 +42,7 @@ export default function ChatListPage() {
   const handleNewChat = async () => {
     try {
       const session = await createSession('web_user');
-      navigate(`/chat/${session.sessionId}`);
+      navigate(`/dev/chat/${session.sessionId}`);
     } catch (error) {
       console.error('Failed to create session:', error);
     }
@@ -162,7 +162,7 @@ export default function ChatListPage() {
             {filteredSessions.map((session) => (
               <div
                 key={session.sessionId}
-                onClick={() => navigate(`/chat/${session.sessionId}`)}
+                onClick={() => navigate(`/dev/chat/${session.sessionId}`)}
                 className="p-4 bg-surface border border-border rounded-xl hover:border-accent transition-all cursor-pointer group"
               >
                 <div className="flex items-start justify-between">

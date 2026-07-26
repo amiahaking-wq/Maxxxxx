@@ -33,7 +33,7 @@ export default function HomePage() {
   const handleNewChat = async () => {
     try {
       const session = await createSession('web_user');
-      navigate(`/chat/${session.sessionId}`);
+      navigate(`/dev/chat/${session.sessionId}`);
     } catch (error) {
       console.error('Failed to create session:', error);
     }
@@ -42,17 +42,31 @@ export default function HomePage() {
   const handleSearch = (e) => {
     e.preventDefault();
     if (searchQuery.trim()) {
-      navigate(`/chat?search=${encodeURIComponent(searchQuery)}`);
+      navigate(`/dev/chat?search=${encodeURIComponent(searchQuery)}`);
     }
+  };
+
+  const handleConsumerMode = () => {
+    navigate('/');
   };
 
   return (
     <div className="min-h-screen bg-background">
       <div className="max-w-6xl mx-auto px-4 py-8">
         {/* Header */}
-        <div className="text-center mb-12">
+        <div className="text-center mb-8">
           <h1 className="text-4xl font-semibold text-text-primary mb-2">MAX AI Agent</h1>
-          <p className="text-text-secondary">Multi-Agent eXecution System</p>
+          <p className="text-text-secondary">Multi-Agent eXecution System — Developer Dashboard</p>
+        </div>
+
+        {/* Mode toggle */}
+        <div className="flex justify-center mb-8">
+          <button
+            onClick={handleConsumerMode}
+            className="px-6 py-2 bg-accent text-white rounded-lg hover:bg-opacity-90 transition-all text-sm font-medium"
+          >
+            ← Back to Simple Mode
+          </button>
         </div>
 
         {/* Search Bar */}
@@ -81,7 +95,7 @@ export default function HomePage() {
                 </div>
               </div>
               <button
-                onClick={() => navigate('/repo')}
+                onClick={() => navigate('/dev/repo')}
                 className="px-4 py-2 bg-accent text-white rounded-lg hover:bg-opacity-90 transition-all"
               >
                 Change
@@ -98,7 +112,7 @@ export default function HomePage() {
               Continue where you left off
             </h2>
             <button
-              onClick={() => navigate('/chat')}
+              onClick={() => navigate('/dev/chat')}
               className="text-accent hover:underline text-sm"
             >
               View all
@@ -123,7 +137,7 @@ export default function HomePage() {
               {recentChats.map((session) => (
                 <button
                   key={session.sessionId}
-                  onClick={() => navigate(`/chat/${session.sessionId}`)}
+                  onClick={() => navigate(`/dev/chat/${session.sessionId}`)}
                   className="w-full p-4 bg-surface border border-border rounded-xl hover:border-accent transition-all text-left group"
                 >
                   <div className="flex items-start justify-between">
@@ -151,14 +165,14 @@ export default function HomePage() {
         {/* Quick Actions */}
         <div className="max-w-2xl mx-auto mt-8 grid grid-cols-2 gap-4">
           <button
-            onClick={() => navigate('/runtime')}
+            onClick={() => navigate('/dev/runtime')}
             className="p-4 bg-surface border border-border rounded-xl hover:border-accent transition-all text-left"
           >
             <h3 className="text-text-primary font-medium mb-1">Runtime Status</h3>
             <p className="text-sm text-text-secondary">View system resources</p>
           </button>
           <button
-            onClick={() => navigate('/tasks')}
+            onClick={() => navigate('/dev/tasks')}
             className="p-4 bg-surface border border-border rounded-xl hover:border-accent transition-all text-left"
           >
             <h3 className="text-text-primary font-medium mb-1">Tasks</h3>

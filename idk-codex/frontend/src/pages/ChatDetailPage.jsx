@@ -111,6 +111,8 @@ export default function ChatDetailPage() {
     }
   };
 
+  const handleBack = () => navigate('/dev/chat');
+
   const copyCode = (code, index) => {
     navigator.clipboard.writeText(code);
     setCopiedCode(index);
@@ -255,7 +257,7 @@ export default function ChatDetailPage() {
         <div className="max-w-4xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button
-              onClick={() => navigate('/chat')}
+              onClick={handleBack}
               className="p-2 hover:bg-background rounded-lg transition-colors"
             >
               <ArrowLeft className="w-5 h-5 text-text-primary" />

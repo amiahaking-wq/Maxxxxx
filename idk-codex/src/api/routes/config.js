@@ -7,6 +7,7 @@ import express from 'express';
 import logger from '../../utils/logger.js';
 import { getDatabase } from '../../database/db.js';
 import { getModelOptions, getModelById, isValidModel } from '../../llm/model-registry.js';
+import { setProvider, setModel } from '../../llm/adapter.js';
 import phoneBridge from '../../interfaces/phone-bridge.js';
 
 const router = express.Router();
@@ -174,6 +175,35 @@ router.post('/model', async (req, res) => {
         preferred_model = excluded.preferred_model,
         updated_at = excluded.updated_at
     `).run(userId, validModel.id, new Date().toISOString());
+
+    // === LIVE MODEL SWITCH (no context loss) ===
+    // The conversation history lives in the Supabase messages table, not in
+    // the adapter's in-memory state. Switching the provider/model here just
+    // changes which API endpoint the NEXT completion call hits. The next
+    // /api/conversations/:id/messages call will load the full conversation
+    // history from Supabase and pass it to the new model — so context is
+    // preserved across model switches.
+    try {
+      // For openai-compatible models (OpenRouter), set the env var so the
+      // react-loop-v2.js direct fetch picks up the new model.
+      if (validModel.provider === 'openai-compatible' && validModel.model) {
+        process.env.OPENAI_COMPATIBLE_MODEL = validModel.model;
+        logger.info('Switched OpenRouter model (no context loss)', {
+          model: validModel.model,
+          userId
+        });
+      } else {
+        // For other providers (groq, gemini, etc.), use the adapter
+        setProvider(validModel.id);
+        logger.info('Switched provider (no context loss)', {
+          provider: validModel.provider,
+          model: validModel.model,
+          userId
+        });
+      }
+    } catch (e) {
+      logger.warn('Live model switch failed (preference still saved)', { error: e.message });
+    }
 
     logger.info('API', {
       method: 'POST',

@@ -21,7 +21,7 @@ import {
   isSupabaseConfigured
 } from '../../database/conversations-supabase.js';
 import { executeReActLoop } from '../../agent/react-loop-v2.js';
-import { broadcastMessage } from '../websocket.js';
+import { broadcastMessage, broadcastToken } from '../websocket.js';
 import logger from '../../utils/logger.js';
 
 const router = express.Router();
@@ -138,7 +138,7 @@ router.post('/:id/messages', async (req, res) => {
   try {
     const conversationId = req.params.id;
     const userId = req.body.userId || USER_ID;
-    const { message, runAgent } = req.body;
+    const { message, runAgent, images } = req.body;
 
     if (!message) {
       return res.status(400).json({ error: 'message is required' });
@@ -150,14 +150,16 @@ router.post('/:id/messages', async (req, res) => {
       return res.status(404).json({ error: 'Conversation not found' });
     }
 
-    // Save the user's message
-    const userMsg = await addConversationMessage(conversationId, 'user', message);
+    // Save the user's message (include image metadata if provided)
+    const userMetadata = images && images.length > 0 ? { imageCount: images.length } : null;
+    const userMsg = await addConversationMessage(conversationId, 'user', message, userMetadata);
 
     // Broadcast the user message
     broadcastMessage(conversationId, {
       role: 'user',
       content: message,
-      conversationId
+      conversationId,
+      images: images || undefined
     });
 
     // INTENT DETECTION — decide if this is a task or just chat
@@ -185,40 +187,157 @@ router.post('/:id/messages', async (req, res) => {
             content: m.content
           }));
 
+          // Build the user message — if images were attached, send as multimodal
+          // content array (OpenAI vision format)
+          let userMessageContent;
+          if (images && images.length > 0) {
+            userMessageContent = [
+              { type: 'text', text: message },
+              ...images.map(img => ({
+                type: 'image_url',
+                image_url: { url: img, detail: 'high' }
+              }))
+            ];
+          } else {
+            userMessageContent = message;
+          }
+
           const messages = [
             {
               role: 'system',
-              content: 'You are MAX, a helpful AI assistant. You are also an autonomous coding agent, but right now you are just chatting. Be friendly, concise, and natural. If the user asks you to build something, tell them to be more specific about what they want to create.'
+              content: 'You are MAX, a helpful AI assistant. You are also an autonomous coding agent, but right now you are just chatting. Be friendly, concise, and natural. If the user asks you to build something, tell them to be more specific about what they want to create. If the user shares an image, describe what you see and ask how you can help.'
             },
             ...recentMessages,
-            { role: 'user', content: message }
+            { role: 'user', content: userMessageContent }
           ];
 
           // Disable Echo for chat — the adapter checks ECHO_PROVIDER_ENABLED at call time
           process.env.ECHO_PROVIDER_ENABLED = 'false';
 
-          const result = await generateCompletion(messages, {
-            temperature: 0.7,
-            maxTokens: 800
-          });
+          // ===== STREAMING CHAT RESPONSE =====
+          // Call the OpenRouter API directly with stream:true and pipe tokens
+          // to the WebSocket room, so the UI renders character-by-character.
+          let response = '';
+          try {
+            const baseURL = process.env.OPENAI_COMPATIBLE_BASE_URL || 'https://openrouter.ai/api/v1';
+            const apiKey = process.env.OPENAI_COMPATIBLE_API_KEY;
+            const candidateModels = [
+              process.env.OPENAI_COMPATIBLE_MODEL,
+              'meta-llama/llama-3.3-70b-instruct:free',
+              'qwen/qwen-2.5-coder-32b-instruct:free',
+              'mistralai/mistral-small-3.1-24b-instruct:free',
+              'moonshotai/kimi-k2:free',
+              'google/gemini-2.0-flash-exp:free',
+              'openai/gpt-oss-20b:free',
+              'deepseek/deepseek-chat'
+            ].filter(Boolean);
 
-          // Restore Echo for the ReAct agent loop (which may still need it as last resort)
-          process.env.ECHO_PROVIDER_ENABLED = 'true';
+            const headers = { 'Content-Type': 'application/json' };
+            if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
+            if (baseURL.includes('openrouter.ai')) {
+              headers['HTTP-Referer'] = 'https://maxxxxx-production.up.railway.app';
+              headers['X-Title'] = 'MAX Agent';
+            }
 
-          const response = result?.content || 'Sorry, I could not generate a response.';
+            // Notify UI: streaming is starting
+            broadcastToken(conversationId, { type: 'start', model: 'chat' });
 
-          await addConversationMessage(conversationId, 'assistant', response);
-          broadcastMessage(conversationId, {
-            role: 'assistant',
-            content: response,
-            conversationId
-          });
+            let success = false;
+            let lastErr = null;
+            for (const model of candidateModels) {
+              try {
+                const llmResp = await fetch(baseURL + '/chat/completions', {
+                  method: 'POST',
+                  headers,
+                  body: JSON.stringify({
+                    model,
+                    messages,
+                    temperature: 0.7,
+                    max_tokens: 800,
+                    stream: true
+                  })
+                });
+                if (!llmResp.ok) {
+                  const errText = await llmResp.text();
+                  logger.warn('Chat stream model unavailable, trying next', { model, status: llmResp.status, err: errText.substring(0, 150) });
+                  lastErr = new Error('HTTP ' + llmResp.status + ': ' + errText.substring(0, 100));
+                  continue;
+                }
+
+                // Consume the SSE stream
+                const reader = llmResp.body.getReader();
+                const decoder = new TextDecoder();
+                let buf = '';
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  buf += decoder.decode(value, { stream: true });
+                  let sep;
+                  while ((sep = buf.indexOf('\n\n')) >= 0) {
+                    const evt = buf.slice(0, sep);
+                    buf = buf.slice(sep + 2);
+                    for (const line of evt.split('\n')) {
+                      if (!line.startsWith('data: ')) continue;
+                      const payload = line.slice(6).trim();
+                      if (payload === '[DONE]') continue;
+                      try {
+                        const chunk = JSON.parse(payload);
+                        const delta = chunk.choices?.[0]?.delta;
+                        if (delta?.content) {
+                          response += delta.content;
+                          broadcastToken(conversationId, { type: 'token', text: delta.content });
+                        }
+                      } catch (e) { /* partial JSON */ }
+                    }
+                  }
+                }
+                success = true;
+                logger.info('Chat stream completed', { model, length: response.length });
+                break;
+              } catch (e) {
+                lastErr = e;
+                continue;
+              }
+            }
+
+            // Restore Echo for the ReAct agent loop (which may still need it as last resort)
+            process.env.ECHO_PROVIDER_ENABLED = 'true';
+
+            // Notify UI: streaming is done
+            broadcastToken(conversationId, { type: 'done', model: 'chat' });
+
+            if (!success || !response) {
+              // Streaming failed entirely — fall back to adapter
+              logger.warn('Chat stream failed, falling back to adapter', { error: lastErr?.message });
+              const result = await generateCompletion(messages, { temperature: 0.7, maxTokens: 800 });
+              response = result?.content || '';
+            }
+
+            response = response || 'Sorry, I could not generate a response.';
+
+            await addConversationMessage(conversationId, 'assistant', response);
+            broadcastMessage(conversationId, {
+              role: 'assistant',
+              content: response,
+              conversationId
+            });
+          } catch (streamErr) {
+            // Streaming threw — fall back to adapter
+            logger.warn('Chat stream threw, using adapter', { error: streamErr.message });
+            process.env.ECHO_PROVIDER_ENABLED = 'true';
+            const result = await generateCompletion(messages, { temperature: 0.7, maxTokens: 800 });
+            response = result?.content || 'Sorry, I could not generate a response.';
+            broadcastToken(conversationId, { type: 'done', model: 'chat' });
+            await addConversationMessage(conversationId, 'assistant', response);
+            broadcastMessage(conversationId, {
+              role: 'assistant',
+              content: response,
+              conversationId
+            });
+          }
         } catch (err) {
           logger.error('Chat response failed', { error: err.message });
           const fallback = '⚠️ All AI providers are currently rate-limited or unavailable.\n\n' +
-            'Groq: daily token limit reached (resets in a few minutes)\n' +
-            'Gemini: quota exceeded (limit is 0 in this region)\n' +
-            'Phone: not connected\n\n' +
             'To fix this permanently, add a free OpenRouter API key:\n' +
             '1. Go to https://openrouter.ai/keys\n' +
             '2. Create a free key\n' +
@@ -246,7 +365,13 @@ router.post('/:id/messages', async (req, res) => {
     // Execute the agent loop asynchronously
     setImmediate(async () => {
       try {
-        const result = await executeReActLoop(message, conversationId, userId, {
+        // If images are attached, prepend image context to the task
+        let fullTask = message;
+        if (images && images.length > 0) {
+          fullTask = message + '\n\n[User attached ' + images.length + ' image(s). Use browser_screenshot or analyze the user description to understand them.]';
+        }
+
+        const result = await executeReActLoop(fullTask, conversationId, userId, {
           workspacePath: process.env.SANDBOX_WORKSPACE || './sandbox-workspace'
         });
 

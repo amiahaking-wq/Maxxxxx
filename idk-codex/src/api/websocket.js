@@ -323,3 +323,23 @@ export function broadcastTerminalCommand(sessionId, command) {
     command: command.substring(0, 100)
   });
 }
+
+/**
+ * Broadcast a streaming token from the LLM to the session room.
+ * Used by react-loop-v2.js to stream the assistant response character-by-character.
+ *
+ * @param {string} sessionId - Session ID
+ * @param {Object} payload - { type: 'start'|'token'|'done', text?, model? }
+ */
+export function broadcastToken(sessionId, payload) {
+  if (!global.wsServer) {
+    return;
+  }
+
+  const room = `session-${sessionId}`;
+  global.wsServer.to(room).emit('token', {
+    sessionId,
+    timestamp: new Date().toISOString(),
+    ...payload
+  });
+}
