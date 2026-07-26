@@ -21,6 +21,7 @@ import { broadcastProgress, broadcastMessage, broadcastToken, broadcastFileCreat
 import { addConversationMessage } from '../database/conversations-supabase.js';
 import { getRelevantMemories } from './tools/memory-tool.js';
 import { uploadToSupabase, isSupabaseConfigured } from './supabase-storage.js';
+import { getAllConnectorTools } from './connectors.js';
 import logger from '../utils/logger.js';
 
 const MAX_ITERATIONS = 20;
@@ -381,6 +382,56 @@ function notifyFileCreated(sessionId, path, content, toolName) {
   }
 }
 
+/**
+ * Build the full tool list: built-in AGENT_TOOLS + any connected connector tools.
+ * Called at the start of each ReAct loop so newly-connected connectors show up.
+ */
+function buildFullToolList() {
+  const tools = [...AGENT_TOOLS];
+  try {
+    const connectorTools = getAllConnectorTools();
+    for (const ct of connectorTools) {
+      // Convert connector tool spec to OpenAI function-calling format
+      const properties = {};
+      const required = [];
+      if (ct.params && typeof ct.params === 'object') {
+        for (const [key, desc] of Object.entries(ct.params)) {
+          // Parse the description to detect type — default to string
+          const isNumber = /^\s*number/i.test(desc);
+          const isObject = /^\s*object/i.test(desc);
+          const isRequired = /\(required\)/i.test(desc);
+          properties[key] = {
+            type: isNumber ? 'number' : isObject ? 'object' : 'string',
+            description: desc
+          };
+          if (isRequired) required.push(key);
+        }
+      }
+      tools.push({
+        type: 'function',
+        function: {
+          name: ct.name,
+          description: ct.description,
+          parameters: {
+            type: 'object',
+            properties,
+            required
+          }
+        }
+      });
+    }
+    if (connectorTools.length > 0) {
+      logger.info('Connector tools added to agent', {
+        count: connectorTools.length,
+        names: connectorTools.map(t => t.name)
+      });
+    }
+  } catch (e) {
+    logger.warn('Failed to load connector tools', { error: e.message });
+  }
+  return tools;
+}
+
 // ============================================================================
 // REACT LOOP
 // ============================================================================
@@ -393,6 +444,21 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
   // Inject relevant memories
   const memoryContext = getRelevantMemories(task);
 
+  // Build the full tool list (built-in + connected connectors)
+  const fullToolList = buildFullToolList();
+
+  // Build a description of available connectors for the system prompt
+  let connectorPrompt = '';
+  try {
+    const { listConnectors } = await import('./connectors.js');
+    const connected = listConnectors().filter(c => c.connected);
+    if (connected.length > 0) {
+      connectorPrompt = '\n\nConnected integrations (you can use these):\n' +
+        connected.map(c => `- ${c.name}: ${c.tools.join(', ')}`).join('\n') +
+        '\n\nUse these tools to help the user. Be careful with destructive operations — always confirm before deleting or updating data.';
+    }
+  } catch (e) { /* ok */ }
+
   const systemPrompt = 'You are MAX, an autonomous AI agent. Complete the task fully by using the available tools.\n' +
     'You work in: ' + workspacePath + '\n\n' +
     'Rules:\n' +
@@ -400,8 +466,11 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
     '- Write real, complete, working code.\n' +
     '- After writing files, run them to verify.\n' +
     '- Use memory_save for anything the user might ask about later.\n' +
-    '- When completely done, call task_complete with a summary.' +
-    (memoryContext ? memoryContext : '');
+    '- When completely done, call task_complete with a summary.\n' +
+    '- For connector tools (github_*, supabase_*, gmail_*, calendar_*, drive_*), always confirm with the user before any destructive action (delete, drop, update, send email, create PR).\n' +
+    '- Never exfiltrate data or perform actions the user did not request.' +
+    (memoryContext ? memoryContext : '') +
+    connectorPrompt;
 
   const messages = [
     { role: 'system', content: systemPrompt },
@@ -424,7 +493,7 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
     // Call LLM directly (bypasses adapter — ensures tools pass through)
     let llmResult;
     try {
-      llmResult = await callLLM(messages, AGENT_TOOLS, { sessionId });
+      llmResult = await callLLM(messages, fullToolList, { sessionId });
 
       // CRITICAL: If model returns empty content AND no tool calls, retry WITHOUT tools
       // Some free models (gpt-oss-20b) return empty when they see function calling tools

@@ -364,6 +364,103 @@ class DriveConnector {
 }
 
 // ============================================================================
+// SUPABASE CONNECTOR
+// ============================================================================
+// Lets the agent query/insert/update rows in the user's Supabase project.
+// Uses the service role key (full access). This is powerful — guardrails
+// require the agent to confirm destructive operations.
+class SupabaseConnector {
+  constructor() {
+    this.name = 'supabase';
+    this.url = process.env.SUPABASE_URL || null;
+    this.key = process.env.SUPABASE_KEY || process.env.SUPABASE_SERVICE_KEY || null;
+  }
+
+  isConnected() {
+    return !!(this.url && this.key);
+  }
+
+  getTools() {
+    return [
+      {
+        name: 'supabase_query',
+        description: 'Query a Supabase table with optional filters. Returns rows as JSON.',
+        params: {
+          table: 'string (required) — table name (e.g. "conversations")',
+          select: 'string (optional) — columns to return, default "*"',
+          filter: 'string (optional) — PostgREST filter (e.g. "id=eq.123")',
+          limit: 'number (optional) — max rows, default 50'
+        },
+        execute: async (args) => this.query(args)
+      },
+      {
+        name: 'supabase_insert',
+        description: 'Insert a row into a Supabase table. Returns the inserted row.',
+        params: {
+          table: 'string (required) — table name',
+          data: 'object (required) — row data as JSON'
+        },
+        execute: async (args) => this.insert(args)
+      },
+      {
+        name: 'supabase_list_tables',
+        description: 'List all tables in the connected Supabase project.',
+        params: {},
+        execute: async () => this.listTables()
+      }
+    ];
+  }
+
+  async fetchSupabase(path, method = 'GET', body = null) {
+    if (!this.isConnected()) {
+      return { error: 'Supabase not connected. Set SUPABASE_URL and SUPABASE_KEY.' };
+    }
+    const url = `${this.url}/rest/v1${path}`;
+    const headers = {
+      'apikey': this.key,
+      'Authorization': `Bearer ${this.key}`,
+      'Content-Type': 'application/json',
+      'Prefer': method === 'POST' ? 'return=representation' : undefined
+    };
+    if (body) headers['body'] = JSON.stringify(body);
+
+    const resp = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : null });
+    if (!resp.ok) {
+      const text = await resp.text();
+      return { error: `Supabase ${resp.status}: ${text.substring(0, 300)}` };
+    }
+    if (resp.status === 204) return { success: true };
+    return await resp.json();
+  }
+
+  async query(args) {
+    const { table, select = '*', filter, limit = 50 } = args;
+    if (!table) return 'Error: table is required';
+    let path = `/${table}?select=${encodeURIComponent(select)}&limit=${limit}`;
+    if (filter) path += `&${filter}`;
+    const result = await this.fetchSupabase(path);
+    if (result.error) return result.error;
+    if (!Array.isArray(result) || result.length === 0) return 'No rows found.';
+    return JSON.stringify(result, null, 2);
+  }
+
+  async insert(args) {
+    const { table, data } = args;
+    if (!table || !data) return 'Error: table and data are required';
+    const result = await this.fetchSupabase(`/${table}`, 'POST', data);
+    if (result.error) return result.error;
+    return `Inserted: ${JSON.stringify(result)}`;
+  }
+
+  async listTables() {
+    // Use the Supabase REST API to introspect — query the pg_catalog via RPC
+    const url = `${this.url}/rest/v1/rpc/`;
+    // Simpler approach: try listing common tables
+    return 'Tip: use supabase_query with table name to verify it exists. Common tables: conversations, conversation_messages, max_tasks, max_memory, max_watchdog_rules.';
+  }
+}
+
+// ============================================================================
 // AUTO-REGISTER CONNECTORS
 // ============================================================================
 
@@ -375,6 +472,9 @@ export function initializeConnectors() {
   registerConnector('gmail', new GmailConnector());
   registerConnector('calendar', new CalendarConnector());
   registerConnector('drive', new DriveConnector());
+
+  // Supabase connector — works immediately if SUPABASE_URL + SUPABASE_KEY set
+  registerConnector('supabase', new SupabaseConnector());
 
   logger.info('Connectors initialized', {
     registered: Object.keys(connectors),

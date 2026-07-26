@@ -17,13 +17,15 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   ArrowLeft, Send, Square, Paperclip, Camera, Code2, MessageSquare,
-  Share2, Settings, X, ChevronDown, Image as ImageIcon, Folder
+  Share2, Settings, X, ChevronDown, Image as ImageIcon, Folder, Menu
 } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { saveFile, downloadFile, listFiles } from '../lib/fileStore';
 import ArtifactCard from '../components/Artifact/ArtifactCard';
 import ArtifactPreview from '../components/Artifact/ArtifactPreview';
 import FilesPanel from '../components/Artifact/FilesPanel';
+import Sidebar from '../components/Sidebar';
+import SettingsDrawer from '../components/SettingsDrawer';
 
 const API_BASE = import.meta.env.VITE_API_URL || window.location.origin;
 
@@ -49,6 +51,8 @@ export default function ChatPage() {
   const [currentModel, setCurrentModel] = useState(() => localStorage.getItem('max_model') || 'openrouter-gpt-oss-20b');
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [devMode, setDevMode] = useState(() => localStorage.getItem('max_mode') === 'dev');
   const [attachedImages, setAttachedImages] = useState([]);
   const [progress, setProgress] = useState(null);
@@ -408,8 +412,12 @@ export default function ChatPage() {
 
   const handleNewChat = () => {
     setShowMenu(false);
+    setShowSidebar(false);
+    setMessages([]);
+    setConversationId(null);
     navigate('/chat');
-    createConversation();
+    // Create a fresh conversation
+    setTimeout(() => createConversation(), 100);
   };
 
   const formatTime = (ts) => {
@@ -447,106 +455,76 @@ export default function ChatPage() {
 
   return (
     <div className="flex flex-col h-screen bg-gray-950 text-gray-100">
-      {/* ===== Header ===== */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800 bg-gray-900/80 backdrop-blur sticky top-0 z-10">
+      {/* ===== Header (mobile-friendly) ===== */}
+      <div className="flex items-center justify-between px-3 py-2.5 border-b border-gray-800 bg-gray-900/95 backdrop-blur sticky top-0 z-10 gap-2">
+        {/* Left: hamburger menu (opens sidebar with chat history) */}
         <button
-          onClick={() => navigate('/')}
-          className="p-2 hover:bg-gray-800 rounded-lg transition-colors"
+          onClick={() => setShowSidebar(true)}
+          className="p-2.5 hover:bg-gray-800 rounded-lg transition-colors flex-shrink-0"
+          title="Chat history"
         >
-          <ArrowLeft size={20} />
+          <Menu size={20} />
         </button>
 
-        <div className="flex-1 flex items-center justify-center gap-2">
-          <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'} ${isReconnecting ? 'animate-pulse' : ''}`} />
+        {/* Center: model picker (big, visible on mobile) */}
+        <button
+          onClick={() => setShowModelPicker(!showModelPicker)}
+          className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors text-sm flex-1 max-w-[200px] justify-center"
+        >
+          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${connected ? 'bg-green-500' : 'bg-red-500'} ${isReconnecting ? 'animate-pulse' : ''}`} />
+          <span className="font-medium truncate">{currentModelObj.name}</span>
+          <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 ${currentModelObj.badge === 'free' ? 'bg-green-900 text-green-300' : 'bg-yellow-900 text-yellow-300'}`}>
+            {currentModelObj.badge}
+          </span>
+          <ChevronDown size={14} className="flex-shrink-0" />
+        </button>
 
-          {/* Files button — shows count badge */}
+        {/* Right: files + settings */}
+        <div className="flex items-center gap-1 flex-shrink-0">
           <button
             onClick={() => setShowFilesPanel(true)}
-            className="relative flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors text-sm"
-            title="View files"
+            className="relative p-2.5 hover:bg-gray-800 rounded-lg transition-colors"
+            title="Files"
           >
-            <Folder size={16} />
+            <Folder size={20} />
             {sessionFiles.length > 0 && (
-              <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-500 text-white text-xs rounded-full flex items-center justify-center font-bold">
+              <span className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-blue-500 text-white text-[10px] rounded-full flex items-center justify-center font-bold">
                 {sessionFiles.length > 9 ? '9+' : sessionFiles.length}
               </span>
             )}
           </button>
-
           <button
-            onClick={() => setShowModelPicker(!showModelPicker)}
-            className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors text-sm"
+            onClick={() => setShowSettings(true)}
+            className="p-2.5 hover:bg-gray-800 rounded-lg transition-colors"
+            title="Settings"
           >
-            <span className="font-medium">{currentModelObj.name}</span>
-            <span className={`text-xs px-1.5 py-0.5 rounded ${currentModelObj.badge === 'free' ? 'bg-green-900 text-green-300' : 'bg-yellow-900 text-yellow-300'}`}>
-              {currentModelObj.badge}
-            </span>
-            <ChevronDown size={14} />
+            <Settings size={20} />
           </button>
         </div>
-
-        <button
-          onClick={() => setShowMenu(!showMenu)}
-          className="p-2 hover:bg-gray-800 rounded-lg transition-colors"
-        >
-          <Settings size={20} />
-        </button>
       </div>
 
       {/* ===== Model Picker Dropdown ===== */}
       {showModelPicker && (
-        <div className="absolute top-14 left-1/2 -translate-x-1/2 bg-gray-900 border border-gray-800 rounded-lg shadow-xl py-2 min-w-[260px] z-20">
-          {QUICK_MODELS.map(m => (
-            <button
-              key={m.id}
-              onClick={() => { setCurrentModel(m.id); setShowModelPicker(false); }}
-              className={`w-full flex items-center justify-between px-4 py-2 hover:bg-gray-800 transition-colors text-sm ${currentModel === m.id ? 'bg-gray-800' : ''}`}
-            >
-              <span>{m.name}</span>
-              <span className={`text-xs px-1.5 py-0.5 rounded ${m.badge === 'free' ? 'bg-green-900 text-green-300' : 'bg-yellow-900 text-yellow-300'}`}>
-                {m.badge}
-              </span>
-            </button>
-          ))}
-          <div className="border-t border-gray-800 mt-2 pt-2 px-4">
-            <p className="text-xs text-gray-500">Switching models preserves your chat history.</p>
+        <>
+          <div className="fixed inset-0 z-20" onClick={() => setShowModelPicker(false)} />
+          <div className="absolute top-14 left-1/2 -translate-x-1/2 bg-gray-900 border border-gray-800 rounded-lg shadow-xl py-2 min-w-[280px] z-30">
+            {QUICK_MODELS.map(m => (
+              <button
+                key={m.id}
+                onClick={() => { setCurrentModel(m.id); setShowModelPicker(false); }}
+                className={`w-full flex items-center justify-between px-4 py-2.5 hover:bg-gray-800 transition-colors text-sm ${currentModel === m.id ? 'bg-gray-800' : ''}`}
+              >
+                <span>{m.name}</span>
+                <span className={`text-xs px-1.5 py-0.5 rounded ${m.badge === 'free' ? 'bg-green-900 text-green-300' : m.badge === 'paid' ? 'bg-yellow-900 text-yellow-300' : 'bg-purple-900 text-purple-300'}`}>
+                  {m.badge}
+                </span>
+              </button>
+            ))}
+            <div className="border-t border-gray-800 mt-2 pt-2 px-4">
+              <p className="text-xs text-gray-500">Switching models preserves your chat history. Free models may rate-limit.</p>
+            </div>
           </div>
-        </div>
-      )}
-
-      {/* ===== Menu Dropdown ===== */}
-      {showMenu && (
-        <div className="absolute top-14 right-4 bg-gray-900 border border-gray-800 rounded-lg shadow-xl py-2 min-w-[200px] z-20">
-          <button
-            onClick={handleNewChat}
-            className="w-full flex items-center gap-2 px-4 py-2 hover:bg-gray-800 transition-colors text-sm text-left"
-          >
-            <MessageSquare size={16} /> New Chat
-          </button>
-          <button
-            onClick={handleShare}
-            className="w-full flex items-center gap-2 px-4 py-2 hover:bg-gray-800 transition-colors text-sm text-left"
-          >
-            <Share2 size={16} /> Share Chat
-          </button>
-          <button
-            onClick={() => setDevMode(!devMode)}
-            className="w-full flex items-center gap-2 px-4 py-2 hover:bg-gray-800 transition-colors text-sm text-left"
-          >
-            <Code2 size={16} /> {devMode ? 'Simple Mode' : 'Developer Mode'}
-          </button>
-          {devMode && (
-            <button
-              onClick={() => navigate('/dev')}
-              className="w-full flex items-center gap-2 px-4 py-2 hover:bg-gray-800 transition-colors text-sm text-left text-gray-400"
-            >
-              <Code2 size={16} /> Open Dashboard
-            </button>
-          )}
-          <div className="border-t border-gray-800 mt-2 pt-2 px-4">
-            <p className="text-xs text-gray-500">{devMode ? 'Developer mode exposes the file tree, terminal, and runtime dashboard.' : 'Simple mode is a clean chat interface. Switch to Developer mode for full agent control.'}</p>
-          </div>
-        </div>
+        </>
       )}
 
       {/* ===== Messages Area ===== */}
@@ -691,6 +669,15 @@ export default function ChatPage() {
             <Camera size={20} />
           </button>
 
+          {/* Share button */}
+          <button
+            onClick={handleShare}
+            className="p-2.5 hover:bg-gray-800 rounded-lg transition-colors text-gray-400"
+            title="Share chat"
+          >
+            <Share2 size={20} />
+          </button>
+
           <input
             ref={fileInputRef}
             type="file"
@@ -749,6 +736,28 @@ export default function ChatPage() {
           setShowFilesPanel(false);
           handleOpenServerFile(file);
         }}
+      />
+
+      {/* ===== Sidebar (chat history drawer) ===== */}
+      <Sidebar
+        open={showSidebar}
+        onClose={() => setShowSidebar(false)}
+        currentSessionId={conversationId}
+        onSwitchSession={(id) => {
+          navigate(`/chat/${id}`);
+        }}
+        onNewChat={handleNewChat}
+      />
+
+      {/* ===== Settings drawer (with Connectors) ===== */}
+      <SettingsDrawer
+        open={showSettings}
+        onClose={() => setShowSettings(false)}
+        devMode={devMode}
+        setDevMode={setDevMode}
+        currentModel={currentModel}
+        setCurrentModel={setCurrentModel}
+        models={QUICK_MODELS}
       />
 
       {/* ===== Artifact Preview modal ===== */}

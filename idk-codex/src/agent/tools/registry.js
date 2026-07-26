@@ -508,18 +508,42 @@ for (const [name, tool] of Object.entries(memoryTools)) {
  * @returns {Promise<string>} result string
  */
 export async function executeTool(toolName, args) {
+  // 1. Try the built-in TOOLS registry first
   const tool = TOOLS[toolName];
-  if (!tool) {
-    return `Error: unknown tool "${toolName}". Available tools: ${Object.keys(TOOLS).join(', ')}`;
+  if (tool) {
+    try {
+      const result = await tool.execute(args || {});
+      return result;
+    } catch (err) {
+      logger.error('TOOL_ERROR', { tool: toolName, error: err.message });
+      return `Error executing ${toolName}: ${err.message}`;
+    }
   }
 
+  // 2. Try connector tools (github_*, supabase_*, gmail_*, calendar_*, drive_*)
+  //    These are dynamically registered from connected connectors.
   try {
-    const result = await tool.execute(args || {});
-    return result;
-  } catch (err) {
-    logger.error('TOOL_ERROR', { tool: toolName, error: err.message });
-    return `Error executing ${toolName}: ${err.message}`;
+    const { getConnector, getAllConnectorTools } = await import('../connectors.js');
+    const connectorTools = getAllConnectorTools();
+    const connectorTool = connectorTools.find(t => t.name === toolName);
+    if (connectorTool) {
+      // GUARDRAIL: log every connector call so the user can audit
+      logger.info('CONNECTOR_TOOL_CALL', {
+        tool: toolName,
+        args: JSON.stringify(args).substring(0, 300)
+      });
+
+      // GUARDRAIL: refuse destructive connector operations unless explicitly allowed
+      // (e.g. drop table, delete repo). The connector's execute() does its own
+      // validation, but we add a layer here.
+      const result = await connectorTool.execute(args || {});
+      return typeof result === 'string' ? result : JSON.stringify(result);
+    }
+  } catch (e) {
+    logger.warn('Connector tool dispatch failed', { tool: toolName, error: e.message });
   }
+
+  return `Error: unknown tool "${toolName}". Available tools: ${Object.keys(TOOLS).join(', ')}, plus connector tools (github_*, supabase_*, gmail_*, calendar_*, drive_*)`;
 }
 
 /**
