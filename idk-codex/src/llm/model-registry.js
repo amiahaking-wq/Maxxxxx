@@ -128,9 +128,9 @@ const BASE_MODEL_OPTIONS = [
     speed: 'medium',
     speedLabel: '🔌',
     bestFor: ['custom', 'local', 'self-hosted'],
-    description: 'OpenRouter or any OpenAI-compatible endpoint (LM Studio, vLLM, etc.)',
-    contextWindow: parseInt(process.env.OPENAI_COMPATIBLE_CONTEXT_WINDOW || '8192', 10),
-    maxOutputTokens: parseInt(process.env.OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS || '4096', 10)
+    description: 'OpenRouter or any OpenAI-compatible endpoint',
+    contextWindow: parseInt(process.env.OPENAI_COMPATIBLE_CONTEXT_WINDOW || '128000', 10),
+    maxOutputTokens: parseInt(process.env.OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS || '8192', 10)
   },
   {
     id: 'openrouter-kimi',
