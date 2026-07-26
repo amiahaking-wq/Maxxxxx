@@ -210,6 +210,70 @@ router.post('/model', async (req, res) => {
  * GET /api/config/models
  * List all available models
  */
+/**
+ * GET /api/config/diagnostic
+ * Shows which LLM provider env vars are set (for debugging)
+ */
+router.get('/diagnostic', async (req, res) => {
+  try {
+    const diagnostic = {
+      providers: {
+        groq: {
+          envVar: 'GROQ_API_KEY',
+          set: !!process.env.GROQ_API_KEY,
+          keyPrefix: process.env.GROQ_API_KEY ? process.env.GROQ_API_KEY.substring(0, 10) + '...' : null
+        },
+        gemini: {
+          envVar: 'GOOGLE_GEMINI_API_KEY',
+          set: !!(process.env.GOOGLE_GEMINI_API_KEY || process.env.GEMINI_API_KEY),
+          keyPrefix: (process.env.GOOGLE_GEMINI_API_KEY || process.env.GEMINI_API_KEY) ? 'set' : null
+        },
+        anthropic: {
+          envVar: 'ANTHROPIC_API_KEY',
+          set: !!process.env.ANTHROPIC_API_KEY
+        },
+        openai: {
+          envVar: 'OPENAI_API_KEY',
+          set: !!process.env.OPENAI_API_KEY
+        },
+        openai_compatible: {
+          envVars: ['OPENAI_COMPATIBLE_BASE_URL', 'OPENAI_COMPATIBLE_API_KEY', 'OPENAI_COMPATIBLE_MODEL'],
+          baseUrl: process.env.OPENAI_COMPATIBLE_BASE_URL || null,
+          apiKeySet: !!process.env.OPENAI_COMPATIBLE_API_KEY,
+          apiKeyPrefix: process.env.OPENAI_COMPATIBLE_API_KEY ? process.env.OPENAI_COMPATIBLE_API_KEY.substring(0, 10) + '...' : null,
+          model: process.env.OPENAI_COMPATIBLE_MODEL || null
+        },
+        ollama: {
+          envVar: 'OLLAMA_HOST',
+          set: !!process.env.OLLAMA_HOST,
+          host: process.env.OLLAMA_HOST || null
+        },
+        phone: {
+          envVar: 'PHONE_SECRET',
+          set: !!process.env.PHONE_SECRET
+        },
+        echo: {
+          envVar: 'ECHO_PROVIDER_ENABLED',
+          set: process.env.ECHO_PROVIDER_ENABLED === 'true'
+        }
+      },
+      priority: process.env.LLM_PROVIDER_PRIORITY || 'openai-compatible,ollama,openai,groq,anthropic,gemini,phone,echo',
+      supabase: {
+        url: process.env.SUPABASE_URL ? 'set' : null,
+        key: process.env.SUPABASE_KEY ? 'set' : null
+      }
+    };
+
+    res.json({ success: true, diagnostic });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/config/models
+ * List all available models
+ */
 router.get('/models', async (req, res) => {
   try {
     logger.info('API', {

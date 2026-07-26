@@ -15,7 +15,7 @@
 
 import logger from '../utils/logger.js';
 import { getOrCreateSession, addMessage } from '../database/queries.js';
-import { executeAgentLoop } from '../agent/loop.js';
+import { executeReActLoop } from '../agent/react-loop-v2.js';
 import { generateCompletion } from '../groq/client.js';
 import { getModelOptions, getModelById, getDefaultModel } from '../llm/model-registry.js';
 import { Markup } from 'telegraf';
@@ -99,31 +99,48 @@ function detectIntent(text) {
     return { intent: 'model' };
   }
 
+  // Question detection — questions are ALWAYS chat, never tasks
+  const questionPatterns = [
+    'tell me what', 'tell me about', 'tell me how', 'tell me why',
+    'what is', 'what are', 'what does', 'what do',
+    'how do', 'how does', 'how is', 'how can',
+    'why is', 'why does', 'why do', 'why are',
+    'can you explain', 'explain what', 'explain how',
+    'what\'s the difference', 'whats the difference',
+    'do you think', 'what\'s your opinion', 'whats your opinion',
+    'who is', 'who are', 'when is', 'when was', 'where is',
+    'is it', 'are they', 'should i', 'could i',
+    'what do you know', 'what can you tell'
+  ];
+  if (questionPatterns.some(p => lower.startsWith(p) || lower.includes(' ' + p))) {
+    return { intent: 'chat', payload: t };
+  }
+
   // Task detection — coding/development requests
   // These keywords strongly suggest the user wants MAX to DO something
+  // NOTE: language names (html, css, python) alone are NOT task keywords
+  // — they're only tasks when combined with action verbs
   const taskKeywords = [
     'build', 'create', 'make', 'write', 'generate', 'implement', 'develop',
-    'add', 'fix', 'refactor', 'update', 'modify', 'edit', 'change',
-    'design', 'setup', 'set up', 'configure', 'deploy',
-    'write a', 'create a', 'build a', 'make a', 'generate a',
-    'write me', 'create me', 'build me', 'make me',
-    'code', 'function', 'component', 'page', 'app', 'script',
-    'api', 'endpoint', 'route', 'database', 'schema',
-    'html', 'css', 'javascript', 'python', 'react', 'node',
+    'fix', 'refactor', 'update', 'modify', 'edit', 'change',
+    'design', 'setup', 'set up', 'configure', 'deploy', 'install',
     'bug', 'error', 'broken', 'not working', 'failing',
-    'test', 'feature', 'login', 'signup', 'dashboard',
-    'landing page', 'website', 'web app', 'backend', 'frontend'
+    'landing page', 'web app', 'website',
+    'clone', 'repo', 'push', 'commit', 'git'
   ];
 
-  // A message is a task if:
-  // 1. It's longer than 15 chars (not just "hi" or "ok")
-  // 2. It contains a task keyword OR looks like an instruction
+  // Action verbs that indicate a task when at the START of the message
+  const hasImperativeVerb = /^(build|create|make|write|generate|fix|add|remove|delete|update|refactor|deploy|run|test|install|set up|configure|clone|push)/i.test(t);
+
+  // A message is a task ONLY if:
+  // 1. It's longer than 15 chars
+  // 2. It has an imperative verb at the start (build, create, etc.)
+  // 3. OR it has a task keyword AND an action verb
   const isLongEnough = t.length > 15;
   const hasTaskKeyword = taskKeywords.some(kw => lower.includes(kw));
-  const looksLikeInstruction = /^(can you|could you|please|hey max|max,? |i need|i want|let's|lets)/i.test(t);
-  const hasImperativeVerb = /^(build|create|make|write|generate|fix|add|remove|delete|update|refactor|deploy|run|test|install|set up|configure)/i.test(t);
+  const hasActionVerb = /\b(build|create|make|write|generate|fix|add|remove|delete|update|refactor|deploy|run|test|install|configure|clone|push|implement|develop|design)\b/i.test(t);
 
-  if (isLongEnough && (hasTaskKeyword || looksLikeInstruction || hasImperativeVerb)) {
+  if (isLongEnough && (hasImperativeVerb || (hasTaskKeyword && hasActionVerb))) {
     return { intent: 'task', payload: t };
   }
 
@@ -452,41 +469,22 @@ async function handleTaskCommand(ctx, userId, text) {
     }
 
     await addMessage(sessionId, 'user', taskText);
-    const results = await executeAgentLoop(taskText, sessionId, null, userId);
+    const results = await executeReActLoop(taskText, sessionId, userId, {
+      workspacePath: process.env.SANDBOX_WORKSPACE || './sandbox-workspace'
+    });
 
-    // Build summary
+    // Build summary from ReAct loop results
     let summary = '';
-    const planOk = results?.plan?.success === true;
-    const execOk = results?.execute?.success === true;
-    const filesWritten = results?.execute?.filesModified || [];
-    const testOk = results?.test?.success === true;
-    const testSkipped = results?.test?.skipped === true;
-    const deployOk = results?.deploy?.success === true;
-    const deploySkipped = results?.deploy?.skipped === true;
-    const validationFailed = results?.validationFailed === true;
-
     if (results?.success) {
-      summary = '✅ Task complete!\n\n';
-    } else if (execOk && filesWritten.length > 0) {
-      summary = '✅ Task complete (files written).\n\n';
-      if (validationFailed) {
-        summary += 'ℹ️ Validation skipped (no test infrastructure). File was still written.\n\n';
-      } else if (!deployOk && !deploySkipped) {
-        summary += 'ℹ️ Deploy phase failed (normal in fresh sandbox).\n\n';
-      }
-    } else if (results?.needsClarification) {
-      summary = '💬 ' + (results.clarificationMenu || 'Task needs clarification.');
+      summary = '✅ ' + (results.summary || 'Task complete');
     } else {
-      summary = '⚠️ Task finished with errors.\n\n';
-      summary += 'Error: ' + (results?.error || 'unknown') + '\n\n';
-      if (!planOk) summary += 'Plan phase: ' + (results?.plan?.error || 'failed') + '\n';
-      if (!execOk) summary += 'Execute phase: ' + (results?.execute?.error || 'failed') + '\n';
+      summary = '⚠️ ' + (results.summary || results?.error || 'Task failed');
     }
 
-    summary += 'Phases: ' + (planOk ? '✓' : '✗') + ' plan · ' + (execOk ? '✓' : '✗') + ' execute · ' + (testOk ? '✓' : (testSkipped ? '⊘' : '✗')) + ' test · ' + (deployOk ? '✓' : (deploySkipped ? '⊘' : '✗')) + ' deploy\n';
-    if (filesWritten.length > 0) {
-      summary += '\nFiles written:\n' + filesWritten.map(f => '  • ' + f).join('\n');
+    if (results?.filesModified?.length > 0) {
+      summary += '\n\nFiles written:\n' + results.filesModified.map(f => '  • ' + f).join('\n');
     }
+    summary += '\n\nIterations: ' + (results.iterations || 0) + '/15';
     await ctx.reply(summary);
   } catch (err) {
     logger.error('TASK_FAILED', { userId, task: taskText, error: err.message, stack: err.stack });
@@ -828,6 +826,16 @@ export async function handleTelegramCallback(ctx) {
           }
         } catch (e) {
           logger.warn('Failed to set adapter provider on model select', { error: e.message });
+          await ctx.reply(
+            '⚠️ Could not switch to ' + model.name + '.\n\n' +
+            'Error: ' + e.message + '\n\n' +
+            'This usually means the provider is not configured.\n' +
+            'For OpenRouter models, set these in Railway:\n' +
+            '  OPENAI_COMPATIBLE_BASE_URL=https://openrouter.ai/api/v1\n' +
+            '  OPENAI_COMPATIBLE_API_KEY=sk-or-your-key\n' +
+            '  OPENAI_COMPATIBLE_MODEL=meta-llama/llama-3.3-70b-instruct:free'
+          );
+          return;
         }
 
         await ctx.answerCbQuery();
