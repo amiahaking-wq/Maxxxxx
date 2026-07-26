@@ -1,262 +1,131 @@
-# MAX — Agent Handoff & Next-Steps Roadmap
+# MAX 2.0 — Agent Handoff Document
 
-> **Status:** This is a living checkpoint. The project is intentionally pushed to `main` in a working-but-not-finished state. Read this file before doing anything else. It documents the project's purpose, the user's desired outcomes, what is already built, what remains, and the exact rules the next agent must follow.
+## Project Overview
 
----
+MAX is an autonomous AI coding agent (Devin/Claude Code clone) that runs on Railway with:
+- React 19 + Vite frontend (mobile-first, PWA-installable)
+- Node.js 22 + Express 5 backend
+- SQLite (ephemeral) + Supabase (persistent) for chat history
+- ReAct agent loop with text-based tool protocol
+- Phone bridge for Android/Termux Ollama inference
+- Telegram bot with natural language intent detection
+- OpenRouter as primary LLM provider (works globally, no rate limits)
 
-## 1. What this project is (project overview)
+## Current Owner
+- Dexa (amiahaking-wq on GitHub)
+- Telegram: @Maxxxxclaww_bot
+- Railway URL: https://maxxxxx-production.up.railway.app
+- GitHub: https://github.com/amiahaking-wq/Maxxxxx
 
-**MAX** (originally *OKComputer*) is an autonomous coding agent. It is meant to behave like a self-contained version of the Devin app: you type a request in a chat UI, the agent breaks it into a plan, writes/edits code, runs tests, and optionally deploys, all while you watch the work happen in a real integrated terminal.
+## What Works
+1. ✅ ReAct agent loop (Think → Act → Observe)
+2. ✅ Tool registry (bash, read/write/edit files, search, web_search, web_fetch)
+3. ✅ Text-based tool protocol (XML tags) + markdown code block fallback
+4. ✅ OpenRouter integration (primary LLM provider)
+5. ✅ Supabase persistent chat history (survives Railway restarts)
+6. ✅ Telegram bot with natural language (no /commands needed)
+7. ✅ Intent detection (chat vs task vs command)
+8. ✅ Phone bridge (Android Termux + Ollama + Qwen)
+9. ✅ Mobile-first responsive UI with sidebar
+10. ✅ Image upload (camera + gallery)
+11. ✅ Push notifications (PWA)
+12. ✅ Lint + revert guardrails
+13. ✅ Context condenser
+14. ✅ Connectors (GitHub working, Gmail/Calendar/Drive stubs)
 
-The core idea is **model-agnostic local-first control**: the owner should be able to run it locally with Ollama, connect to a self-hosted OpenAI-compatible endpoint, or plug in a cloud API key (Groq, OpenAI, Anthropic, Gemini) without changing code. It should also support a **phone as a local inference device** via an outbound WebSocket bridge so the owner can run a model on a phone in Termux and stream it back to the agent.
+## Known Issues (Priority Order)
 
-This is a **real application**, not a toy. It uses:
+### P0 — Agent doesn't produce real code
+**Problem**: The model (gpt-oss-20b:free) doesn't follow the XML tool format. It responds with text/markdown but no `<tool>` tags. The code block extractor was just added as a fallback — needs testing.
 
-- A real Node.js/Express backend (`idk-codex/`).
-- A real SQLite database (`better-sqlite3`).
-- A real persistent bash terminal (per-session `AgentTerminal` spawned from `/bin/bash`).
-- A real React frontend with `xterm.js` and Socket.IO.
-- A 5-phase self-healing agent loop: plan, execute, test, deploy, monitor.
+**Fix needed**: Test with the code block extractor. If still failing, switch to OpenAI function calling format (OpenRouter supports it for most models).
 
----
+### P1 — WebSocket disconnects on slow models
+**Problem**: OpenRouter free models take 30-60 seconds per response. WebSocket ping timeout was 60s, now 300s, but Railway's proxy may still cut connections.
 
-## 2. Who is building it and why
+**Fix needed**: Consider using polling transport only (no WebSocket upgrade) for reliability. Or implement a webhook-based push notification system instead of WebSocket.
 
-- **Owner:** Dexa (`amiahaking-wq` on GitHub, `gonzalezjnjhbrittany1983@gmail.com`).
-- **Target repo:** `https://github.com/amiahaking-wq/Maxxxxx`.
-- **Driving goals from the owner:**
-  1. **Make it fully functional from A-Z.** It was only ~20% done when first shared. Fix all bugs found, not just the obvious ones.
-  2. **Support local models and any cloud model without issues.** The model layer must be provider-agnostic.
-  3. **Replace the original VS Code-style UI with a Devin-style chat UI.** The UI should have a terminal/background drawer that can be opened and closed.
-  4. **Handle secrets safely.** API keys must live server-side only, never in the browser or repo, to avoid XSS/token-hijacking attacks.
-  5. **Phone streaming.** Connect a phone (Termux/Ollama) to the project, likely through an outbound WebSocket relay or reverse proxy.
-  6. **Long context / huge codebases.** Be able to work on a "billion lines" of code end-to-end without forgetting context and without paying API costs.
-  7. **Real backend + real database.** Not a toy. The end result must be a real use case.
+### P2 — No streaming responses
+**Problem**: The ReAct loop waits for the full LLM response before broadcasting. User sees nothing until the model finishes.
 
----
+**Fix needed**: Use OpenRouter's streaming API (SSE) and broadcast tokens as they arrive.
 
-## 3. Desired outcomes (definition of success)
+### P3 — Chat history not loading from Supabase on page refresh
+**Problem**: Supabase write works, but the frontend may not be loading conversations from Supabase on page load.
 
-When the project is "done," the following should be true:
+**Fix needed**: Verify the GET /api/conversations endpoint returns Supabase data correctly.
 
-- [ ] Running `node server.js` in `idk-codex/` starts the backend and the web UI at `http://localhost:3000`.
-- [ ] A user can open the UI, select any configured provider (Ollama, local, OpenAI-compatible, Groq, Anthropic, Gemini, or phone), and send a task.
-- [ ] The agent plans, executes, tests, and reports progress in real-time through Socket.IO.
-- [ ] The terminal drawer can be opened, runs real bash commands, and streams output.
-- [ ] A phone can be connected as a provider through the `/phone-bridge` WebSocket.
-- [ ] No API keys are sent to the browser or stored in the repo.
-- [ ] The system can handle large repositories by loading only relevant context and truncating to the model's context window.
-- [ ] Everything is committed and pushed to `main` on `https://github.com/amiahaking-wq/Maxxxxx`.
-- [ ] The repository is documented enough that another agent can clone it, read this file, and finish any remaining work without breaking what exists.
+### P4 — Echo provider still shows in model list
+**Problem**: Echo is initialized even when not needed. It should only be available as a last-resort fallback, not shown to users.
 
----
+**Fix needed**: Remove Echo from the model selector UI. Keep it as an internal fallback only.
 
-## 4. Repository layout
+## Environment Variables (Railway)
 
+Required:
 ```
-/home/ubuntu/Maxxxxx/          # repo root
-├── app/                       # React 19 + Vite 7 + Tailwind + xterm.js frontend
-│   ├── dist/                  # built production bundle (committed on purpose)
-│   ├── src/App.tsx            # main Devin-style UI
-│   └── package.json
-├── idk-codex/                 # backend (Node.js ES modules, Express, Socket.IO, SQLite)
-│   ├── server.js              # entry point
-│   ├── .env                   # ignored local test config (do NOT commit)
-│   ├── src/
-│   │   ├── llm/               # model-agnostic adapter + provider implementations
-│   │   ├── agent/             # 5-phase agent loop (plan, execute, test, deploy, monitor)
-│   │   ├── agent/tools/       # real terminal, terminal manager, file tools
-│   │   ├── api/               # REST routes + WebSocket event wiring
-│   │   ├── context/           # NEW context-manager + workspace-context scaffold (NOT fully wired yet)
-│   │   ├── interfaces/        # web gateway, phone bridge
-│   │   └── security/          # sandbox command validation
-│   ├── data/                  # ignored SQLite files
-│   └── sandbox-workspace/     # ignored runtime workspace
-├── .gitignore
-└── AGENT_HANDOFF.md           # this file
-```
-
----
-
-## 5. What already works on `main`
-
-- Backend starts with `node server.js` from `idk-codex/` and listens on `0.0.0.0:3000`.
-- Database initializes automatically (`better-sqlite3`) under `idk-codex/data/sessions.db`.
-- Health/config/models endpoints work: `GET /api/health`, `/api/config`, `/api/config/models`.
-- Session creation works: `POST /api/sessions`.
-- Task start works: `POST /api/agent/task` (returns immediately, runs the agent loop in the background, streams progress via Socket.IO).
-- LLM adapter supports multiple providers and auto-fallback: `ollama`, `phone`, `openai`, `openai-compatible`, `local`, `groq`, `anthropic`, `gemini`.
-- `Ollama` provider talks to the host in `OLLAMA_HOST` and uses the model from `OLLAMA_MODEL`.
-- `PhoneProvider` uses the `phone-bridge` WebSocket server (`/phone-bridge`) for mobile Termux/Ollama inference.
-- Real persistent `AgentTerminal` per session; the `TerminalManager` routes Socket.IO terminal events.
-- `sandbox.executeCommandSafely` broadcasts command output to the session terminal namespace.
-- The frontend (`app/dist`) is built and served from the backend root. Open `http://0.0.0.0:3000`.
-- The UI has a Devin-style chat layout, model dropdown, provider status pill, and a collapsible terminal drawer.
-- The terminal drawer uses `xterm.js` and displays streamed command output.
-- `.env` values are kept out of the repo and frontend. The frontend only sends a selected provider/model id; the backend resolves the actual key.
-- The `app/dist` bundle is force-included in the repo so the UI is usable immediately after cloning without a rebuild.
-
----
-
-## 6. What is NOT done yet / remaining task list
-
-The only unchecked item in the internal todo is:
-
-**"Implement context-window-aware workspace manager for large codebases"**
-
-This is the last major piece before the project is "done." It breaks into these concrete sub-tasks:
-
-### 6a. Add context-window metadata to the model registry
-
-- File: `idk-codex/src/llm/model-registry.js`
-- Add a `contextWindow` number (tokens) to every entry in `BASE_MODEL_OPTIONS`.
-- Examples: `groq-llama-70b` ≈ 128k, `ollama` ≈ `process.env.OLLAMA_CONTEXT_WINDOW || 128000`, `gemini-*` ≈ 1M, `openai-*` ≈ 128k, `phone` ≈ 128k.
-- Make `resolveModel()` return `contextWindow` as well.
-- The `OllamaProvider` should read `contextWindow` from the resolved model or `process.env.OLLAMA_CONTEXT_WINDOW` and pass it as `num_ctx` in the Ollama request body.
-
-### 6b. Wire `ContextManager` into `adapter.createCompletion`
-
-- Files: `idk-codex/src/llm/adapter.js`, `idk-codex/src/context/context-manager.js`
-- In `adapter.createCompletion`, before calling `provider.createCompletion`, get the provider/model context window.
-- Use `ContextManager.setContextWindow(contextWindow)` or the helper `getInputBudget(contextWindow, maxOutputTokens)`.
-- Call `truncateMessages(messages, maxInputTokens)` from `context-manager.js` so the prompt never exceeds the model's context window.
-- Keep the first `system` message and the most recent messages; drop older ones and log what was dropped.
-- Ensure `maxOutputTokens` (the `max_tokens` value) is reserved from the context window.
-
-### 6c. Wire `WorkspaceContext` into the PLAN and EXECUTE phases
-
-- Files: `idk-codex/src/agent/phases/plan.js`, `idk-codex/src/groq/prompts.js`, `idk-codex/src/context/workspace-context.js`
-- `plan.js` currently calls `readDirectoryTree('.', 3)` and builds a raw list of files. This is fine for small repos but explodes for big ones.
-- Replace (or augment) the raw `repoContext` with `buildWorkspaceContext(workspacePath, task, options)` from `workspace-context.js`.
-- Use the workspace path from the environment, e.g., `process.env.WORKSPACE_PATH` or `idk-codex/sandbox-workspace`. Default to `sandbox-workspace`.
-- `buildWorkspaceContext` indexes files, scores them by task keywords, and returns only the most relevant files and snippets.
-- The `ContextManager` should then be used to truncate the final prompt to fit the model's input budget.
-
-### 6d. Cache the workspace index per session
-
-- Use `new WorkspaceContext(workspacePath, options)` and keep a single instance per session (or per session id in a simple in-memory map).
-- Invalidate it when the agent writes/removes files (or just invalidate on every new task to keep it simple).
-- This avoids re-indexing giant repos on every phase.
-
-### 6e. Respect token budgets in `TokenBudgetManager`
-
-- File: `idk-codex/src/agent/budget/token-budget-manager.js` (or where it lives)
-- The `ContextManager` input budget and `TokenBudgetManager` should be consistent.
-- If `TokenBudgetManager` still has a 6000 input / 2000 output limit, update it to be context-window-aware (e.g., reserve output, allow input up to context-window-minus-output).
-- Make sure `generateCompletion` in `groq/client.js` still passes `budgetManager` so usage is tracked.
-
-### 6f. Add `.env.example` and usage documentation
-
-- Create `idk-codex/.env.example` with sensible defaults and comments explaining each variable.
-- Consider adding a top-level `README.md` that describes the project, the user outcomes, how to run it, and how to configure providers.
-- Keep the `README.md` focused on the user, not just the next agent. The `AGENT_HANDOFF.md` is for the agent.
-
-### 6g. Final verification before the next push
-
-1. `cd app && npm run build` succeeds.
-2. `cd idk-codex && node server.js` starts without errors.
-3. `curl http://localhost:3000/api/health` returns `{ status: 'ok' }`.
-4. Open `http://localhost:3000` in Chrome, send a task, and see progress events.
-5. Open the terminal drawer and run `ls` / `pwd`.
-6. Confirm SQLite has session rows in `data/sessions.db` (use `sqlite3` CLI or a DB viewer).
-7. Run any available lint command (`npm run lint` if it exists in `app/` or `idk-codex/`). Fix errors.
-8. `git add -A` then commit with `Co-Authored-By: Claude <claude@anthropic.com>` and push to `main`.
-
----
-
-## 7. Important rules that must not be broken
-
-These come from `idk-codex/CLAUDE.md` and the session rules:
-
-- **ES modules** everywhere (`import`/`export`). Do NOT use `require`/`module.exports`.
-- **Use winston logger** for all logging; never `console.log`.
-- **Absolute paths** only; validate paths before filesystem access.
-- **No secrets in the repo or frontend.** API keys live in `idk-codex/.env` only. `idk-codex/.env` is already `.gitignore`-d. Do not commit it.
-- **Better-sqlite3** for DB. Synchronous API is fine.
-- **Do not run destructive git commands** (`reset --hard`, `clean -fd`, etc.).
-- **Do not push directly to `main` unless explicitly instructed** — the user already instructed to push to `main`, so it is allowed for this project.
-- **Commit attribution:** set `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` to the user's info and include `Co-Authored-By: Claude <claude@anthropic.com>` in the commit message.
-- **Do not run tests if they don't exist.** If a test script exists, run it.
-
----
-
-## 8. How to run the app
-
-From `idk-codex/`:
-
-```bash
-# Node 22 (already installed via nvm in this environment)
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-nvm use 22
-
-# Install deps if needed
-npm install
-
-# Start backend
-node server.js
+TELEGRAM_BOT_TOKEN=<bot token from BotFather>
+AUTHORIZED_USER_ID=<user's Telegram ID>
+GROQ_API_KEY=<Groq API key>
+GOOGLE_GEMINI_API_KEY=<Gemini API key>
+PHONE_SECRET=<shared secret for phone bridge>
+PHONE_MODEL=qwen2.5-coder:3b
+OPENAI_COMPATIBLE_BASE_URL=https://openrouter.ai/api/v1
+OPENAI_COMPATIBLE_API_KEY=<OpenRouter API key>
+OPENAI_COMPATIBLE_MODEL=<current model, e.g. deepseek/deepseek-r1:free>
+ECHO_PROVIDER_ENABLED=true
+SUPABASE_URL=<Supabase project URL>
+SUPABASE_KEY=<Supabase anon key>
 ```
 
-The web UI is at `http://0.0.0.0:3000` (or `http://localhost:3000`).
+## Architecture
 
-The frontend is already built, but if you change it:
-
-```bash
-cd /home/ubuntu/Maxxxxx/app
-npm install
-npm run build
+```
+User (Web/Telegram)
+    ↓
+Intent Router (chat vs task vs command)
+    ↓
+ReAct Loop (Think → Act → Observe)
+    ↓
+Tool Registry (bash, files, search, web)
+    ↓
+LLM Adapter (OpenRouter → Groq → Gemini → Phone → Echo)
+    ↓
+Supabase (persistent storage)
 ```
 
-Then restart the backend so it picks up the new `app/dist`.
+## Key Files
 
----
+- `src/agent/react-loop-v2.js` — ReAct loop + code block extractor
+- `src/agent/tools/registry.js` — 8 tools + HTML entity decoding
+- `src/llm/adapter.js` — Provider fallback logic
+- `src/llm/model-registry.js` — All models including OpenRouter (Kimi, GLM, DeepSeek)
+- `src/api/routes/conversations.js` — Chat API with intent detection
+- `src/database/conversations-supabase.js` — Persistent chat storage
+- `src/bot/telegram-handler.js` — Telegram bot with natural language
+- `src/interfaces/web-gateway.js` — Express + Socket.IO server
+- `app/src/App.tsx` — React frontend (mobile-first, PWA)
 
-## 9. How to push changes
+## What the Owner Wants
 
-The repo is already configured with the Devin git proxy. The GitHub PAT is saved as `$GH_TOKEN` in the environment. If you need to set a remote URL with the token, you can do:
+The owner wants MAX to be a **real production agent** — not a toy. Specifically:
+1. Works with ANY model (even small ones) — not just models that follow XML formats
+2. Produces real, working code that can be sold to clients
+3. Chat history persists across restarts (Supabase)
+4. Streaming responses in real-time
+5. Image upload + vision support
+6. Connectors (Gmail, Calendar, Drive, GitHub)
+7. Installable as an app (PWA)
+8. No rate limits (OpenRouter + phone)
+9. Works on mobile (phone is the primary device)
+10. Can be integrated into other production projects as the AI agent
 
-```bash
-cd /home/ubuntu/Maxxxxx
-git remote set-url origin "https://x-access-token:${GH_TOKEN}@git-manager.devin.ai/proxy/github.com/amiahaking-wq/Maxxxxx"
-```
+## Recommended Next Steps for New Agent
 
-But usually the proxy is already authenticated. Just:
-
-```bash
-git add -A
-git -c user.name='Dexa' -c user.email='gonzalezjnjhbrittany1983@gmail.com' \
-    -c user.name='Dexa' -c user.email='gonzalezjnjhbrittany1983@gmail.com' \
-    commit -m "your message
-
-Co-Authored-By: Claude <claude@anthropic.com>"
-git push origin main
-```
-
----
-
-## 10. Known gotchas / things to watch
-
-- The `Ollama` provider in the current build correctly resolves the model from `OLLAMA_MODEL` (it was previously being overridden by a hardcoded Groq default in `groq/client.js`). The fix is already in `main`.
-- The frontend `terminalInput` uses Enter key handling (`onKeyDown`) because the `form onSubmit` can be flaky in some browser automation scenarios. Do not remove that `onKeyDown` handler.
-- `app/dist` is in `.gitignore` (`dist/`) but was force-added so the UI is immediately usable on clone. If you rebuild `app`, you must force-add `app/dist` again or remove/update the `.gitignore` entry.
-- The `phone-bridge` WebSocket server listens on `ws://localhost:3000/phone-bridge`. A phone client connects outbound to it. The client code is in `phone-client/inference-client.js`.
-- The `agent` loop runs asynchronously. If no LLM provider is available, it fails gracefully and returns `Task failed: ...` in the UI.
-- The `context/` directory is a scaffold. It does not yet affect prompts unless wired in `adapter.js` and `plan.js`.
-
----
-
-## 11. Final definition of done
-
-- [ ] Context window metadata is in `model-registry.js`.
-- [ ] `adapter.createCompletion` truncates messages to fit the model's context window.
-- [ ] `plan.js` and `execute.js` use `WorkspaceContext` to load only relevant file context for large repos.
-- [ ] Per-session workspace index cache is implemented.
-- [ ] `TokenBudgetManager` is aware of the model's context window.
-- [ ] `idk-codex/.env.example` (and ideally a top-level `README.md`) exists.
-- [ ] `npm run build` in `app/` succeeds.
-- [ ] `node server.js` in `idk-codex/` starts and the UI loads at `http://localhost:3000`.
-- [ ] A chat task can be sent and the terminal drawer can run `ls`/`pwd`.
-- [ ] No lint errors and no `.env` files are committed.
-- [ ] `git push origin main` succeeds and the remote `main` branch is updated.
-
-Once the checklist above is complete, the project is at the user's "A-Z" goal.
+1. **Test the code block extractor** — send "Build a snake game in HTML" and check if files are created
+2. **Add streaming** — use OpenRouter's SSE streaming API
+3. **Use function calling** — OpenRouter supports OpenAI function calling for most models; this is more reliable than XML tags
+4. **Fix WebSocket** — consider switching to pure polling or Server-Sent Events
+5. **Add vision** — send uploaded images to the LLM with vision capability
+6. **Wire OAuth2 connectors** — Gmail, Calendar, Drive need Google Cloud OAuth2 setup
+7. **Add file persistence** — save generated files to Supabase Storage (already partially implemented)

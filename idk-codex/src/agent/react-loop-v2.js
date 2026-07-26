@@ -84,6 +84,87 @@ RULES:
 }
 
 // ============================================================================
+// CODE BLOCK EXTRACTOR (fallback for models that don't use XML tool format)
+// ============================================================================
+
+/**
+ * Extract code blocks from markdown-formatted LLM responses.
+ * Works with ```python, ```javascript, ```html, ```css, ```json, etc.
+ * Also works with plain code blocks without language tags.
+ *
+ * @param {string} text - LLM response text
+ * @returns {Array<{filename, code, language}>}
+ */
+function extractCodeBlocks(text) {
+  const blocks = [];
+
+  // Match ```language\n...code...\n``` blocks
+  const codeBlockRegex = /```(\w*)\n([\s\S]*?)```/g;
+  let match;
+  let blockIndex = 0;
+
+  while ((match = codeBlockRegex.exec(text)) !== null) {
+    const language = match[1] || 'txt';
+    const code = match[2].trim();
+
+    if (!code || code.length < 10) continue;
+
+    // Determine filename from language
+    let filename;
+    const taskLower = text.toLowerCase();
+
+    // Try to find a filename mentioned in the text near the code block
+    const filenameMatch = text.substring(Math.max(0, match.index - 200), match.index).match(/(?:file|name|save|create|path)[:\s]+([a-zA-Z0-9_\-\/]+\.\w+)/i);
+    if (filenameMatch) {
+      filename = filenameMatch[1];
+    } else {
+      // Auto-generate filename from language
+      const extMap = {
+        python: 'py', py: 'py',
+        javascript: 'js', js: 'js',
+        typescript: 'ts', ts: 'ts',
+        html: 'html',
+        css: 'css',
+        json: 'json',
+        bash: 'sh', sh: 'sh',
+        java: 'java',
+        cpp: 'cpp', c: 'c',
+        go: 'go',
+        rust: 'rs',
+        ruby: 'rb',
+        php: 'php',
+        sql: 'sql',
+        yaml: 'yaml', yml: 'yaml',
+        xml: 'xml',
+        markdown: 'md', md: 'md'
+      };
+
+      const ext = extMap[language.toLowerCase()] || 'txt';
+
+      // If the task mentions a specific file type, use that
+      if (taskLower.includes('html') || taskLower.includes('web page') || taskLower.includes('landing')) {
+        filename = blockIndex === 0 ? 'index.html' : `page${blockIndex}.html`;
+      } else if (taskLower.includes('css') || taskLower.includes('style')) {
+        filename = 'styles.css';
+      } else if (taskLower.includes('javascript') || taskLower.includes('script')) {
+        filename = blockIndex === 0 ? 'script.js' : `script${blockIndex}.js`;
+      } else if (taskLower.includes('python') || language === 'python' || language === 'py') {
+        filename = blockIndex === 0 ? 'main.py' : `module${blockIndex}.py`;
+      } else if (taskLower.includes('react') || taskLower.includes('component')) {
+        filename = `Component${blockIndex}.jsx`;
+      } else {
+        filename = `file_${blockIndex}.${ext}`;
+      }
+    }
+
+    blocks.push({ filename, code, language });
+    blockIndex++;
+  }
+
+  return blocks;
+}
+
+// ============================================================================
 // TOOL CALL PARSER
 // ============================================================================
 
@@ -250,8 +331,56 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
 
     // If no tool calls and not done, check if this is actually a chat response
     if (toolCalls.length === 0 && !isDone) {
-      // If the LLM gave a conversational response without tools, treat it as done
-      // This prevents infinite looping when the model just wants to chat
+      // FALLBACK: Extract code from markdown blocks and save as files
+      // This works with ANY model, even ones that don't follow the XML tool format
+      const codeBlocks = extractCodeBlocks(llmResponse);
+
+      if (codeBlocks.length > 0) {
+        logger.info('REACT_CODE_EXTRACTION', { sessionId, iteration, blocksFound: codeBlocks.length });
+
+        for (const block of codeBlocks) {
+          try {
+            const result = await executeTool('write_file', {
+              path: block.filename,
+              content: block.code
+            });
+            filesModified.add(block.filename);
+            logger.info('REACT_AUTO_WRITE', { sessionId, file: block.filename, size: block.code.length });
+
+            // Broadcast the auto-write as a tool call
+            broadcastProgress(sessionId, {
+              phase: 'react',
+              status: 'tool_result',
+              iteration,
+              tool: 'write_file (auto-extracted)',
+              result: result.substring(0, 200)
+            });
+
+            messages.push({
+              role: 'user',
+              content: '(Auto-extracted code from your response and saved to ' + block.filename + ')\n' + result
+            });
+          } catch (e) {
+            logger.warn('REACT_AUTO_WRITE_FAILED', { file: block.filename, error: e.message });
+          }
+        }
+
+        // Now check if we should continue or finish
+        if (llmResponse.toLowerCase().includes('done') || iteration >= 3) {
+          finalSummary = 'DONE: Created ' + codeBlocks.length + ' file(s): ' + Array.from(filesModified).join(', ');
+          isDone = true;
+          break;
+        }
+
+        // Continue the loop to let the model verify or add more
+        messages.push({
+          role: 'user',
+          content: 'I extracted and saved the code from your response. Continue if needed, or say DONE: <summary> to finish.'
+        });
+        continue;
+      }
+
+      // No code blocks and no tool calls — treat as conversational response
       finalSummary = llmResponse.trim();
       isDone = true;
       logger.info('REACT_NO_TOOLS_DONE', { sessionId, iteration, responseLength: finalSummary.length });
