@@ -21,6 +21,14 @@ async function main() {
     logger.info('✅ Application started successfully', {
       mode: router.getMode()
     });
+
+    // Start watchdog (autonomous monitoring)
+    try {
+      const { default: watchdog } = await import('./src/watchdog/watchdog.js');
+      watchdog.start();
+    } catch (e) {
+      logger.warn('Watchdog not started', { error: e.message });
+    }
   } catch (error) {
     logger.error('Failed to start application', {
       error: error.message,

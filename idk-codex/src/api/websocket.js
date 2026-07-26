@@ -109,8 +109,41 @@ export function initWebSocket(io) {
     });
 
     // Handle terminal resize (no-op for compatibility with xterm.js)
-    socket.on('terminal:resize', () => {
-      // Terminal resize is not implemented for the bash-spawn backend
+    socket.on('terminal:resize', () => {});
+
+    // ===== MULTIPLAYER: Shared session rooms =====
+    socket.on('join_room', (data) => {
+      const { roomId, userName } = data || {};
+      if (!roomId) return;
+      socket.join('room-' + roomId);
+      socket.data.roomId = roomId;
+      socket.data.userName = userName || 'Anonymous';
+      io.to('room-' + roomId).emit('user_joined', {
+        userName: socket.data.userName,
+        socketId: socket.id,
+        timestamp: new Date().toISOString()
+      });
+      logger.info('User joined room', { socketId: socket.id, roomId, userName });
+    });
+
+    socket.on('leave_room', (data) => {
+      const { roomId } = data || {};
+      if (!roomId) return;
+      socket.leave('room-' + roomId);
+      io.to('room-' + roomId).emit('user_left', {
+        userName: socket.data.userName,
+        socketId: socket.id
+      });
+    });
+
+    socket.on('room_message', (data) => {
+      const { roomId, message } = data || {};
+      if (!roomId) return;
+      io.to('room-' + roomId).emit('room_message', {
+        from: socket.data.userName || 'Anonymous',
+        message,
+        timestamp: new Date().toISOString()
+      });
     });
 
     // Handle disconnection

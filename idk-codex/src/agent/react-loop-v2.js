@@ -201,10 +201,24 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
     let llmResult;
     try {
       llmResult = await callLLM(messages, AGENT_TOOLS);
+
+      // CRITICAL: If model returns empty content AND no tool calls, retry WITHOUT tools
+      // Some free models (gpt-oss-20b) return empty when they see function calling tools
+      if (!llmResult.content && !llmResult.tool_calls) {
+        logger.warn('REACT_EMPTY_RESPONSE_RETRY', { sessionId, iteration, model: process.env.OPENAI_COMPATIBLE_MODEL });
+        llmResult = await callLLM(messages, null); // retry without tools
+      }
     } catch (err) {
       logger.error('REACT_LLM_ERROR', { iteration, error: err.message });
-      finalSummary = 'LLM error: ' + err.message;
-      break;
+
+      // If tools call failed, try without tools as fallback
+      try {
+        logger.warn('REACT_FALLBACK_NO_TOOLS', { sessionId, iteration });
+        llmResult = await callLLM(messages, null);
+      } catch (err2) {
+        finalSummary = 'LLM error: ' + err2.message;
+        break;
+      }
     }
 
     const llmContent = llmResult.content || '';
