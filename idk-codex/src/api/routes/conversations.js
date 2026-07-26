@@ -285,45 +285,57 @@ function detectTaskIntent(lowerMsg, originalMsg) {
   if (originalMsg.trim().length < 15) return false;
 
   // Greetings and social
-  const greetings = ['hi', 'hey', 'hello', 'sup', 'yo', 'how are you', 'good morning', 'good afternoon', 'good evening', 'whats up', "what's up", 'howdy', 'thanks', 'thank you', 'bye', 'goodbye', 'ok', 'okay', 'cool', 'nice', 'great', 'awesome'];
+  const greetings = ['hi', 'hey', 'hello', 'sup', 'yo', 'how are you', 'good morning', 'good afternoon', 'good evening', 'whats up', "what's up", 'howdy', 'thanks', 'thank you', 'bye', 'goodbye', 'ok', 'okay', 'cool', 'nice', 'great', 'awesome', "i'm doing", 'im doing', 'i am doing'];
   if (greetings.some(g => lowerMsg === g || lowerMsg.startsWith(g + ' ') || lowerMsg === g.replace(' ', ''))) {
     return false;
   }
 
-  // Questions (not about building something)
-  if (lowerMsg.startsWith('what is') || lowerMsg.startsWith('what are') || lowerMsg.startsWith('how do') || lowerMsg.startsWith('how does') || lowerMsg.startsWith('why') || lowerMsg.startsWith('can you explain') || lowerMsg.startsWith('what\'s') || lowerMsg.startsWith('whats')) {
-    // But if it contains task keywords, it's still a task
-    const taskKeywords = ['build', 'create', 'make', 'write', 'generate', 'implement', 'code', 'script', 'file', 'app', 'page'];
-    if (!taskKeywords.some(kw => lowerMsg.includes(kw))) {
-      return false;
-    }
-  }
-
-  // Task keywords — if present, it's a task
-  const taskKeywords = [
-    'build', 'create', 'make', 'write', 'generate', 'implement', 'develop',
-    'fix', 'refactor', 'update', 'modify', 'edit', 'change', 'delete',
-    'design', 'setup', 'set up', 'configure', 'deploy', 'install',
-    'code', 'function', 'component', 'page', 'app', 'script',
-    'api', 'endpoint', 'route', 'database', 'schema',
-    'html', 'css', 'javascript', 'python', 'react', 'node',
-    'bug', 'error', 'broken', 'not working', 'failing',
-    'test', 'feature', 'login', 'signup', 'dashboard',
-    'landing page', 'website', 'web app', 'backend', 'frontend',
-    'clone', 'repo', 'push', 'commit', 'git'
+  // Conversational starters — messages that START with chat-like phrases
+  // are chat even if they contain task keywords later
+  const chatStarters = [
+    "i'm doing", "im doing", "i am doing", "i'm okay", "im okay",
+    "i'm good", "im good", "i'm fine", "im fine",
+    "yeah", "yes", "no", "not really", "maybe",
+    "that sounds", "that's great", "thats great",
+    "what about you", "how about you", "hbu",
+    "actually", "honestly", "to be honest",
+    "i think", "i feel", "i believe", "in my opinion",
+    "thanks for", "thank you for", "appreciate",
+    "sorry", "my bad", "oops",
+    "lol", "haha", "lmao", "nice one", "good one",
+    "anyway", "anyways", "so", "well", "ok so", "okay so"
   ];
-
-  if (taskKeywords.some(kw => lowerMsg.includes(kw))) {
-    return true;
+  if (chatStarters.some(s => lowerMsg.startsWith(s))) {
+    return false;
   }
 
-  // Imperative verbs at the start
-  if (/^(build|create|make|write|generate|fix|add|remove|delete|update|refactor|deploy|run|test|install|set up|configure)/i.test(originalMsg.trim())) {
-    return true;
+  // Questions are ALWAYS chat
+  const questionPatterns = [
+    'tell me what', 'tell me about', 'tell me how', 'tell me why',
+    'what is', 'what are', 'what does', 'what do', 'what\'s', 'whats',
+    'how do', 'how does', 'how is', 'how can', 'how to',
+    'why is', 'why does', 'why do', 'why are',
+    'can you explain', 'explain what', 'explain how',
+    'who is', 'who are', 'when is', 'when was', 'where is',
+    'do you think', 'what\'s your opinion', 'whats your opinion',
+    'is it', 'are they', 'should i', 'could i',
+    'what do you know', 'what can you tell'
+  ];
+  if (questionPatterns.some(p => lowerMsg.startsWith(p))) {
+    return false;
   }
 
-  // Default: treat as chat
-  return false;
+  // Tasks MUST start with an imperative verb
+  // "Build a store" = task ✓
+  // "I need you to help Build a store" = chat (doesn't start with verb)
+  const hasImperativeStart = /^(build|create|make|write|generate|fix|add|remove|delete|update|refactor|deploy|run|test|install|set up|configure|clone|push|implement|develop|design|write)\b/i.test(originalMsg.trim());
+
+  if (!hasImperativeStart) {
+    return false;
+  }
+
+  // Only treat as task if it starts with a verb AND is longer than 20 chars
+  return originalMsg.trim().length > 20;
 }
 
 export default router;

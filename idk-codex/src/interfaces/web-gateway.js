@@ -230,7 +230,7 @@ export class WebGateway {
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
         credentials: false
       },
-      pingTimeout: 120000,
+      pingTimeout: 300000,
       pingInterval: 30000,
       transports: ['websocket', 'polling'],
       allowEIO3: true,

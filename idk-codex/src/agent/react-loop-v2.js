@@ -269,13 +269,14 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
     // Add the LLM response to conversation history
     messages.push({ role: 'assistant', content: llmResponse });
 
-    // If no tool calls and not done, prompt the LLM to continue or finish
+    // If no tool calls and not done, check if this is actually a chat response
     if (toolCalls.length === 0 && !isDone) {
-      messages.push({
-        role: 'user',
-        content: 'Please continue working on the task. If you are done, say "DONE: <summary>". If you need to do something, call a tool.'
-      });
-      continue;
+      // If the LLM gave a conversational response without tools, treat it as done
+      // This prevents infinite looping when the model just wants to chat
+      finalSummary = llmResponse.trim();
+      isDone = true;
+      logger.info('REACT_NO_TOOLS_DONE', { sessionId, iteration, responseLength: finalSummary.length });
+      break;
     }
 
     // Execute each tool call
