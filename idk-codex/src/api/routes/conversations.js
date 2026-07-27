@@ -138,7 +138,7 @@ router.post('/:id/messages', async (req, res) => {
   try {
     const conversationId = req.params.id;
     const userId = req.body.userId || USER_ID;
-    const { message, runAgent } = req.body;
+    const { message, runAgent, images } = req.body;
 
     if (!message) {
       return res.status(400).json({ error: 'message is required' });
