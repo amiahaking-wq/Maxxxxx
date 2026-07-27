@@ -109,7 +109,12 @@ export default function ChatPage() {
   // Final assembled message
   useEffect(() => {
     if (!message) return;
-    if (message.role === 'assistant' && message.conversationId === conversationId) {
+    // CRITICAL: Ignore 'streaming_start' messages — they have empty content and
+    // would prematurely end the loading state. Only process actual responses.
+    if (message.type === 'streaming_start') return;
+    if (message.role === 'assistant' && (message.conversationId === conversationId || !message.conversationId)) {
+      // Don't add empty messages
+      if (!message.content || message.content.trim().length === 0) return;
       // Check if we already have this content from streaming
       setMessages(prev => {
         const last = prev[prev.length - 1];

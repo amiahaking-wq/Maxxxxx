@@ -15,7 +15,7 @@
 
 import { generateCompletion } from '../groq/client.js';
 import { executeTool, getToolDescriptions } from './tools/registry.js';
-import { broadcastProgress, broadcastMessage, broadcastConfirmation, broadcastFileCreated } from '../api/websocket.js';
+import { broadcastProgress, broadcastMessage, broadcastConfirmation, broadcastFileCreated, broadcastToken } from '../api/websocket.js';
 import { addConversationMessage, createConversation } from '../database/conversations-supabase.js';
 import { condenseMessages } from './condenser.js';
 import { uploadToSupabase, isSupabaseConfigured } from './supabase-storage.js';
@@ -361,14 +361,13 @@ WHEN TO USE WHICH TOOL (smart tool selection):
 - edit_file → Make small targeted changes to an existing file (find/replace). Use write_file for big changes.
 - list_files → See what's in a directory before working.
 - search → Find text across files (grep) or find files by name.
-- web_fetch → Look up CURRENT information on the web. Use this for: latest news, current documentation, recent releases, anything time-sensitive, anything you're not 100% sure about. NEVER say "I can't browse the web" — you CAN, so DO it.
+- web_search → Search the web for current information. Returns titles, URLs, snippets. Use FIRST for any web question.
+- web_fetch → Fetch a specific URL and return its text content. Use after web_search to get full articles.
 - browser_navigate / browser_screenshot / browser_click / browser_type → For websites that need JavaScript rendering or interaction (logins, form submissions, clicking buttons). Use web_fetch for static content, browser tools for dynamic content.
 - memory_save → Remember facts the user might ask about later (their preferences, project context, decisions made).
 - knowledge_add → Save business policies, FAQs, product catalogs. Use this instead of memory_save for factual business info.
 - knowledge_search → Search the knowledge base BEFORE answering questions about the user's business, products, or policies.
 - credential_save / credential_get → Store and retrieve passwords/API keys securely (encrypted). NEVER print passwords in your response.
-- github_* → Create issues, list PRs, search code, get files from GitHub repos.
-- supabase_* → Query, insert, or list tables in the user's Supabase database.
 
 CRITICAL RULES:
 1. Never say "I can't do X" without first trying the relevant tool. You have tools — USE THEM.
@@ -383,6 +382,45 @@ SECURITY RULES:
 - For destructive actions (rm -rf, DROP TABLE, git push --force), you will be asked to confirm — this is normal, just proceed.
 - For connector tools (github_*, supabase_*, gmail_*, etc.), confirm with the user before any destructive action.
 - Never exfiltrate data or perform actions the user did not request.`;
+}
+
+/**
+ * Build a ReAct text-format system prompt for models that don't support
+ * native function calling (e.g. deepseek-r1:free).
+ * These models use THOUGHT/ACTION/INPUT text format instead of tool_calls.
+ */
+function buildReActSystemPrompt(workspacePath) {
+  const toolDescriptions = FUNCTION_TOOLS.map(t => {
+    const props = t.function.parameters?.properties || {};
+    const params = Object.keys(props).join(', ');
+    return `- ${t.function.name}: ${t.function.description}\n  Params: ${params}`;
+  }).join('\n');
+
+  return `You are MAX, an autonomous software engineer. Complete tasks by using tools.
+
+You work in: ${workspacePath}
+
+You MUST use tools in this EXACT text format:
+
+THOUGHT: (your reasoning about what to do next)
+ACTION: tool_name_here
+INPUT: {"param": "value"}
+
+Available tools:
+${toolDescriptions}
+
+When the task is fully complete, use:
+ACTION: task_complete
+INPUT: {"summary": "what was accomplished"}
+
+RULES:
+- Always write THOUGHT before ACTION
+- Always provide valid JSON in INPUT
+- Never just describe what you would do — actually DO it by calling tools
+- After writing files, run bash to verify
+- If a tool fails, read the error and try a different approach
+- NEVER say "I can't" — you have tools, USE THEM
+- Keep THOUGHT brief (1-2 sentences)`;
 }
 
 /**
@@ -521,6 +559,119 @@ async function waitForConfirmation(confirmationId, timeoutMs) {
 }
 
 // ============================================================================
+// HYBRID LLM CALL — works with ANY model (function calling OR ReAct text)
+// ============================================================================
+
+/**
+ * Models that support native OpenAI function calling.
+ * Models not in this list (like deepseek-r1) use ReAct text format.
+ */
+const FUNCTION_CALLING_MODELS = [
+  'llama', 'mistral', 'qwen', 'gemini', 'claude', 'gpt', 'groq', 'kimi', 'glm'
+];
+
+/**
+ * Check if the current model supports native function calling.
+ */
+function modelSupportsFunctionCalling() {
+  const model = (process.env.OPENAI_COMPATIBLE_MODEL || '').toLowerCase();
+  const provider = (process.env.GROQ_API_KEY ? 'groq' : '');
+  // Groq always supports function calling
+  if (provider === 'groq') return true;
+  // Check model name against the list
+  return FUNCTION_CALLING_MODELS.some(m => model.includes(m));
+}
+
+/**
+ * Call the LLM with hybrid approach:
+ * - If model supports function calling → use tools array
+ * - If not (deepseek-r1, etc.) → use ReAct text format (THOUGHT/ACTION/INPUT)
+ */
+async function hybridLLMCall(messages, options = {}) {
+  const supportsFC = modelSupportsFunctionCalling();
+
+  if (supportsFC) {
+    // Native function calling
+    logger.info('LLM_CALL', { mode: 'function_calling', model: process.env.OPENAI_COMPATIBLE_MODEL || 'groq' });
+    return await generateCompletion(messages, {
+      temperature: options.temperature || 0.2,
+      maxTokens: options.maxTokens || MAX_ACTION_TOKENS,
+      tools: FUNCTION_TOOLS,
+      tool_choice: 'auto'
+    });
+  } else {
+    // ReAct text format — replace system prompt with ReAct instructions
+    logger.info('LLM_CALL', { mode: 'react_text', model: process.env.OPENAI_COMPATIBLE_MODEL });
+
+    // Replace the system prompt with ReAct instructions
+    const reactMessages = [...messages];
+    if (reactMessages[0]?.role === 'system') {
+      const workspacePath = process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
+      reactMessages[0] = { role: 'system', content: buildReActSystemPrompt(workspacePath) };
+    }
+
+    return await generateCompletion(reactMessages, {
+      temperature: options.temperature || 0.2,
+      maxTokens: options.maxTokens || MAX_ACTION_TOKENS
+      // No tools array — model uses text format
+    });
+  }
+}
+
+/**
+ * Parse the LLM response — handles BOTH function calling and ReAct text.
+ * Returns { content, toolCalls, done }
+ */
+function parseLLMResponse(llmResult) {
+  const llmContent = llmResult?.content || '';
+  const llmToolCalls = llmResult?.tool_calls || null;
+
+  // Format 1: Native function calling (tool_calls array)
+  if (llmToolCalls && Array.isArray(llmToolCalls) && llmToolCalls.length > 0) {
+    logger.info('RESPONSE_FORMAT', { format: 'function_calling', count: llmToolCalls.length });
+    const toolCalls = llmToolCalls.map(tc => ({
+      id: tc.id || `tc_${Date.now()}`,
+      name: tc.function?.name || tc.name,
+      args: (() => { try { return JSON.parse(tc.function?.arguments || '{}'); } catch { return {}; } })()
+    }));
+    return {
+      content: llmContent,
+      toolCalls,
+      done: toolCalls.some(t => t.name === 'task_complete')
+    };
+  }
+
+  // Format 2: ReAct text format (THOUGHT/ACTION/INPUT)
+  const actionMatch = llmContent.match(/ACTION:\s*(\w+)\s*\n\s*INPUT:\s*(\{[\s\S]*?\})/m);
+  if (actionMatch) {
+    const toolName = actionMatch[1].trim();
+    let args = {};
+    try { args = JSON.parse(actionMatch[2]); } catch { /* ok */ }
+    logger.info('RESPONSE_FORMAT', { format: 'react_text', tool: toolName });
+    return {
+      content: llmContent,
+      toolCalls: [{ id: `tc_${Date.now()}`, name: toolName, args }],
+      done: toolName === 'task_complete'
+    };
+  }
+
+  // Format 3: XML <tool> tags (old fallback)
+  const { toolCalls: xmlCalls } = parseToolCalls(llmContent);
+  if (xmlCalls.length > 0) {
+    logger.info('RESPONSE_FORMAT', { format: 'xml', count: xmlCalls.length });
+    return {
+      content: llmContent,
+      toolCalls: xmlCalls.map(tc => ({ id: `tc_${Date.now()}`, name: tc.name, args: tc.args })),
+      done: xmlCalls.some(t => t.name === 'task_complete')
+    };
+  }
+
+  // No tools called — conversational response
+  logger.info('RESPONSE_FORMAT', { format: 'text', len: llmContent.length });
+  return { content: llmContent, toolCalls: [], done: false };
+}
+
+// ============================================================================
 // REACT LOOP
 // ============================================================================
 
@@ -623,7 +774,7 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
 
     broadcastProgress(sessionId, { phase: 'react', status: 'thinking', iteration });
 
-    // Call LLM with function calling tools
+    // Call LLM with hybrid approach (function calling OR ReAct text)
     let llmResult;
     try {
       const condensedMessages = await condenseMessages(messages, { maxTokens: 6000, keepRecent: 8 });
@@ -632,11 +783,9 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
       const prevEcho = process.env.ECHO_PROVIDER_ENABLED;
       process.env.ECHO_PROVIDER_ENABLED = 'false';
 
-      llmResult = await generateCompletion(condensedMessages, {
+      llmResult = await hybridLLMCall(condensedMessages, {
         temperature: 0.2,
-        maxTokens: MAX_ACTION_TOKENS,
-        tools: FUNCTION_TOOLS,
-        tool_choice: 'auto'
+        maxTokens: MAX_ACTION_TOKENS
       });
 
       process.env.ECHO_PROVIDER_ENABLED = prevEcho;
@@ -646,19 +795,20 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
       break;
     }
 
-    const llmContent = llmResult?.content || '';
-    const llmToolCalls = llmResult?.tool_calls || null;
+    // Parse the response — handles function calling, ReAct text, AND XML
+    const parsed = parseLLMResponse(llmResult);
+    const llmContent = parsed.content;
+    const llmToolCalls = parsed.toolCalls;
 
-    messages.push({ role: 'assistant', content: llmContent, tool_calls: llmToolCalls || undefined });
+    messages.push({ role: 'assistant', content: llmContent });
 
-    // ===== PATH 1: Function calling (preferred) =====
-    if (llmToolCalls && Array.isArray(llmToolCalls) && llmToolCalls.length > 0) {
-      logger.info('REACT_FUNCTION_CALLS', { sessionId, iteration, count: llmToolCalls.length });
+    // ===== PATH 1: Tool calls (function calling OR ReAct text OR XML) =====
+    if (llmToolCalls && llmToolCalls.length > 0) {
+      logger.info('REACT_TOOL_CALLS', { sessionId, iteration, count: llmToolCalls.length });
 
       for (const tc of llmToolCalls) {
-        const toolName = tc.function?.name || tc.name;
-        let toolArgs = {};
-        try { toolArgs = JSON.parse(tc.function?.arguments || '{}'); } catch (e) { toolArgs = {}; }
+        const toolName = tc.name;
+        const toolArgs = tc.args || {};
 
         // Check for task_complete
         if (toolName === 'task_complete') {
@@ -762,12 +912,19 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
               { type: 'image_url', image_url: { url: toolResult, detail: 'high' } }
             ]
           });
-        } else {
-          // Add tool result as a tool message (OpenAI format)
+        } else if (modelSupportsFunctionCalling()) {
+          // Function calling mode — add as tool message (OpenAI format)
           messages.push({
             role: 'tool',
             tool_call_id: tc.id || toolName,
             content: toolResult
+          });
+        } else {
+          // ReAct text mode — add as user message with OBSERVATION prefix
+          // Models like deepseek-r1 need the observation as a user message
+          messages.push({
+            role: 'user',
+            content: `OBSERVATION: Tool "${toolName}" returned:\n${String(toolResult).slice(0, 3000)}\n\nContinue with the next step.`
           });
         }
       }
@@ -900,6 +1057,21 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
   }
 
   broadcastProgress(sessionId, { phase: 'react', status: 'complete', iteration, summary: finalSummary, filesModified: Array.from(filesModified) });
+
+  // CRITICAL: Stream the final summary as token events so the frontend
+  // renders it character-by-character (same as chat mode). This ensures
+  // the UI shows the response even if the 'message' event is missed.
+  try {
+    broadcastToken(sessionId, { type: 'start', model: 'task' });
+    // Send in chunks to simulate streaming (faster than char-by-char)
+    const chunkSize = 20;
+    for (let i = 0; i < finalSummary.length; i += chunkSize) {
+      broadcastToken(sessionId, { type: 'token', text: finalSummary.slice(i, i + chunkSize) });
+    }
+    broadcastToken(sessionId, { type: 'done', model: 'task' });
+  } catch (e) {
+    logger.warn('Failed to stream task summary', { error: e.message });
+  }
 
   try {
     await addConversationMessage(sessionId, 'assistant', finalSummary, {

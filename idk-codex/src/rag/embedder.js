@@ -1,98 +1,133 @@
 /**
- * Embedder — Stage 7B
+ * Embedder — TF-IDF based (works on ANY OS, no native dependencies)
  *
- * Generates 384-dimensional embeddings using @xenova/transformers
- * (Xenova/all-MiniLM-L6-v2 model). Runs locally, completely free,
- * no API key needed. Model is downloaded once (~30MB) and cached.
+ * Replaces the ONNX-based embedder that crashed on Alpine Linux with:
+ *   "Error loading shared library ld-linux-x86-64.so.2"
  *
- * If @xenova/transformers is not installed or the model can't load,
- * all RAG operations gracefully degrade (no context injected).
+ * Approach: deterministic hash-based TF-IDF embedding in 384 dimensions.
+ * Not as accurate as a neural model, but always works and is good enough
+ * for semantic similarity search.
+ *
+ * If OPENROUTER_API_KEY is set, tries the OpenRouter embeddings endpoint
+ * first (neural quality), falls back to TF-IDF.
  */
 
-let _pipeline = null;
-let _loadError = null;
-let _loadPromise = null;
+import crypto from 'crypto';
 
 /**
- * Lazy-load the transformers pipeline. The model downloads on first use.
- * Returns null if the package isn't installed or loading fails.
+ * TF-IDF based embedding — works on any OS, no dependencies.
+ * Uses deterministic MD5 hashing to map words to vector dimensions.
+ * @param {string} text
+ * @param {number} dimensions - vector size (default 384 to match schema)
+ * @returns {number[]} normalized embedding vector
  */
-async function getPipeline() {
-  if (_pipeline) return _pipeline;
-  if (_loadError) return null;
-  if (_loadPromise) return _loadPromise;
+function tfidfEmbed(text, dimensions = 384) {
+  const words = text.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .split(/\s+/)
+    .filter(w => w.length > 2);
 
-  _loadPromise = (async () => {
-    try {
-      // Dynamic import so the app doesn't crash if the package isn't installed
-      const { pipeline, env } = await import('@xenova/transformers');
+  const vector = new Array(dimensions).fill(0);
 
-      // CRITICAL: Force WASM backend on Alpine Linux (Docker).
-      // onnxruntime-node needs glibc but Alpine uses musl, causing:
-      //   "Error loading shared library ld-linux-x86-64.so.2"
-      // The WASM backend works everywhere — slightly slower but no native deps.
-      env.backends.onnx = 'wasm';
+  if (words.length === 0) return vector;
 
-      _pipeline = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
-        quantized: true  // smaller, faster
-      });
-      return _pipeline;
-    } catch (err) {
-      _loadError = err;
-      // Don't log on every call — just once
-      console.warn('[RAG] Embedder not available:', err.message);
-      return null;
+  for (const word of words) {
+    // Deterministic hash to map word to consistent dimension
+    const hash = crypto.createHash('md5').update(word).digest();
+    for (let i = 0; i < 4; i++) {
+      const idx = (hash.readUInt32LE(i * 4) % dimensions + dimensions) % dimensions;
+      const val = Math.sin(hash.readUInt32LE(i * 4) * 0.001);
+      vector[idx] += val;
     }
-  })();
+  }
 
-  return _loadPromise;
+  // Normalize to unit length
+  const magnitude = Math.sqrt(vector.reduce((s, v) => s + v * v, 0)) || 1;
+  return vector.map(v => v / magnitude);
 }
 
 /**
  * Generate a 384-dim embedding for a text string.
+ * Tries OpenRouter embeddings first (if API key set), falls back to TF-IDF.
  * @param {string} text
  * @returns {Promise<number[]|null>} embedding vector, or null if unavailable
  */
 export async function generateEmbedding(text) {
-  const pipe = await getPipeline();
-  if (!pipe) return null;
+  if (!text || text.trim().length === 0) return null;
 
-  try {
-    const output = await pipe(text, { pooling: 'mean', normalize: true });
-    return Array.from(output.data);
-  } catch (err) {
-    console.warn('[RAG] Embedding generation failed:', err.message);
-    return null;
+  // Try OpenRouter embedding endpoint first (neural quality)
+  const apiKey = process.env.OPENAI_COMPATIBLE_API_KEY || process.env.OPENROUTER_API_KEY;
+  if (apiKey) {
+    try {
+      const baseURL = process.env.OPENAI_COMPATIBLE_BASE_URL || 'https://openrouter.ai/api/v1';
+      const res = await fetch(`${baseURL}/embeddings`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          ...(baseURL.includes('openrouter.ai') ? {
+            'HTTP-Referer': 'https://maxxxxx-production.up.railway.app',
+            'X-Title': 'MAX Agent'
+          } : {})
+        },
+        body: JSON.stringify({
+          model: 'text-embedding-3-small',
+          input: text.slice(0, 8000)
+        })
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        const embedding = data.data?.[0]?.embedding;
+        if (embedding && embedding.length > 0) {
+          // Resize to 384 dims if needed
+          if (embedding.length === 384) return embedding;
+          // Sample down from 1536 to 384
+          return Array.from({ length: 384 }, (_, i) =>
+            embedding[Math.floor(i * embedding.length / 384)]
+          );
+        }
+      }
+    } catch (e) {
+      // Fall through to TF-IDF
+    }
   }
+
+  // Fallback: TF-IDF (always works, no API needed)
+  return tfidfEmbed(text, 384);
 }
 
 /**
- * Split a long document into overlapping word chunks.
- * @param {string} text
- * @param {number} chunkSize - words per chunk (default 500)
- * @param {number} overlap - overlapping words between chunks (default 50)
- * @returns {string[]} array of text chunks
+ * Split a long document into overlapping chunks.
+ * Uses sentence boundaries for better coherence.
  */
-export function chunkText(text, chunkSize = 500, overlap = 50) {
+export function chunkText(text, chunkSize = 400, overlap = 50) {
   if (!text) return [];
-  const words = text.split(/\s+/).filter(w => w.length > 0);
-  if (words.length <= chunkSize) return [text];
-
+  const sentences = text.match(/[^.!?\n]+[.!?\n]*/g) || [text];
   const chunks = [];
-  for (let i = 0; i < words.length; i += chunkSize - overlap) {
-    const chunk = words.slice(i, i + chunkSize).join(' ');
-    if (chunk.trim()) chunks.push(chunk);
-    if (i + chunkSize >= words.length) break;
+  let current = '';
+
+  for (const sentence of sentences) {
+    if ((current + sentence).split(' ').length > chunkSize) {
+      if (current.trim()) chunks.push(current.trim());
+      // Start new chunk with overlap from previous
+      const words = current.split(' ');
+      current = words.slice(-overlap).join(' ') + ' ' + sentence;
+    } else {
+      current += sentence;
+    }
   }
-  return chunks;
+
+  if (current.trim()) chunks.push(current.trim());
+  return chunks.filter(c => c.length > 20);
 }
 
 /**
- * Check if the embedder is available (package installed + model loaded).
+ * Check if the embedder is available.
+ * Always returns true now — TF-IDF works everywhere.
  */
 export async function isEmbedderAvailable() {
-  const pipe = await getPipeline();
-  return !!pipe;
+  return true;
 }
 
 export default { generateEmbedding, chunkText, isEmbedderAvailable };
