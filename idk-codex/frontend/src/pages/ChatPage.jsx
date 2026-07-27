@@ -47,7 +47,8 @@ export default function ChatPage() {
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState('');
-  const [currentModel, setCurrentModel] = useState(() => localStorage.getItem('max_model') || 'openrouter-gpt-oss-20b');
+  const [currentModel, setCurrentModel] = useState(() => localStorage.getItem('max_model') || 'groq-llama-70b');
+  const [apiModels, setApiModels] = useState([]);  // ALL models from API
   const [showSidebar, setShowSidebar] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showFiles, setShowFiles] = useState(false);
@@ -66,6 +67,23 @@ export default function ChatPage() {
     connected, isReconnecting, token, message, progress: wsProgress,
     fileCreated, confirmation
   } = useWebSocket(conversationId);
+
+  // Fetch ALL models from the API on mount — includes Phone/Termux, Groq, Gemini, etc.
+  useEffect(() => {
+    fetch(`${API_BASE}/api/config/models`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.models && d.models.length > 0) {
+          setApiModels(d.models);
+          const saved = localStorage.getItem('max_model');
+          if (!saved || !d.models.find(m => m.id === saved)) {
+            const groq = d.models.find(m => m.id === 'groq-llama-70b');
+            setCurrentModel(groq ? groq.id : d.models[0].id);
+          }
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   // ===== WebSocket event handlers =====
 
@@ -260,12 +278,27 @@ export default function ChatPage() {
           <Menu size={20} />
         </button>
 
-        {/* Center: title + connection dot */}
+        {/* Center: model dropdown + connection dot */}
         <div className="flex-1 flex items-center justify-center gap-2 min-w-0">
           <span className={`w-2 h-2 rounded-full flex-shrink-0 ${connected ? 'bg-green-500' : 'bg-red-500'} ${isReconnecting ? 'animate-pulse' : ''}`} />
-          <span className="font-semibold text-sm truncate">MAX</span>
+          <select
+            value={currentModel}
+            onChange={(e) => setCurrentModel(e.target.value)}
+            className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500 max-w-[160px] truncate"
+            title="Select model"
+          >
+            {apiModels.length === 0 ? (
+              <option>Loading models...</option>
+            ) : (
+              apiModels.map(m => (
+                <option key={m.id} value={m.id}>
+                  {m.name} ({m.provider})
+                </option>
+              ))
+            )}
+          </select>
           {sessionFiles.length > 0 && (
-            <button onClick={() => setShowFiles(true)} className="relative p-1 hover:bg-gray-800 rounded flex-shrink-0" title="Files">
+            <button onClick={() => setShowFiles(true)} className="relative p-1.5 hover:bg-gray-800 rounded flex-shrink-0" title="Files">
               <Folder size={16} />
               <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-blue-500 text-white text-[9px] rounded-full flex items-center justify-center font-bold">{sessionFiles.length > 9 ? '9+' : sessionFiles.length}</span>
             </button>
@@ -373,7 +406,7 @@ export default function ChatPage() {
 
       {/* ===== Drawers & Modals ===== */}
       <Sidebar open={showSidebar} onClose={() => setShowSidebar(false)} currentSessionId={conversationId} onSwitchSession={(id) => navigate(`/chat/${id}`)} onNewChat={handleNewChat} />
-      <SettingsDrawer open={showSettings} onClose={() => setShowSettings(false)} devMode={devMode} setDevMode={setDevMode} currentModel={currentModel} setCurrentModel={setCurrentModel} models={QUICK_MODELS} />
+      <SettingsDrawer open={showSettings} onClose={() => setShowSettings(false)} devMode={devMode} setDevMode={setDevMode} currentModel={currentModel} setCurrentModel={setCurrentModel} models={apiModels.length > 0 ? apiModels : QUICK_MODELS} />
       <FilesPanel sessionId={conversationId} open={showFiles} onClose={() => setShowFiles(false)} onOpenFile={(file) => { setShowFiles(false); handleOpenServerFile(file); }} />
       {previewFile && <ArtifactPreview file={previewFile} onClose={() => setPreviewFile(null)} onDownload={handleDownloadArtifact} />}
       {pendingConfirmation && <ConfirmationDialog confirmation={pendingConfirmation} onResolved={() => setPendingConfirmation(null)} />}

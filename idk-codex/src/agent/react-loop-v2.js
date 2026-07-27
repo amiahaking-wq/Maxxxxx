@@ -133,6 +133,18 @@ const FUNCTION_TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'web_search',
+      description: 'Search the web for current information. Returns titles, URLs, and snippets. Use this when the user asks to search, look up, find news, or anything needing current data. ALWAYS use this FIRST for web questions.',
+      parameters: {
+        type: 'object',
+        properties: { query: { type: 'string', description: 'What to search for' } },
+        required: ['query']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'task_complete',
       description: 'Call this when the task is fully done. Provide a summary of what was accomplished.',
       parameters: {
@@ -518,8 +530,80 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
 
   logger.info('REACT_LOOP_START', { task: task.substring(0, 100), sessionId, userId: effectiveUserId });
 
-  // Build system prompt with RAG context injected (Stage 7D)
-  const systemPrompt = await buildSystemPromptWithRAG(workspacePath, effectiveUserId, task);
+  // ===== PRE-SEARCH STEP =====
+  // If the task is a web search request, execute web_search BEFORE the ReAct
+  // loop, auto-fetch the top 2 results for full content, and inject everything
+  // into the system prompt. This guarantees the agent has real data.
+  let preSearchContext = '';
+  const isWebSearchTask = /\b(search|look up|find|browse|news|latest|current|today|what.*happening|what.*going on)\b/i.test(task);
+  if (isWebSearchTask) {
+    try {
+      // Extract the search query from the task
+      let searchQuery = task
+        .replace(/\b(use the (search|browser|web) tool|search the web|look up|browse the web|find (me )?|for (me )?)\b/gi, '')
+        .replace(/\b(from|on|in) the web\b/gi, '')
+        .replace(/\b(today|now|current|latest)\b/gi, '')
+        .replace(/\b(any|some)\b/gi, '')
+        .trim();
+      if (searchQuery.length < 5) searchQuery = task;
+      if (searchQuery.length > 200) searchQuery = searchQuery.substring(0, 200);
+
+      logger.info('PRE_SEARCH_START', { sessionId, query: searchQuery });
+      broadcastProgress(sessionId, { phase: 'react', status: 'searching_web', iteration: 0, query: searchQuery, tool: 'web_search' });
+
+      // Step 1: Execute web_search
+      const searchResult = await executeTool('web_search', { query: searchQuery }, { userId: effectiveUserId, sessionId });
+
+      if (searchResult && !searchResult.startsWith('Error:') && !searchResult.startsWith('No search results')) {
+        logger.info('PRE_SEARCH_SUCCESS', { sessionId, resultLength: searchResult.length });
+
+        // Step 2: Extract URLs from search results and auto-fetch top 2 for full content
+        const urlRegex = /URL:\s*(https?:\/\/[^\s\n]+)/gi;
+        const urls = [];
+        let urlMatch;
+        while ((urlMatch = urlRegex.exec(searchResult)) !== null && urls.length < 3) {
+          urls.push(urlMatch[1]);
+        }
+
+        let fetchedContent = '';
+        if (urls.length > 0) {
+          broadcastProgress(sessionId, { phase: 'react', status: 'fetching_results', iteration: 0, tool: 'web_fetch', count: urls.length });
+          for (let i = 0; i < Math.min(urls.length, 2); i++) {
+            try {
+              const fetchResult = await executeTool('web_fetch', { url: urls[i] }, { userId: effectiveUserId, sessionId });
+              if (fetchResult && !fetchResult.startsWith('Error:')) {
+                fetchedContent += `\n\n--- Article ${i + 1}: ${urls[i]} ---\n${fetchResult.substring(0, 3000)}\n`;
+              }
+            } catch (e) {
+              logger.warn('PRE_SEARCH_FETCH_FAILED', { url: urls[i], error: e.message });
+            }
+          }
+        }
+
+        // Step 3: Build the context with search results + fetched content
+        preSearchContext = '\n\n===== WEB SEARCH RESULTS (already done — do NOT search again) =====\n' +
+          searchResult +
+          '\n===== END SEARCH RESULTS =====\n';
+
+        if (fetchedContent) {
+          preSearchContext += '\n===== FULL ARTICLE CONTENT (from top results) =====' + fetchedContent + '\n===== END ARTICLE CONTENT =====\n';
+        }
+
+        preSearchContext += '\n\nINSTRUCTIONS: Use the above search results and article content to answer the user\'s question. ' +
+          'Summarize the key findings with sources (cite URLs). ' +
+          'Do NOT create files. Do NOT search again. Just answer based on the results above.';
+
+        logger.info('PRE_SEARCH_COMPLETE', { sessionId, searchResultLength: searchResult.length, fetchedContentLength: fetchedContent.length });
+      } else {
+        logger.warn('PRE_SEARCH_NO_RESULTS', { sessionId, searchResult: searchResult?.substring(0, 200) });
+      }
+    } catch (e) {
+      logger.error('PRE_SEARCH_FAILED', { sessionId, error: e.message });
+    }
+  }
+
+  // Build system prompt with RAG context + pre-search context
+  const systemPrompt = await buildSystemPromptWithRAG(workspacePath, effectiveUserId, task) + preSearchContext;
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: task }

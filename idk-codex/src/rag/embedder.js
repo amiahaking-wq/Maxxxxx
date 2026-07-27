@@ -25,7 +25,14 @@ async function getPipeline() {
   _loadPromise = (async () => {
     try {
       // Dynamic import so the app doesn't crash if the package isn't installed
-      const { pipeline } = await import('@xenova/transformers');
+      const { pipeline, env } = await import('@xenova/transformers');
+
+      // CRITICAL: Force WASM backend on Alpine Linux (Docker).
+      // onnxruntime-node needs glibc but Alpine uses musl, causing:
+      //   "Error loading shared library ld-linux-x86-64.so.2"
+      // The WASM backend works everywhere — slightly slower but no native deps.
+      env.backends.onnx = 'wasm';
+
       _pipeline = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
         quantized: true  // smaller, faster
       });
@@ -34,7 +41,6 @@ async function getPipeline() {
       _loadError = err;
       // Don't log on every call — just once
       console.warn('[RAG] Embedder not available:', err.message);
-      console.warn('[RAG] Install with: npm install @xenova/transformers');
       return null;
     }
   })();
