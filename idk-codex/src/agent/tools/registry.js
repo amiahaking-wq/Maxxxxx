@@ -484,6 +484,140 @@ export const TOOLS = {
         return `Error: fetch failed: ${err.message}`;
       }
     }
+  },
+
+  // ========================================================================
+  // WEB SEARCH — search the web using DuckDuckGo HTML (free, no API key)
+  // ========================================================================
+  web_search: {
+    name: 'web_search',
+    description: 'Search the web for current information. Returns titles, URLs, and snippets. Use this when the user asks to search, look up, find news, or anything needing current data. ALWAYS use this FIRST for web questions — do not write code or files when asked to search.',
+    params: {
+      query: 'string (required) — what to search for'
+    },
+    execute: async (args) => {
+      const query = args.query;
+      if (!query) return 'Error: query is required';
+
+      try {
+        logger.info('TOOL:web_search', { query: query.substring(0, 100) });
+
+        // Detect if this is a news query
+        const isNewsQuery = /\b(news|today|latest|current|happening|breaking)\b/i.test(query);
+        const searchQuery = isNewsQuery ? query + ' news' : query;
+
+        // ===== STRATEGY 1: Google News RSS (always works, no rate limit) =====
+        if (isNewsQuery) {
+          try {
+            const rssUrl = 'https://news.google.com/rss/search?q=' + encodeURIComponent(searchQuery) + '&hl=en-US&gl=US&ceid=US:en';
+            const rssResponse = await fetch(rssUrl, {
+              headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MAX-Agent/2.0)' }
+            });
+            if (rssResponse.ok) {
+              const xml = await rssResponse.text();
+              const results = [];
+              const itemRegex = /<item>([\s\S]*?)<\/item>/g;
+              let match;
+              while ((match = itemRegex.exec(xml)) !== null && results.length < 8) {
+                const item = match[1];
+                const title = item.match(/<title>(.*?)<\/title>/);
+                const link = item.match(/<link>(.*?)<\/link>/);
+                const pubDate = item.match(/<pubDate>(.*?)<\/pubDate>/);
+                const source = item.match(/<source[^>]*>(.*?)<\/source>/);
+                if (title) {
+                  results.push({
+                    title: title[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'),
+                    url: link ? link[1] : '',
+                    snippet: (source ? source[1] + ' — ' : '') + (pubDate ? pubDate[1] : ''),
+                    source: source ? source[1] : 'Google News'
+                  });
+                }
+              }
+              if (results.length > 0) {
+                let output = `News search results for "${query}" (${results.length} found):\n\n`;
+                output += results.map((r, i) => `[${i + 1}] ${r.title}\n    Source: ${r.snippet}\n    URL: ${r.url}`).join('\n\n');
+                return output;
+              }
+            }
+          } catch (e) {
+            logger.warn('Google News RSS failed', { error: e.message });
+          }
+        }
+
+        // ===== STRATEGY 2: DuckDuckGo Lite (general search) =====
+        try {
+          const ddgUrl = 'https://lite.duckduckgo.com/lite/?q=' + encodeURIComponent(searchQuery);
+          const ddgResponse = await fetch(ddgUrl, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              'Accept': 'text/html',
+              'Accept-Language': 'en-US,en;q=0.9'
+            }
+          });
+          if (ddgResponse.ok) {
+            const html = await ddgResponse.text();
+            const results = [];
+            // DDG Lite: <a rel="nofollow" href="...">Title</a>
+            const linkRegex = /<a[^>]*rel="nofollow"[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/gs;
+            let match;
+            while ((match = linkRegex.exec(html)) !== null && results.length < 8) {
+              let href = match[1];
+              const uddg = href.match(/uddg=([^&]+)/);
+              if (uddg) href = decodeURIComponent(uddg[1]);
+              const title = match[2].replace(/<[^>]+>/g, '').trim();
+              if (title.length > 5 && href.startsWith('http')) {
+                results.push({ title, url: href, snippet: '' });
+              }
+            }
+            if (results.length > 0) {
+              let output = `Search results for "${query}" (${results.length} found):\n\n`;
+              output += results.map((r, i) => `[${i + 1}] ${r.title}\n    URL: ${r.url}`).join('\n\n');
+              return output;
+            }
+          }
+        } catch (e) {
+          logger.warn('DuckDuckGo search failed', { error: e.message });
+        }
+
+        // ===== STRATEGY 3: Google News RSS as fallback for ALL queries =====
+        try {
+          const rssUrl = 'https://news.google.com/rss/search?q=' + encodeURIComponent(searchQuery) + '&hl=en-US&gl=US&ceid=US:en';
+          const rssResponse = await fetch(rssUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MAX-Agent/2.0)' }
+          });
+          if (rssResponse.ok) {
+            const xml = await rssResponse.text();
+            const results = [];
+            const itemRegex = /<item>([\s\S]*?)<\/item>/g;
+            let match;
+            while ((match = itemRegex.exec(xml)) !== null && results.length < 8) {
+              const item = match[1];
+              const title = item.match(/<title>(.*?)<\/title>/);
+              const link = item.match(/<link>(.*?)<\/link>/);
+              if (title) {
+                results.push({
+                  title: title[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'),
+                  url: link ? link[1] : '',
+                  snippet: ''
+                });
+              }
+            }
+            if (results.length > 0) {
+              let output = `Search results for "${query}" (${results.length} found):\n\n`;
+              output += results.map((r, i) => `[${i + 1}] ${r.title}\n    URL: ${r.url}`).join('\n\n');
+              return output;
+            }
+          }
+        } catch (e) {
+          logger.warn('Google News fallback failed', { error: e.message });
+        }
+
+        return `No search results found for: "${query}". Try rephrasing your search.`;
+      } catch (err) {
+        logger.error('web_search failed', { error: err.message });
+        return `Error: web search failed: ${err.message}`;
+      }
+    }
   }
 };
 
