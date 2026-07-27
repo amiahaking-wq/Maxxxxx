@@ -7,6 +7,7 @@ import { runMigrations } from './migrate.js';
 import { runMAXMigration } from './migrate-max.js';
 import { migrateFixMaxTasks } from './migrate-fix-max-tasks.js';
 import { migrateUserPreferences } from './migrate-user-preferences.js';
+import { migrateSecurity } from './migrate-security.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -93,6 +94,17 @@ export function initDatabase() {
       logger.info('user_preferences migration completed');
     } catch (error) {
       logger.error('Failed to apply user_preferences migration', {
+        error: error.message
+      });
+      // Don't throw - allow app to continue
+    }
+
+    // Apply security + business profile migration (Stage 6 + Stage 8)
+    try {
+      migrateSecurity(db);
+      logger.info('Security + business profile migration completed');
+    } catch (error) {
+      logger.error('Failed to apply security migration', {
         error: error.message
       });
       // Don't throw - allow app to continue

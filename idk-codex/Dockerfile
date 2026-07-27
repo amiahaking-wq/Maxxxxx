@@ -71,6 +71,9 @@ COPY src/skills ./src/skills
 COPY src/ui ./src/ui
 COPY src/utils ./src/utils
 COPY src/watchdog ./src/watchdog
+COPY src/rag ./src/rag
+COPY src/modes ./src/modes
+COPY sql ./sql
 
 COPY server.js ./
 COPY package.json ./

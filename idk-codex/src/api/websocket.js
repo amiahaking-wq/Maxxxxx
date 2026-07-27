@@ -109,41 +109,8 @@ export function initWebSocket(io) {
     });
 
     // Handle terminal resize (no-op for compatibility with xterm.js)
-    socket.on('terminal:resize', () => {});
-
-    // ===== MULTIPLAYER: Shared session rooms =====
-    socket.on('join_room', (data) => {
-      const { roomId, userName } = data || {};
-      if (!roomId) return;
-      socket.join('room-' + roomId);
-      socket.data.roomId = roomId;
-      socket.data.userName = userName || 'Anonymous';
-      io.to('room-' + roomId).emit('user_joined', {
-        userName: socket.data.userName,
-        socketId: socket.id,
-        timestamp: new Date().toISOString()
-      });
-      logger.info('User joined room', { socketId: socket.id, roomId, userName });
-    });
-
-    socket.on('leave_room', (data) => {
-      const { roomId } = data || {};
-      if (!roomId) return;
-      socket.leave('room-' + roomId);
-      io.to('room-' + roomId).emit('user_left', {
-        userName: socket.data.userName,
-        socketId: socket.id
-      });
-    });
-
-    socket.on('room_message', (data) => {
-      const { roomId, message } = data || {};
-      if (!roomId) return;
-      io.to('room-' + roomId).emit('room_message', {
-        from: socket.data.userName || 'Anonymous',
-        message,
-        timestamp: new Date().toISOString()
-      });
+    socket.on('terminal:resize', () => {
+      // Terminal resize is not implemented for the bash-spawn backend
     });
 
     // Handle disconnection
@@ -325,17 +292,25 @@ export function broadcastTerminalCommand(sessionId, command) {
 }
 
 /**
+ * Broadcast a file creation event (Stage 6E).
+ * Emitted when the agent calls write_file/edit_file. The frontend stores
+ * the file in IndexedDB and shows an ArtifactCard.
+ */
+export function broadcastFileCreated(sessionId, file) {
+  if (!global.wsServer) return;
+  const room = `session-${sessionId}`;
+  global.wsServer.to(room).emit('file_created', {
+    sessionId,
+    timestamp: new Date().toISOString(),
+    ...file
+  });
+}
+
+/**
  * Broadcast a streaming token from the LLM to the session room.
- * Used by react-loop-v2.js to stream the assistant response character-by-character.
- *
- * @param {string} sessionId - Session ID
- * @param {Object} payload - { type: 'start'|'token'|'done', text?, model? }
  */
 export function broadcastToken(sessionId, payload) {
-  if (!global.wsServer) {
-    return;
-  }
-
+  if (!global.wsServer) return;
   const room = `session-${sessionId}`;
   global.wsServer.to(room).emit('token', {
     sessionId,
@@ -345,23 +320,18 @@ export function broadcastToken(sessionId, payload) {
 }
 
 /**
- * Broadcast a file creation event to the session room.
- * Used by react-loop-v2.js whenever write_file/edit_file succeeds.
- * The frontend listens for this event and stores the file in IndexedDB
- * so the user can preview it (Claude Artifacts-style) and download it.
- *
- * @param {string} sessionId - Session ID
- * @param {Object} file - { path, content, language, tool }
+ * Broadcast a confirmation request (Stage 6C).
+ * Emitted when the agent wants to perform a destructive/risky action.
+ * The frontend shows a confirmation dialog. When the user responds,
+ * the frontend calls POST /api/permissions/confirm with the confirmationId.
  */
-export function broadcastFileCreated(sessionId, file) {
-  if (!global.wsServer) {
-    return;
-  }
-
+export function broadcastConfirmation(sessionId, payload) {
+  if (!global.wsServer) return;
   const room = `session-${sessionId}`;
-  global.wsServer.to(room).emit('file_created', {
+  global.wsServer.to(room).emit('confirmation_required', {
     sessionId,
     timestamp: new Date().toISOString(),
-    ...file
+    ...payload
   });
+  logger.info('Confirmation requested', { sessionId, tool: payload.tool, riskLevel: payload.riskLevel });
 }

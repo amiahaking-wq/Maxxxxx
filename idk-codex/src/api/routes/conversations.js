@@ -138,7 +138,7 @@ router.post('/:id/messages', async (req, res) => {
   try {
     const conversationId = req.params.id;
     const userId = req.body.userId || USER_ID;
-    const { message, runAgent, images } = req.body;
+    const { message, runAgent } = req.body;
 
     if (!message) {
       return res.status(400).json({ error: 'message is required' });
@@ -150,16 +150,14 @@ router.post('/:id/messages', async (req, res) => {
       return res.status(404).json({ error: 'Conversation not found' });
     }
 
-    // Save the user's message (include image metadata if provided)
-    const userMetadata = images && images.length > 0 ? { imageCount: images.length } : null;
-    const userMsg = await addConversationMessage(conversationId, 'user', message, userMetadata);
+    // Save the user's message
+    const userMsg = await addConversationMessage(conversationId, 'user', message);
 
     // Broadcast the user message
     broadcastMessage(conversationId, {
       role: 'user',
       content: message,
-      conversationId,
-      images: images || undefined
+      conversationId
     });
 
     // INTENT DETECTION — decide if this is a task or just chat
@@ -187,158 +185,118 @@ router.post('/:id/messages', async (req, res) => {
             content: m.content
           }));
 
-          // Build the user message — if images were attached, send as multimodal
-          // content array (OpenAI vision format)
+          // Build the user message — support image attachments (vision)
           let userMessageContent;
           if (images && images.length > 0) {
             userMessageContent = [
               { type: 'text', text: message },
-              ...images.map(img => ({
-                type: 'image_url',
-                image_url: { url: img, detail: 'high' }
-              }))
+              ...images.map(img => ({ type: 'image_url', image_url: { url: img, detail: 'high' } }))
             ];
           } else {
             userMessageContent = message;
           }
 
+          // Detect if the user is asking about something that needs web access.
+          // If so, give the chat path a web_fetch tool so the LLM can actually
+          // fetch URLs instead of saying "I can't browse the web".
+          const wantsWebAccess = /\b(search|look up|browse|web|website|url|latest news|what.*happening|current|today|recent|news|online)\b/i.test(message);
+
+          // Smart system prompt that explains WHEN to use which tool
+          const systemPrompt = 'You are MAX, a helpful AI assistant. You are also an autonomous coding agent with access to tools.' +
+            '\n\nWhen to use tools:' +
+            '\n- If the user asks to BUILD, CREATE, or WRITE something → tell them to phrase it as a task (e.g. "Build a snake game") and the full agent will run.' +
+            '\n- If the user asks you to LOOK UP, SEARCH, or FETCH something from the web → use the web_fetch tool to get real, current information.' +
+            '\n- If the user asks a general knowledge question → just answer from your training data, no tool needed.' +
+            '\n- If you don\'t know something or it\'s time-sensitive (news, current events, latest versions) → use web_fetch.' +
+            '\n\nBe friendly, concise, and natural. Never say "I can\'t browse the web" — if you have the web_fetch tool, USE IT.' +
+            (wantsWebAccess ? '\n\nThe user seems to want current/web information. Use web_fetch to get real data before answering.' : '');
+
           const messages = [
-            {
-              role: 'system',
-              content: 'You are MAX, a helpful AI assistant. You are also an autonomous coding agent, but right now you are just chatting. Be friendly, concise, and natural. If the user asks you to build something, tell them to be more specific about what they want to create. If the user shares an image, describe what you see and ask how you can help.'
-            },
+            { role: 'system', content: systemPrompt },
             ...recentMessages,
             { role: 'user', content: userMessageContent }
           ];
 
-          // Disable Echo for chat — the adapter checks ECHO_PROVIDER_ENABLED at call time
+          // Disable Echo for chat
           process.env.ECHO_PROVIDER_ENABLED = 'false';
 
-          // ===== STREAMING CHAT RESPONSE =====
-          // Call the OpenRouter API directly with stream:true and pipe tokens
-          // to the WebSocket room, so the UI renders character-by-character.
-          let response = '';
-          try {
-            const baseURL = process.env.OPENAI_COMPATIBLE_BASE_URL || 'https://openrouter.ai/api/v1';
-            const apiKey = process.env.OPENAI_COMPATIBLE_API_KEY;
-            const candidateModels = [
-              process.env.OPENAI_COMPATIBLE_MODEL,
-              'openai/gpt-oss-20b:free',          // ✓ known working
-              'openai/gpt-oss-120b:free',
-              'deepseek/deepseek-chat',           // paid fallback
-              'meta-llama/llama-3.3-70b-instruct' // paid fallback
-            ].filter(Boolean);
-
-            const headers = { 'Content-Type': 'application/json' };
-            if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
-            if (baseURL.includes('openrouter.ai')) {
-              headers['HTTP-Referer'] = 'https://maxxxxx-production.up.railway.app';
-              headers['X-Title'] = 'MAX Agent';
-            }
-
-            // Notify UI: streaming is starting
-            broadcastToken(conversationId, { type: 'start', model: 'chat' });
-
-            let success = false;
-            let lastErr = null;
-            for (const model of candidateModels) {
-              try {
-                const llmResp = await fetch(baseURL + '/chat/completions', {
-                  method: 'POST',
-                  headers,
-                  body: JSON.stringify({
-                    model,
-                    messages,
-                    temperature: 0.7,
-                    max_tokens: 800,
-                    stream: true
-                  })
-                });
-                if (!llmResp.ok) {
-                  const errText = await llmResp.text();
-                  logger.warn('Chat stream model unavailable, trying next', { model, status: llmResp.status, err: errText.substring(0, 150) });
-                  lastErr = new Error('HTTP ' + llmResp.status + ': ' + errText.substring(0, 100));
-                  continue;
+          let result;
+          if (wantsWebAccess) {
+            // Give the chat path a web_fetch tool so it can actually browse
+            const webFetchTool = [{
+              type: 'function',
+              function: {
+                name: 'web_fetch',
+                description: 'Fetch a URL and return the text content. Use this to look up current information, news, documentation, or any web page. Always use this when the user asks about something current or you need real-time data — never say "I can\'t browse the web".',
+                parameters: {
+                  type: 'object',
+                  properties: { url: { type: 'string', description: 'The URL to fetch' } },
+                  required: ['url']
                 }
+              }
+            }];
 
-                // Consume the SSE stream
-                const reader = llmResp.body.getReader();
-                const decoder = new TextDecoder();
-                let buf = '';
-                while (true) {
-                  const { done, value } = await reader.read();
-                  if (done) break;
-                  buf += decoder.decode(value, { stream: true });
-                  let sep;
-                  while ((sep = buf.indexOf('\n\n')) >= 0) {
-                    const evt = buf.slice(0, sep);
-                    buf = buf.slice(sep + 2);
-                    for (const line of evt.split('\n')) {
-                      if (!line.startsWith('data: ')) continue;
-                      const payload = line.slice(6).trim();
-                      if (payload === '[DONE]') continue;
+            try {
+              result = await generateCompletion(messages, {
+                temperature: 0.7,
+                maxTokens: 800,
+                tools: webFetchTool,
+                tool_choice: 'auto'
+              });
+
+              // If the LLM called web_fetch, execute it and feed result back
+              if (result?.tool_calls && result.tool_calls.length > 0) {
+                let responseText = result.content || '';
+                for (const tc of result.tool_calls) {
+                  const toolName = tc.function?.name;
+                  if (toolName === 'web_fetch') {
+                    let toolArgs = {};
+                    try { toolArgs = JSON.parse(tc.function?.arguments || '{}'); } catch (e) {}
+                    if (toolArgs.url) {
                       try {
-                        const chunk = JSON.parse(payload);
-                        const delta = chunk.choices?.[0]?.delta;
-                        if (delta?.content) {
-                          response += delta.content;
-                          broadcastToken(conversationId, { type: 'token', text: delta.content });
-                        }
-                      } catch (e) { /* partial JSON */ }
+                        const { executeTool } = await import('../../agent/tools/registry.js');
+                        const fetchResult = await executeTool('web_fetch', { url: toolArgs.url }, { userId, sessionId: conversationId });
+                        // Feed the tool result back to the LLM for a final response
+                        const followUpMessages = [
+                          ...messages,
+                          { role: 'assistant', content: responseText, tool_calls: result.tool_calls },
+                          { role: 'tool', tool_call_id: tc.id || 'web_fetch', content: String(fetchResult).substring(0, 4000) }
+                        ];
+                        const followUp = await generateCompletion(followUpMessages, { temperature: 0.7, maxTokens: 800 });
+                        responseText = followUp?.content || responseText;
+                      } catch (fetchErr) {
+                        responseText += '\n\n(Web fetch failed: ' + fetchErr.message + ')';
+                      }
                     }
                   }
                 }
-                success = true;
-                logger.info('Chat stream completed', { model, length: response.length });
-                break;
-              } catch (e) {
-                lastErr = e;
-                continue;
+                result = { content: responseText };
               }
+            } catch (toolErr) {
+              // Tool-calling failed — fall back to plain generation
+              logger.warn('Chat with tools failed, falling back', { error: toolErr.message });
+              result = await generateCompletion(messages, { temperature: 0.7, maxTokens: 800 });
             }
-
-            // Restore Echo for the ReAct agent loop (which may still need it as last resort)
-            process.env.ECHO_PROVIDER_ENABLED = 'true';
-
-            // Notify UI: streaming is done
-            broadcastToken(conversationId, { type: 'done', model: 'chat' });
-
-            if (!success || !response) {
-              // Streaming failed entirely — fall back to adapter
-              logger.warn('Chat stream failed, falling back to adapter', { error: lastErr?.message });
-              const result = await generateCompletion(messages, { temperature: 0.7, maxTokens: 800 });
-              response = result?.content || '';
-            }
-
-            response = response || 'Sorry, I could not generate a response.';
-
-            await addConversationMessage(conversationId, 'assistant', response);
-            broadcastMessage(conversationId, {
-              role: 'assistant',
-              content: response,
-              conversationId
-            });
-          } catch (streamErr) {
-            // Streaming threw — fall back to adapter
-            logger.warn('Chat stream threw, using adapter', { error: streamErr.message });
-            process.env.ECHO_PROVIDER_ENABLED = 'true';
-            const result = await generateCompletion(messages, { temperature: 0.7, maxTokens: 800 });
-            response = result?.content || 'Sorry, I could not generate a response.';
-            broadcastToken(conversationId, { type: 'done', model: 'chat' });
-            await addConversationMessage(conversationId, 'assistant', response);
-            broadcastMessage(conversationId, {
-              role: 'assistant',
-              content: response,
-              conversationId
-            });
+          } else {
+            // Plain chat — no tools needed
+            result = await generateCompletion(messages, { temperature: 0.7, maxTokens: 800 });
           }
+
+          // Restore Echo for the ReAct agent loop
+          process.env.ECHO_PROVIDER_ENABLED = 'true';
+
+          const response = result?.content || 'Sorry, I could not generate a response.';
+
+          await addConversationMessage(conversationId, 'assistant', response);
+          broadcastMessage(conversationId, {
+            role: 'assistant',
+            content: response,
+            conversationId
+          });
         } catch (err) {
           logger.error('Chat response failed', { error: err.message });
-          const fallback = '⚠️ All AI providers are currently rate-limited or unavailable.\n\n' +
-            'To fix this permanently, add a free OpenRouter API key:\n' +
-            '1. Go to https://openrouter.ai/keys\n' +
-            '2. Create a free key\n' +
-            '3. Add OPENAI_COMPATIBLE_BASE_URL and OPENAI_COMPATIBLE_API_KEY to Railway';
+          process.env.ECHO_PROVIDER_ENABLED = 'true';
+          const fallback = '⚠️ I could not generate a response right now.\n\nTo fix this permanently, add a free OpenRouter API key:\n1. Go to https://openrouter.ai/keys\n2. Create a free key\n3. Add OPENAI_COMPATIBLE_BASE_URL and OPENAI_COMPATIBLE_API_KEY to Railway';
           await addConversationMessage(conversationId, 'assistant', fallback);
           broadcastMessage(conversationId, {
             role: 'assistant',
@@ -362,13 +320,7 @@ router.post('/:id/messages', async (req, res) => {
     // Execute the agent loop asynchronously
     setImmediate(async () => {
       try {
-        // If images are attached, prepend image context to the task
-        let fullTask = message;
-        if (images && images.length > 0) {
-          fullTask = message + '\n\n[User attached ' + images.length + ' image(s). Use browser_screenshot or analyze the user description to understand them.]';
-        }
-
-        const result = await executeReActLoop(fullTask, conversationId, userId, {
+        const result = await executeReActLoop(message, conversationId, userId, {
           workspacePath: process.env.SANDBOX_WORKSPACE || './sandbox-workspace'
         });
 
@@ -400,20 +352,49 @@ router.post('/:id/messages', async (req, res) => {
 });
 
 /**
- * Detect if a message is a task (should trigger agent) or chat (just respond)
+ * Detect if a message is a task (should trigger agent with tools) or chat.
+ *
+ * CRITICAL: If the user explicitly requests a tool — web search, browser,
+ * fetch, look up, browse — this is ALWAYS a task, even if phrased as a
+ * question. Without this, the agent says "I can't browse the web" because
+ * the chat-mode path doesn't expose tools.
  */
 function detectTaskIntent(lowerMsg, originalMsg) {
   // Short messages (< 15 chars) are almost always chat
   if (originalMsg.trim().length < 15) return false;
 
-  // Greetings and social
+  // ===== TOOL REQUEST PATTERNS — always trigger the agent loop =====
+  // These phrases mean the user wants MAX to DO something with a tool,
+  // not just talk about it.
+  const toolRequestPatterns = [
+    // Web / browsing
+    /\b(search the web|web search|google search|look up online|look up the latest|search online|browse the web|browse to|open the website|visit the website|fetch the url|fetch the page|scrape the|crawl the)\b/i,
+    /\b(use the (browser|web|search)|use a tool|use tools|using the browser|using tools)\b/i,
+    /\b(find (the |me )?latest|find (online|on the web|on google))\b/i,
+    /\b(check (the |my )?(website|url|api|endpoint|status|health))\b/i,
+    // GitHub
+    /\b(check (my |the )?(repo|github|issues|prs|pull requests))\b/i,
+    /\b(list (my |the )?(issues|prs|pull requests|repos))\b/i,
+    // Supabase / database
+    /\b(query (my |the )?(supabase|database|db)|check (my |the )?supabase)\b/i,
+    // File operations
+    /\b(read (the |my )?file|list (the |my )?files|search (the |my )?files)\b/i,
+    // Memory / knowledge
+    /\b(save (this|that) to memory|remember this|add to knowledge|search (my |the )?knowledge)\b/i,
+    // Credentials
+    /\b(save (my )?(credentials|login|password|api key)|log into|sign into)\b/i
+  ];
+  if (toolRequestPatterns.some(p => p.test(originalMsg))) {
+    return true;
+  }
+
+  // Greetings and social — chat
   const greetings = ['hi', 'hey', 'hello', 'sup', 'yo', 'how are you', 'good morning', 'good afternoon', 'good evening', 'whats up', "what's up", 'howdy', 'thanks', 'thank you', 'bye', 'goodbye', 'ok', 'okay', 'cool', 'nice', 'great', 'awesome', "i'm doing", 'im doing', 'i am doing'];
   if (greetings.some(g => lowerMsg === g || lowerMsg.startsWith(g + ' ') || lowerMsg === g.replace(' ', ''))) {
     return false;
   }
 
-  // Conversational starters — messages that START with chat-like phrases
-  // are chat even if they contain task keywords later
+  // Conversational starters — chat
   const chatStarters = [
     "i'm doing", "im doing", "i am doing", "i'm okay", "im okay",
     "i'm good", "im good", "i'm fine", "im fine",
@@ -431,7 +412,8 @@ function detectTaskIntent(lowerMsg, originalMsg) {
     return false;
   }
 
-  // Questions are ALWAYS chat
+  // Questions that DON'T request tools are chat.
+  // But questions that DO request tools were already caught above.
   const questionPatterns = [
     'tell me what', 'tell me about', 'tell me how', 'tell me why',
     'what is', 'what are', 'what does', 'what do', 'what\'s', 'whats',
@@ -448,9 +430,7 @@ function detectTaskIntent(lowerMsg, originalMsg) {
   }
 
   // Tasks MUST start with an imperative verb
-  // "Build a store" = task ✓
-  // "I need you to help Build a store" = chat (doesn't start with verb)
-  const hasImperativeStart = /^(build|create|make|write|generate|fix|add|remove|delete|update|refactor|deploy|run|test|install|set up|configure|clone|push|implement|develop|design|write)\b/i.test(originalMsg.trim());
+  const hasImperativeStart = /^(build|create|make|write|generate|fix|add|remove|delete|update|refactor|deploy|run|test|install|set up|configure|clone|push|implement|develop|design|write|search|find|look|browse|fetch|check|read|list|save|send|email|call|query)\b/i.test(originalMsg.trim());
 
   if (!hasImperativeStart) {
     return false;

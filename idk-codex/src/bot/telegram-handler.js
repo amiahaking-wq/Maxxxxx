@@ -55,6 +55,17 @@ function detectIntent(text) {
   if (lower.startsWith('/share')) return { intent: 'share' };
   if (lower.startsWith('/logs')) return { intent: 'logs' };
   if (lower.startsWith('/review_pr')) return { intent: 'review_pr', payload: t.replace('/review_pr', '').trim() };
+  if (lower.startsWith('/watch')) return { intent: 'watch', payload: t.replace('/watch', '').trim() };
+  if (lower.startsWith('/unwatch')) return { intent: 'unwatch', payload: t.replace('/unwatch', '').trim() };
+  if (lower.startsWith('/rules')) return { intent: 'rules' };
+  if (lower.startsWith('/share')) return { intent: 'share' };
+  if (lower.startsWith('/cs_setup')) return { intent: 'cs_setup' };
+  if (lower.startsWith('/cs_status')) return { intent: 'cs_status' };
+  if (lower.startsWith('/cs_disable')) return { intent: 'cs_disable' };
+  if (lower.startsWith('/knowledge_add')) return { intent: 'knowledge_add', payload: t.replace('/knowledge_add', '').trim() };
+  if (lower.startsWith('/knowledge_list')) return { intent: 'knowledge_list' };
+  if (lower.startsWith('/credentials')) return { intent: 'credentials_list' };
+  if (lower.startsWith('/permissions')) return { intent: 'permissions' };
 
   // Natural language detection — no slash commands needed
 
@@ -229,6 +240,39 @@ export async function handleTelegramMessage(ctx) {
         break;
       case 'review_pr':
         await handleReviewPRCommand(ctx, userId, '/review_pr ' + (payload || ''));
+        break;
+      case 'watch':
+        await handleWatchCommand(ctx, userId, payload);
+        break;
+      case 'unwatch':
+        await handleUnwatchCommand(ctx, userId, payload);
+        break;
+      case 'rules':
+        await handleRulesCommand(ctx, userId);
+        break;
+      case 'share':
+        await handleShareCommand(ctx, userId);
+        break;
+      case 'cs_setup':
+        await handleCsSetupCommand(ctx, userId, text);
+        break;
+      case 'cs_status':
+        await handleCsStatusCommand(ctx, userId);
+        break;
+      case 'cs_disable':
+        await handleCsDisableCommand(ctx, userId);
+        break;
+      case 'knowledge_add':
+        await handleKnowledgeAddCommand(ctx, userId, payload);
+        break;
+      case 'knowledge_list':
+        await handleKnowledgeListCommand(ctx, userId);
+        break;
+      case 'credentials_list':
+        await handleCredentialsListCommand(ctx, userId);
+        break;
+      case 'permissions':
+        await handlePermissionsCommand(ctx, userId);
         break;
       case 'greeting':
         await handleGreeting(ctx, userId, text);
@@ -933,3 +977,291 @@ export default {
   handleTelegramMessage,
   handleTelegramCallback
 };
+
+// ============================================================================
+// STAGE 6 + 7 + 8 COMMAND HANDLERS
+// ============================================================================
+
+/**
+ * /watch <url> — set up a watchdog rule to monitor a URL or repo
+ */
+async function handleWatchCommand(ctx, userId, url) {
+  if (!url) {
+    await ctx.reply('Usage: /watch <url>\nExample: /watch https://api.example.com/health');
+    return;
+  }
+  try {
+    const { default: watchdog } = await import('../watchdog/watchdog.js');
+    const id = watchdog.addRule({
+      user_id: String(userId),
+      name: url.substring(0, 50),
+      url,
+      watch_type: 'api_change',
+      check_interval_hours: 24
+    });
+    await ctx.reply('👁 Watching: ' + url + '\nRule ID: ' + id + '\nI\'ll check every 24h and report changes.');
+  } catch (e) {
+    await ctx.reply('❌ Failed to set up watch: ' + e.message);
+  }
+}
+
+/**
+ * /unwatch <id> — remove a watchdog rule
+ */
+async function handleUnwatchCommand(ctx, userId, id) {
+  if (!id) {
+    await ctx.reply('Usage: /unwatch <rule-id>');
+    return;
+  }
+  try {
+    const { default: watchdog } = await import('../watchdog/watchdog.js');
+    const ok = watchdog.deleteRule(parseInt(id, 10));
+    await ctx.reply(ok ? '✅ Stopped watching rule ' + id : 'Rule not found');
+  } catch (e) {
+    await ctx.reply('❌ Failed: ' + e.message);
+  }
+}
+
+/**
+ * /rules — list all watchdog rules
+ */
+async function handleRulesCommand(ctx, userId) {
+  try {
+    const { default: watchdog } = await import('../watchdog/watchdog.js');
+    const rules = watchdog.listRules();
+    if (!rules.length) {
+      await ctx.reply('No watchdog rules. Use /watch <url> to start.');
+      return;
+    }
+    const text = '👁 Watchdog Rules:\n\n' + rules.map(r =>
+      `#${r.id} — ${r.name}\n  URL: ${r.url || 'none'}\n  Type: ${r.watch_type}\n  Active: ${r.is_active ? '✓' : '✗'}\n  Last checked: ${r.last_checked_at || 'never'}`
+    ).join('\n\n');
+    await ctx.reply(text);
+  } catch (e) {
+    await ctx.reply('❌ Failed: ' + e.message);
+  }
+}
+
+/**
+ * /share — generate a shareable link to the current session
+ */
+async function handleShareCommand(ctx, userId) {
+  const sessionId = 'tg_' + userId + '_' + Date.now();
+  const shareUrl = 'https://maxxxxx-production.up.railway.app/?session=' + sessionId;
+  await ctx.reply('🔗 Share this link to collaborate in real-time:\n' + shareUrl);
+}
+
+/**
+ * /cs_setup — walk the user through setting up customer service mode
+ */
+async function handleCsSetupCommand(ctx, userId, text) {
+  const parts = text.split('\n').slice(1).join(' ').trim();
+  // If no args, show instructions
+  if (!parts || parts === '/cs_setup') {
+    await ctx.reply(
+      '🤖 Customer Service Setup\n\n' +
+      'Send me your business details in this format:\n\n' +
+      '/cs_setup\n' +
+      'Business name: Yummmy Taste\n' +
+      'Business type: restaurant\n' +
+      'Agent name: MAX\n' +
+      'Agent personality: friendly, professional\n' +
+      'Language: English\n' +
+      'Escalation contact: owner@example.com\n' +
+      'Working hours: Mon-Sat 8am-6pm\n' +
+      'Telegram notify ID: ' + userId + '\n\n' +
+      'After setup, other bots can forward customer messages to:\n' +
+      'POST https://maxxxxx-production.up.railway.app/api/cs/message\n\n' +
+      'Use /cs_status to check your setup, /cs_disable to turn off.'
+    );
+    return;
+  }
+
+  // Parse the multi-line input
+  const lines = parts.split('\n');
+  const profile = {};
+  for (const line of lines) {
+    const match = line.match(/^([^:]+):\s*(.+)$/);
+    if (match) {
+      const key = match[1].trim().toLowerCase().replace(/\s+/g, '_');
+      const value = match[2].trim();
+      profile[key] = value;
+    }
+  }
+
+  if (!profile.business_name) {
+    await ctx.reply('❌ Business name is required. Use the format shown by /cs_setup');
+    return;
+  }
+
+  try {
+    const { saveBusinessProfile } = await import('../modes/customer-service.js');
+    const saved = saveBusinessProfile(String(userId), {
+      business_name: profile.business_name,
+      business_type: profile.business_type,
+      agent_name: profile.agent_name || 'MAX',
+      agent_personality: profile.agent_personality || 'friendly, professional, helpful',
+      language: profile.language || 'English',
+      escalation_contact: profile.escalation_contact,
+      working_hours: profile.working_hours,
+      telegram_notify_id: profile.telegram_notify_id || String(userId)
+    });
+    await ctx.reply(
+      '✅ Customer service mode activated!\n\n' +
+      'Business: ' + saved.business_name + '\n' +
+      'Agent: ' + (saved.agent_name || 'MAX') + '\n' +
+      'Type: ' + (saved.business_type || 'general') + '\n\n' +
+      'Other bots can now forward customer messages to:\n' +
+      'POST /api/cs/message\n' +
+      'Body: { businessOwnerId: "' + userId + '", customerId: "...", message: "..." }\n\n' +
+      'Use /knowledge_add to add your business policies and FAQs so MAX can answer accurately.'
+    );
+  } catch (e) {
+    await ctx.reply('❌ Setup failed: ' + e.message);
+  }
+}
+
+/**
+ * /cs_status — show current customer service configuration
+ */
+async function handleCsStatusCommand(ctx, userId) {
+  try {
+    const { getActiveBusinessProfile, listBusinessProfiles } = await import('../modes/customer-service.js');
+    const active = getActiveBusinessProfile(String(userId));
+    if (!active) {
+      await ctx.reply('Customer service mode is not active. Use /cs_setup to configure.');
+      return;
+    }
+    await ctx.reply(
+      '🤖 Customer Service Status\n\n' +
+      'Business: ' + active.business_name + '\n' +
+      'Agent: ' + (active.agent_name || 'MAX') + '\n' +
+      'Type: ' + (active.business_type || 'general') + '\n' +
+      'Language: ' + (active.language || 'English') + '\n' +
+      'Working hours: ' + (active.working_hours || 'not set') + '\n' +
+      'Escalation: ' + (active.escalation_contact || 'not set') + '\n' +
+      'Active: ' + (active.is_active ? '✓' : '✗')
+    );
+  } catch (e) {
+    await ctx.reply('❌ Failed: ' + e.message);
+  }
+}
+
+/**
+ * /cs_disable — turn off customer service mode
+ */
+async function handleCsDisableCommand(ctx, userId) {
+  try {
+    const { saveBusinessProfile, getActiveBusinessProfile } = await import('../modes/customer-service.js');
+    const active = getActiveBusinessProfile(String(userId));
+    if (!active) {
+      await ctx.reply('Customer service mode is not active.');
+      return;
+    }
+    saveBusinessProfile(String(userId), { ...active, is_active: false });
+    await ctx.reply('✅ Customer service mode disabled. Use /cs_setup to re-enable.');
+  } catch (e) {
+    await ctx.reply('❌ Failed: ' + e.message);
+  }
+}
+
+/**
+ * /knowledge_add <text> — add a document to the knowledge base
+ */
+async function handleKnowledgeAddCommand(ctx, userId, payload) {
+  if (!payload || payload.length < 10) {
+    await ctx.reply(
+      'Usage: /knowledge_add <text>\n\n' +
+      'Example:\n' +
+      '/knowledge_add Our refund policy is 7 days for all products. No refunds on digital items.\n\n' +
+      'Or send: /knowledge_add title=Refund Policy | content=Our refund policy is 7 days...'
+    );
+    return;
+  }
+
+  // Parse "title=X | content=Y" format if present, otherwise use the whole thing as content
+  let title, content;
+  if (payload.includes('|') && payload.toLowerCase().includes('title=')) {
+    const parts = payload.split('|');
+    for (const part of parts) {
+      const m = part.match(/^title=\s*(.+)$/i);
+      if (m) title = m[1].trim();
+      const m2 = part.match(/^content=\s*(.+)$/i);
+      if (m2) content = m2[1].trim();
+    }
+  }
+  if (!title) {
+    title = payload.substring(0, 50) + (payload.length > 50 ? '...' : '');
+    content = payload;
+  }
+
+  try {
+    const { knowledgeStore } = await import('../rag/knowledge-store.js');
+    const result = await knowledgeStore.addDocument(String(userId), { title, content, type: 'policy', source: 'telegram' });
+    await ctx.reply('📚 ' + result);
+  } catch (e) {
+    await ctx.reply('❌ Knowledge base not available: ' + e.message + '\n\nMake sure Supabase pgvector is set up (run sql/pgvector-setup.sql) and @xenova/transformers is installed.');
+  }
+}
+
+/**
+ * /knowledge_list — list all documents in the knowledge base
+ */
+async function handleKnowledgeListCommand(ctx, userId) {
+  try {
+    const { knowledgeStore } = await import('../rag/knowledge-store.js');
+    const docs = await knowledgeStore.list(String(userId));
+    if (!docs.length) {
+      await ctx.reply('Knowledge base is empty. Use /knowledge_add to add documents.');
+      return;
+    }
+    const text = '📚 Knowledge Base:\n\n' + docs.map(d =>
+      '- [' + (d.content_type || 'document') + '] ' + d.title + ' (' + (d.created_at ? String(d.created_at).split('T')[0] : 'unknown') + ')'
+    ).join('\n');
+    await ctx.reply(text);
+  } catch (e) {
+    await ctx.reply('❌ Failed: ' + e.message);
+  }
+}
+
+/**
+ * /credentials — list all saved credentials (without passwords)
+ */
+async function handleCredentialsListCommand(ctx, userId) {
+  try {
+    const { credentialVault } = await import('../security/credential-vault.js');
+    const list = credentialVault.list(String(userId));
+    if (!list.length) {
+      await ctx.reply('No credentials saved. Ask MAX to save some (e.g. "save my Jumia login: user@test.com / pass123").');
+      return;
+    }
+    const text = '🔐 Saved Credentials:\n\n' + list.map(c =>
+      '- ' + c.service_name + ' (user: ' + (c.username || 'none') + ', password: ' + c.password_status + ', api_key: ' + c.api_key_status + ')'
+    ).join('\n');
+    await ctx.reply(text);
+  } catch (e) {
+    await ctx.reply('❌ Failed: ' + e.message);
+  }
+}
+
+/**
+ * /permissions — show current permission grants
+ */
+async function handlePermissionsCommand(ctx, userId) {
+  try {
+    const { permissionGuard } = await import('../security/permission-guard.js');
+    const logs = permissionGuard.listAuditLog(String(userId), 10);
+    let text = '🛡️ Recent Actions (audit log):\n\n';
+    if (!logs.length) {
+      text += 'No actions logged yet.';
+    } else {
+      text += logs.map(l =>
+        '[' + l.timestamp + '] ' + l.tool_name + (l.was_destructive ? ' ⚠️' : '') + (l.required_confirmation ? ' (confirmed)' : '')
+      ).join('\n');
+    }
+    text += '\n\nTo grant more permissions, tell me:\n"allow MAX to git_push"\n"allow MAX to external_api"\n"allow MAX to browser_write"';
+    await ctx.reply(text);
+  } catch (e) {
+    await ctx.reply('❌ Failed: ' + e.message);
+  }
+}

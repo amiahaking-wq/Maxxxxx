@@ -498,6 +498,158 @@ for (const [name, tool] of Object.entries(memoryTools)) {
 }
 
 // ============================================================================
+// CREDENTIAL TOOLS (Stage 6E) — wired dynamically because they need userId
+// ============================================================================
+// These are added to the tool list at execution time. The executeTool()
+// function passes userId through to credential tools via a context object.
+// See react-loop-v2.js for the userId passing logic.
+
+TOOLS.credential_save = {
+  name: 'credential_save',
+  description: 'Save credentials (username/password/API key) securely in the encrypted vault for future use. Passwords are NEVER stored in plain text, memory, or files — only in the encrypted vault.',
+  params: {
+    service_name: 'string (required) — name of the service, e.g. "jumia", "gmail", "paystack"',
+    username: 'string (optional) — username or email',
+    password: 'string (optional) — password (will be encrypted)',
+    api_key: 'string (optional) — API key (will be encrypted)',
+    notes: 'string (optional) — any notes about these credentials'
+  },
+  execute: async (args, ctx = {}) => {
+    const { credentialVault } = await import('../../security/credential-vault.js');
+    const userId = ctx.userId || 'default-user';
+    if (!args.service_name) return 'Error: service_name is required';
+    return credentialVault.save(userId, args.service_name, {
+      username: args.username,
+      password: args.password,
+      apiKey: args.api_key,
+      notes: args.notes
+    });
+  }
+};
+
+TOOLS.credential_get = {
+  name: 'credential_get',
+  description: 'Retrieve saved credentials for a service to use for login or API calls. CRITICAL: Never include the password in your response to the user — only use it internally for browser login or API calls.',
+  params: {
+    service_name: 'string (required) — name of the service to retrieve credentials for'
+  },
+  execute: async (args, ctx = {}) => {
+    const { credentialVault } = await import('../../security/credential-vault.js');
+    const userId = ctx.userId || 'default-user';
+    if (!args.service_name) return 'Error: service_name is required';
+    const creds = credentialVault.get(userId, args.service_name);
+    if (!creds) return `No credentials saved for: ${args.service_name}. Use credential_save to add them first.`;
+    // Return credentials for the agent to use — but the agent is instructed
+    // in the system prompt to never expose passwords in responses.
+    return JSON.stringify({
+      service_name: creds.service_name,
+      username: creds.username,
+      password: creds.password,
+      api_key: creds.apiKey,
+      notes: creds.notes
+    });
+  }
+};
+
+TOOLS.credential_list = {
+  name: 'credential_list',
+  description: 'List all services for which credentials are saved. Does NOT return passwords — only service names.',
+  params: {},
+  execute: async (args, ctx = {}) => {
+    const { credentialVault } = await import('../../security/credential-vault.js');
+    const userId = ctx.userId || 'default-user';
+    const list = credentialVault.list(userId);
+    if (list.length === 0) return 'No credentials saved. Use credential_save to add some.';
+    return list.map(c =>
+      `- ${c.service_name} (username: ${c.username || 'none'}, password: ${c.password_status}, api_key: ${c.api_key_status})`
+    ).join('\n');
+  }
+};
+
+TOOLS.credential_delete = {
+  name: 'credential_delete',
+  description: 'Delete saved credentials for a service.',
+  params: {
+    service_name: 'string (required) — name of the service to delete'
+  },
+  execute: async (args, ctx = {}) => {
+    const { credentialVault } = await import('../../security/credential-vault.js');
+    const userId = ctx.userId || 'default-user';
+    if (!args.service_name) return 'Error: service_name is required';
+    return credentialVault.delete(userId, args.service_name);
+  }
+};
+
+// ============================================================================
+// KNOWLEDGE BASE TOOLS (Stage 7E) — RAG with Supabase pgvector
+// ============================================================================
+
+TOOLS.knowledge_add = {
+  name: 'knowledge_add',
+  description: 'Add a document, policy, FAQ, product catalog, or any information to the knowledge base so MAX can remember and use it forever. The content is chunked, embedded, and stored in Supabase pgvector for semantic search.',
+  params: {
+    title: 'string (required) — short descriptive title',
+    content: 'string (required) — full content to save (will be auto-chunked if long)',
+    type: 'string (optional) — one of: policy, faq, product_catalog, customer_data, procedure, document',
+    source: 'string (optional) — where this came from (e.g. "user upload", "website")'
+  },
+  execute: async (args, ctx = {}) => {
+    try {
+      const { knowledgeStore } = await import('../../rag/knowledge-store.js');
+      const userId = ctx.userId || 'default-user';
+      if (!args.title || !args.content) return 'Error: title and content are required';
+      return await knowledgeStore.addDocument(userId, {
+        title: args.title,
+        content: args.content,
+        type: args.type,
+        source: args.source
+      });
+    } catch (e) {
+      // RAG not configured (no Supabase pgvector or transformers model failed)
+      return `Knowledge base not available: ${e.message}. Falling back to memory_save.`;
+    }
+  }
+};
+
+TOOLS.knowledge_search = {
+  name: 'knowledge_search',
+  description: 'Search the knowledge base for relevant information. Use this before answering questions about policies, products, or anything the user has told you to remember.',
+  params: {
+    query: 'string (required) — what to search for'
+  },
+  execute: async (args, ctx = {}) => {
+    try {
+      const { knowledgeStore } = await import('../../rag/knowledge-store.js');
+      const userId = ctx.userId || 'default-user';
+      if (!args.query) return 'Error: query is required';
+      const results = await knowledgeStore.search(userId, args.query);
+      return knowledgeStore.formatAsContext(results) || 'No relevant knowledge found.';
+    } catch (e) {
+      return `Knowledge search failed: ${e.message}`;
+    }
+  }
+};
+
+TOOLS.knowledge_list = {
+  name: 'knowledge_list',
+  description: 'List all documents in the knowledge base.',
+  params: {},
+  execute: async (args, ctx = {}) => {
+    try {
+      const { knowledgeStore } = await import('../../rag/knowledge-store.js');
+      const userId = ctx.userId || 'default-user';
+      const docs = await knowledgeStore.list(userId);
+      if (!docs.length) return 'Knowledge base is empty. Use knowledge_add to add documents.';
+      return docs.map(d =>
+        `- [${d.content_type || 'document'}] ${d.title} (added ${d.created_at ? String(d.created_at).split('T')[0] : 'unknown'})`
+      ).join('\n');
+    } catch (e) {
+      return `Knowledge list failed: ${e.message}`;
+    }
+  }
+};
+
+// ============================================================================
 // TOOL EXECUTION
 // ============================================================================
 
@@ -507,12 +659,13 @@ for (const [name, tool] of Object.entries(memoryTools)) {
  * @param {Object} args - arguments object
  * @returns {Promise<string>} result string
  */
-export async function executeTool(toolName, args) {
+export async function executeTool(toolName, args, ctx = {}) {
   // 1. Try the built-in TOOLS registry first
   const tool = TOOLS[toolName];
   if (tool) {
     try {
-      const result = await tool.execute(args || {});
+      // Pass ctx (which contains userId) to tools that accept it
+      const result = await tool.execute(args || {}, ctx);
       return result;
     } catch (err) {
       logger.error('TOOL_ERROR', { tool: toolName, error: err.message });
@@ -521,21 +674,15 @@ export async function executeTool(toolName, args) {
   }
 
   // 2. Try connector tools (github_*, supabase_*, gmail_*, calendar_*, drive_*)
-  //    These are dynamically registered from connected connectors.
   try {
-    const { getConnector, getAllConnectorTools } = await import('../connectors.js');
+    const { getAllConnectorTools } = await import('../connectors.js');
     const connectorTools = getAllConnectorTools();
     const connectorTool = connectorTools.find(t => t.name === toolName);
     if (connectorTool) {
-      // GUARDRAIL: log every connector call so the user can audit
       logger.info('CONNECTOR_TOOL_CALL', {
         tool: toolName,
         args: JSON.stringify(args).substring(0, 300)
       });
-
-      // GUARDRAIL: refuse destructive connector operations unless explicitly allowed
-      // (e.g. drop table, delete repo). The connector's execute() does its own
-      // validation, but we add a layer here.
       const result = await connectorTool.execute(args || {});
       return typeof result === 'string' ? result : JSON.stringify(result);
     }

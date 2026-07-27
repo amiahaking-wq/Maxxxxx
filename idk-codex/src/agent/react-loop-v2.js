@@ -1,435 +1,511 @@
 /**
  * MAX 2.0 — ReAct Agent Loop with OpenAI Function Calling
  *
- * Calls the OpenAI-compatible provider DIRECTLY (bypasses adapter) to ensure
- * tools[] and tool_calls pass through correctly.
+ * Triple fallback strategy:
+ *   1. OpenAI function calling (tools array) — works with most OpenRouter models
+ *   2. XML <tool> tag parsing — fallback for models without function calling
+ *   3. Markdown code block extraction — last resort for any model
  *
- * Triple fallback:
- *   1. OpenAI function calling (tools array)
- *   2. XML <tool> tag parsing
- *   3. Markdown code block extraction
- *
- * Robust model fallback: if the env-configured model 404s (free model removed),
- * automatically retry with a chain of known-good free OpenRouter models.
- *
- * Streaming: when sessionId is provided, partial tokens are streamed to the
- * WebSocket room so the UI can render the assistant response character-by-character.
+ * The agent:
+ *   1. Sends task + tools to LLM
+ *   2. LLM responds with text and/or tool_calls
+ *   3. Executes tool calls, feeds results back
+ *   4. Repeats until task_complete is called or max iterations
  */
 
-import { executeTool } from './tools/registry.js';
-import { broadcastProgress, broadcastMessage, broadcastToken, broadcastFileCreated } from '../api/websocket.js';
-import { addConversationMessage } from '../database/conversations-supabase.js';
-import { getRelevantMemories } from './tools/memory-tool.js';
+import { generateCompletion } from '../groq/client.js';
+import { executeTool, getToolDescriptions } from './tools/registry.js';
+import { broadcastProgress, broadcastMessage, broadcastConfirmation, broadcastFileCreated } from '../api/websocket.js';
+import { addConversationMessage, createConversation } from '../database/conversations-supabase.js';
+import { condenseMessages } from './condenser.js';
 import { uploadToSupabase, isSupabaseConfigured } from './supabase-storage.js';
-import { getAllConnectorTools } from './connectors.js';
+import { permissionGuard } from '../security/permission-guard.js';
 import logger from '../utils/logger.js';
 
-const MAX_ITERATIONS = 20;
+const MAX_ITERATIONS = parseInt(process.env.MAX_AGENT_ITERATIONS || '15', 10);
+const MAX_ACTION_TOKENS = parseInt(process.env.MAX_ACTION_TOKENS || '8000', 10);
 
 // ============================================================================
-// MODEL FALLBACK CHAIN
-// ============================================================================
-// Ordered by what's KNOWN to work on OpenRouter right now.
-// The first model is the env-configured one. If it 404s (free model removed),
-// we walk down this list. gpt-oss-20b:free is currently the most reliable
-// free model on OpenRouter that supports function calling.
-const FALLBACK_MODELS = [
-  // 1. Env-configured model (preferred — usually a paid model the user chose)
-  null, // sentinel — replaced with process.env.OPENAI_COMPATIBLE_MODEL at call time
-  // 2. Last working model (cached from previous success)
-  // 3. Known-good free models (in priority order based on real availability)
-  'openai/gpt-oss-20b:free',         // ✓ known working (verified in prod logs)
-  'openai/gpt-oss-120b:free',        // larger variant — usually also works
-  'deepseek/deepseek-chat',          // paid (~$0.01/call) — very reliable
-  'meta-llama/llama-3.3-70b-instruct', // paid — reliable fallback
-  // 4. Older free slugs (sometimes still available, last resort)
-  'meta-llama/llama-3.3-70b-instruct:free',
-  'qwen/qwen-2.5-coder-32b-instruct:free',
-  'mistralai/mistral-small-3.1-24b-instruct:free',
-  'moonshotai/kimi-k2:free',
-  'google/gemini-2.0-flash-exp:free'
-];
-
-// Track which model worked last so we skip dead models on subsequent iterations
-let _lastWorkingModel = null;
-
-function getCandidateModels() {
-  const envModel = process.env.OPENAI_COMPATIBLE_MODEL;
-  const list = [];
-  if (envModel) list.push(envModel);
-  if (_lastWorkingModel && !list.includes(_lastWorkingModel)) list.unshift(_lastWorkingModel);
-  for (const m of FALLBACK_MODELS) {
-    if (m && !list.includes(m)) list.push(m);
-  }
-  return list;
-}
-
-// ============================================================================
-// TOOL DEFINITIONS FOR FUNCTION CALLING
+// FUNCTION CALLING TOOL DEFINITIONS
 // ============================================================================
 
-const AGENT_TOOLS = [
-  { type: 'function', function: { name: 'bash', description: 'Run any shell command in the sandbox workspace. Use for: creating files, installing packages, running code, checking output.', parameters: { type: 'object', properties: { command: { type: 'string', description: 'Shell command to execute' } }, required: ['command'] } } },
-  { type: 'function', function: { name: 'write_file', description: 'Create or overwrite a file with content', parameters: { type: 'object', properties: { path: { type: 'string', description: 'File path relative to workspace' }, content: { type: 'string', description: 'Full file content (raw, not HTML-escaped)' } }, required: ['path', 'content'] } } },
-  { type: 'function', function: { name: 'read_file', description: 'Read a file and return its content with line numbers', parameters: { type: 'object', properties: { path: { type: 'string' }, offset: { type: 'number' }, limit: { type: 'number' } }, required: ['path'] } } },
-  { type: 'function', function: { name: 'edit_file', description: 'Find and replace text in a file. old_str must match exactly.', parameters: { type: 'object', properties: { path: { type: 'string' }, old_str: { type: 'string' }, new_str: { type: 'string' } }, required: ['path', 'old_str', 'new_str'] } } },
-  { type: 'function', function: { name: 'list_files', description: 'List files and folders in a directory', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
-  { type: 'function', function: { name: 'search', description: 'Search for text across all files', parameters: { type: 'object', properties: { query: { type: 'string' }, path: { type: 'string' } }, required: ['query'] } } },
-  { type: 'function', function: { name: 'web_fetch', description: 'Fetch a URL and return text content', parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } } },
-  { type: 'function', function: { name: 'browser_navigate', description: 'Open a website URL in the browser', parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } } },
-  { type: 'function', function: { name: 'browser_screenshot', description: 'Take a screenshot of the current browser page', parameters: { type: 'object', properties: {} } } },
-  { type: 'function', function: { name: 'browser_click', description: 'Click an element on the page', parameters: { type: 'object', properties: { selector: { type: 'string' }, by_text: { type: 'boolean' } }, required: ['selector'] } } },
-  { type: 'function', function: { name: 'browser_type', description: 'Type text into an input field', parameters: { type: 'object', properties: { selector: { type: 'string' }, text: { type: 'string' }, clear_first: { type: 'boolean' } }, required: ['selector', 'text'] } } },
-  { type: 'function', function: { name: 'browser_get_text', description: 'Get visible text from the page', parameters: { type: 'object', properties: { selector: { type: 'string' } } } } },
-  { type: 'function', function: { name: 'browser_evaluate', description: 'Run JavaScript in the browser', parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } } },
-  { type: 'function', function: { name: 'memory_save', description: 'Save something to persistent memory that survives between sessions', parameters: { type: 'object', properties: { key: { type: 'string' }, value: { type: 'string' } }, required: ['key', 'value'] } } },
-  { type: 'function', function: { name: 'memory_get', description: 'Retrieve something from persistent memory', parameters: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] } } },
-  { type: 'function', function: { name: 'memory_list', description: 'List all saved memories', parameters: { type: 'object', properties: {} } } },
-  { type: 'function', function: { name: 'task_complete', description: 'Call this when the task is fully done. Ends the agent loop.', parameters: { type: 'object', properties: { summary: { type: 'string', description: 'Clear summary of what was accomplished' }, files_created: { type: 'array', items: { type: 'string' } } }, required: ['summary'] } } }
-];
-
-// ============================================================================
-// DIRECT LLM CALL (bypasses adapter to ensure tools pass through)
-// ============================================================================
-
-/**
- * Call the LLM with automatic model fallback.
- * If the env-configured model 404s (free model removed), walk down the
- * FALLBACK_MODELS list until one works. Cache the winner.
- *
- * @param {Array} messages - chat messages
- * @param {Array|null} tools - tool definitions, or null to disable function calling
- * @param {Object} opts - { sessionId, stream }
- * @returns {Promise<Object>} { content, tool_calls, finishReason, usage, model }
- */
-async function callLLM(messages, tools, opts = {}) {
-  const baseURL = process.env.OPENAI_COMPATIBLE_BASE_URL || 'https://openrouter.ai/api/v1';
-  const apiKey = process.env.OPENAI_COMPATIBLE_API_KEY;
-  const candidates = getCandidateModels();
-  const wantStream = !!opts.sessionId;
-
-  const headers = { 'Content-Type': 'application/json' };
-  if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
-  if (baseURL.includes('openrouter.ai')) {
-    headers['HTTP-Referer'] = 'https://maxxxxx-production.up.railway.app';
-    headers['X-Title'] = 'MAX Agent';
-  }
-
-  let lastErr = null;
-
-  for (const model of candidates) {
-    if (!model) continue;
-
-    const body = {
-      model,
-      messages,
-      temperature: 0.2,
-      max_tokens: 8000
-    };
-    if (tools && tools.length > 0) {
-      body.tools = tools;
-      body.tool_choice = 'auto';
-    }
-    // Only request streaming if we have a sessionId to stream to AND this is
-    // the assistant's conversational turn (no tools), because tool-calling
-    // responses aren't really streamable in a useful way.
-    if (wantStream && !tools) {
-      body.stream = true;
-    }
-
-    logger.info('LLM call', { model, messageCount: messages.length, hasTools: !!(tools && tools.length), stream: body.stream });
-
-    try {
-      const response = await fetch(baseURL + '/chat/completions', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body)
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        // 404 = model unavailable; try next candidate
-        if (response.status === 404 || response.status === 400) {
-          logger.warn('LLM model unavailable, trying next', { model, status: response.status, error: errorText.substring(0, 200) });
-          lastErr = new Error('LLM returned ' + response.status + ': ' + errorText.substring(0, 200));
-          continue;
-        }
-        // Other errors (429, 500, etc.) — try next candidate too
-        logger.warn('LLM error, trying next', { model, status: response.status, error: errorText.substring(0, 200) });
-        lastErr = new Error('LLM returned ' + response.status + ': ' + errorText.substring(0, 200));
-        continue;
+const FUNCTION_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'bash',
+      description: 'Run a shell command in the workspace. Returns stdout and stderr.',
+      parameters: {
+        type: 'object',
+        properties: { command: { type: 'string', description: 'Shell command to run' } },
+        required: ['command']
       }
-
-      // Success — cache this model for future calls
-      if (_lastWorkingModel !== model) {
-        logger.info('LLM model selected', { model, previous: _lastWorkingModel });
-        _lastWorkingModel = model;
-      }
-
-      // ===== STREAMING RESPONSE =====
-      if (body.stream) {
-        return await consumeStream(response, opts.sessionId, model);
-      }
-
-      // ===== NON-STREAMING RESPONSE =====
-      const data = await response.json();
-      const message = data.choices?.[0]?.message;
-      return {
-        content: message?.content || '',
-        tool_calls: message?.tool_calls || null,
-        finishReason: data.choices?.[0]?.finish_reason || 'stop',
-        usage: data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-        model
-      };
-    } catch (err) {
-      logger.warn('LLM fetch failed, trying next model', { model, error: err.message });
-      lastErr = err;
-      continue;
     }
-  }
-
-  // All candidates failed
-  throw lastErr || new Error('All LLM models failed');
-}
-
-/**
- * Consume an SSE stream from the LLM, emit tokens to the WebSocket room, and
- * return the assembled result.
- */
-async function consumeStream(response, sessionId, model) {
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let content = '';
-  let toolCalls = null;
-  let finishReason = 'stop';
-  let usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-
-  // Notify UI that streaming is starting
-  if (sessionId) {
-    broadcastToken(sessionId, { type: 'start', model });
-  }
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    // Process complete SSE events (separated by \n\n)
-    let sepIdx;
-    while ((sepIdx = buffer.indexOf('\n\n')) >= 0) {
-      const event = buffer.slice(0, sepIdx);
-      buffer = buffer.slice(sepIdx + 2);
-
-      // Each line in the event starts with "data: "
-      for (const line of event.split('\n')) {
-        if (!line.startsWith('data: ')) continue;
-        const payload = line.slice(6).trim();
-        if (payload === '[DONE]') continue;
-        try {
-          const chunk = JSON.parse(payload);
-          const delta = chunk.choices?.[0]?.delta;
-          if (!delta) continue;
-
-          if (delta.content) {
-            content += delta.content;
-            if (sessionId) broadcastToken(sessionId, { type: 'token', text: delta.content });
-          }
-          if (delta.tool_calls) {
-            // Accumulate tool calls across chunks
-            if (!toolCalls) toolCalls = [];
-            for (const tc of delta.tool_calls) {
-              const idx = tc.index || 0;
-              if (!toolCalls[idx]) {
-                toolCalls[idx] = { id: tc.id || ('call_' + idx), type: 'function', function: { name: '', arguments: '' } };
-              }
-              if (tc.function?.name) toolCalls[idx].function.name += tc.function.name;
-              if (tc.function?.arguments) toolCalls[idx].function.arguments += tc.function.arguments;
-            }
-          }
-          if (chunk.choices?.[0]?.finish_reason) {
-            finishReason = chunk.choices[0].finish_reason;
-          }
-          if (chunk.usage) usage = chunk.usage;
-        } catch (e) {
-          // Partial JSON — wait for more bytes
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'write_file',
+      description: 'Create or overwrite a file with content. Creates parent dirs.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path relative to workspace' },
+          content: { type: 'string', description: 'Full file content (raw, not HTML-escaped)' }
+        },
+        required: ['path', 'content']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_file',
+      description: 'Read a file with line numbers. Max 200 lines.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path' },
+          offset: { type: 'number', description: 'Starting line (default 1)' },
+          limit: { type: 'number', description: 'Max lines (default 200)' }
+        },
+        required: ['path']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'edit_file',
+      description: 'Search and replace text in a file. old_text must match exactly.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path' },
+          old_text: { type: 'string', description: 'Text to find (must match exactly)' },
+          new_text: { type: 'string', description: 'Replacement text' }
+        },
+        required: ['path', 'old_text', 'new_text']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_files',
+      description: 'List files in a directory.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Directory path (default: workspace root)' },
+          recursive: { type: 'boolean', description: 'List recursively (default false)' }
         }
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search',
+      description: 'Search for text in files (grep) or find files by name (glob with pattern: prefix).',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query' },
+          path: { type: 'string', description: 'Directory to search (default: root)' }
+        },
+        required: ['query']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'web_fetch',
+      description: 'Fetch a URL and return text content. Max 5000 chars.',
+      parameters: {
+        type: 'object',
+        properties: { url: { type: 'string', description: 'URL to fetch' } },
+        required: ['url']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'task_complete',
+      description: 'Call this when the task is fully done. Provide a summary of what was accomplished.',
+      parameters: {
+        type: 'object',
+        properties: { summary: { type: 'string', description: 'What was accomplished' } },
+        required: ['summary']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_navigate',
+      description: 'Open a URL in the browser',
+      parameters: {
+        type: 'object',
+        properties: { url: { type: 'string', description: 'URL to navigate to' } },
+        required: ['url']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_screenshot',
+      description: 'Take a screenshot of the current browser page',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_click',
+      description: 'Click an element by CSS selector or text',
+      parameters: {
+        type: 'object',
+        properties: {
+          selector: { type: 'string', description: 'CSS selector or text to click' },
+          by_text: { type: 'boolean', description: 'If true, find element by text content' }
+        },
+        required: ['selector']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_type',
+      description: 'Type text into an input field',
+      parameters: {
+        type: 'object',
+        properties: {
+          selector: { type: 'string', description: 'CSS selector of input' },
+          text: { type: 'string', description: 'Text to type' },
+          clear_first: { type: 'boolean', description: 'Clear field first' }
+        },
+        required: ['selector', 'text']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_get_text',
+      description: 'Extract visible text from the page',
+      parameters: {
+        type: 'object',
+        properties: { selector: { type: 'string', description: 'CSS selector (default: body)' } }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_evaluate',
+      description: 'Run JavaScript in the browser',
+      parameters: {
+        type: 'object',
+        properties: { code: { type: 'string', description: 'JavaScript to evaluate' } },
+        required: ['code']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'memory_save',
+      description: 'Save something to persistent memory — survives restarts',
+      parameters: {
+        type: 'object',
+        properties: {
+          key: { type: 'string', description: 'Unique key name' },
+          value: { type: 'string', description: 'Value to remember' },
+          tags: { type: 'string', description: 'Comma-separated tags' }
+        },
+        required: ['key', 'value']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'memory_get',
+      description: 'Retrieve something from persistent memory',
+      parameters: {
+        type: 'object',
+        properties: { key: { type: 'string', description: 'Key to retrieve' } },
+        required: ['key']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'memory_list',
+      description: 'List all saved memories',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'credential_save',
+      description: 'Save credentials (username/password/API key) securely in the encrypted vault. Passwords are NEVER stored in plain text, memory, or files.',
+      parameters: {
+        type: 'object',
+        properties: {
+          service_name: { type: 'string', description: 'Name of the service, e.g. "jumia", "gmail", "paystack"' },
+          username: { type: 'string', description: 'Username or email' },
+          password: { type: 'string', description: 'Password (will be encrypted)' },
+          api_key: { type: 'string', description: 'API key (will be encrypted)' },
+          notes: { type: 'string', description: 'Any notes' }
+        },
+        required: ['service_name']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'credential_get',
+      description: 'Retrieve saved credentials for a service. CRITICAL: Never include the password in your response — only use it internally for login/API calls.',
+      parameters: {
+        type: 'object',
+        properties: {
+          service_name: { type: 'string', description: 'Service name to retrieve credentials for' }
+        },
+        required: ['service_name']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'credential_list',
+      description: 'List all services with saved credentials (no passwords returned)',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'knowledge_add',
+      description: 'Add a document, policy, FAQ, or product info to the knowledge base. MAX will use this to answer future questions accurately.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'Short descriptive title' },
+          content: { type: 'string', description: 'Full content to save' },
+          type: { type: 'string', description: 'policy, faq, product_catalog, procedure, document' },
+          source: { type: 'string', description: 'Where this came from (optional)' }
+        },
+        required: ['title', 'content']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'knowledge_search',
+      description: 'Search the knowledge base for relevant info. Use before answering questions about policies, products, or anything the user told you to remember.',
+      parameters: {
+        type: 'object',
+        properties: { query: { type: 'string', description: 'What to search for' } },
+        required: ['query']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'knowledge_list',
+      description: 'List all documents in the knowledge base',
+      parameters: { type: 'object', properties: {} }
+    }
+  }
+];
+
+// ============================================================================
+// SYSTEM PROMPT
+// ============================================================================
+
+function buildSystemPrompt(workspacePath) {
+  return `You are MAX, an autonomous software engineer. Complete the task fully using the available tools.
+
+You work in: ${workspacePath}
+
+CORE PRINCIPLE: Use tools to DO things, not just describe them. You have access to real tools — use them whenever they would help, the way a human developer would.
+
+WHEN TO USE WHICH TOOL (smart tool selection):
+- bash → Run shell commands: install packages, run tests, build code, git operations, check files (cat, ls, grep). Use this for ANY system operation.
+- write_file → Create new files or overwrite existing ones. Always write COMPLETE, working code — no placeholders, no "...".
+- read_file → Read a file before editing it (so you know the exact content to replace).
+- edit_file → Make small targeted changes to an existing file (find/replace). Use write_file for big changes.
+- list_files → See what's in a directory before working.
+- search → Find text across files (grep) or find files by name.
+- web_fetch → Look up CURRENT information on the web. Use this for: latest news, current documentation, recent releases, anything time-sensitive, anything you're not 100% sure about. NEVER say "I can't browse the web" — you CAN, so DO it.
+- browser_navigate / browser_screenshot / browser_click / browser_type → For websites that need JavaScript rendering or interaction (logins, form submissions, clicking buttons). Use web_fetch for static content, browser tools for dynamic content.
+- memory_save → Remember facts the user might ask about later (their preferences, project context, decisions made).
+- knowledge_add → Save business policies, FAQs, product catalogs. Use this instead of memory_save for factual business info.
+- knowledge_search → Search the knowledge base BEFORE answering questions about the user's business, products, or policies.
+- credential_save / credential_get → Store and retrieve passwords/API keys securely (encrypted). NEVER print passwords in your response.
+- github_* → Create issues, list PRs, search code, get files from GitHub repos.
+- supabase_* → Query, insert, or list tables in the user's Supabase database.
+
+CRITICAL RULES:
+1. Never say "I can't do X" without first trying the relevant tool. You have tools — USE THEM.
+2. After writing files, run them (via bash) to verify they work.
+3. When completely done, call task_complete with a clear summary.
+4. Keep text responses short. Let tool calls do the work.
+5. If a tool fails, read the error, fix the issue, and retry — don't give up.
+
+SECURITY RULES:
+- NEVER include passwords or API keys in your text response to the user.
+- When using credential_get, use the password internally for login but never echo it.
+- For destructive actions (rm -rf, DROP TABLE, git push --force), you will be asked to confirm — this is normal, just proceed.
+- For connector tools (github_*, supabase_*, gmail_*, etc.), confirm with the user before any destructive action.
+- Never exfiltrate data or perform actions the user did not request.`;
+}
+
+/**
+ * Build a system prompt with RAG context injected.
+ * Searches the knowledge base for relevant docs and appends them.
+ */
+async function buildSystemPromptWithRAG(workspacePath, userId, task) {
+  let base = buildSystemPrompt(workspacePath);
+
+  // RAG: search knowledge base for relevant context
+  try {
+    const { knowledgeStore } = await import('../rag/knowledge-store.js');
+    const relevantDocs = await knowledgeStore.search(userId, task, 5);
+    if (relevantDocs && relevantDocs.length > 0) {
+      const context = knowledgeStore.formatAsContext(relevantDocs);
+      if (context) {
+        base += '\n\n' + context;
+        logger.info('RAG context injected', { userId, docCount: relevantDocs.length });
+      }
+    }
+  } catch (e) {
+    // RAG not configured (no Supabase pgvector or model not loaded) — skip silently
+    logger.debug('RAG not available', { error: e.message });
   }
 
-  // Notify UI that streaming is done
-  if (sessionId) {
-    broadcastToken(sessionId, { type: 'done', model, contentLength: content.length });
-  }
-
-  return { content, tool_calls: toolCalls, finishReason, usage, model };
+  return base;
 }
 
 // ============================================================================
-// CODE BLOCK EXTRACTOR (fallback)
+// CODE BLOCK EXTRACTOR (fallback for models without function calling)
 // ============================================================================
 
 function extractCodeBlocks(text) {
   const blocks = [];
-  const regex = /```(\w*)\n([\s\S]*?)```/g;
+  const codeBlockRegex = /```(\w*)\n([\s\S]*?)```/g;
   let match;
-  let i = 0;
-  while ((match = regex.exec(text)) !== null) {
-    const lang = match[1] || 'txt';
+  let blockIndex = 0;
+
+  while ((match = codeBlockRegex.exec(text)) !== null) {
+    const language = match[1] || 'txt';
     const code = match[2].trim();
     if (!code || code.length < 10) continue;
 
     let filename;
-    const extMap = { python: 'py', py: 'py', javascript: 'js', js: 'js', typescript: 'ts', html: 'html', css: 'css', json: 'json', java: 'java', go: 'go' };
-    const ext = extMap[lang.toLowerCase()] || 'txt';
-    const lower = text.toLowerCase();
-
-    if (lower.includes('html') || lower.includes('web page') || lower.includes('landing')) {
-      filename = i === 0 ? 'index.html' : 'page' + i + '.html';
-    } else if (lower.includes('css') || lower.includes('style')) {
-      filename = 'styles.css';
-    } else if (lower.includes('python') || lang === 'python') {
-      filename = i === 0 ? 'main.py' : 'module' + i + '.py';
-    } else if (lower.includes('javascript') || lower.includes('script')) {
-      filename = i === 0 ? 'script.js' : 'script' + i + '.js';
+    const taskLower = text.toLowerCase();
+    const filenameMatch = text.substring(Math.max(0, match.index - 200), match.index).match(/(?:file|name|save|create|path)[:\s]+([a-zA-Z0-9_\-\/]+\.\w+)/i);
+    if (filenameMatch) {
+      filename = filenameMatch[1];
     } else {
-      filename = 'file_' + i + '.' + ext;
+      const extMap = { python: 'py', py: 'py', javascript: 'js', js: 'js', typescript: 'ts', ts: 'ts', html: 'html', css: 'css', json: 'json', bash: 'sh', sh: 'sh', java: 'java', go: 'go', rust: 'rs', ruby: 'rb', php: 'php', sql: 'sql' };
+      const ext = extMap[language.toLowerCase()] || 'txt';
+      if (taskLower.includes('html') || taskLower.includes('web page') || taskLower.includes('landing')) {
+        filename = blockIndex === 0 ? 'index.html' : `page${blockIndex}.html`;
+      } else if (taskLower.includes('css') || taskLower.includes('style')) {
+        filename = 'styles.css';
+      } else if (taskLower.includes('javascript') || taskLower.includes('script')) {
+        filename = blockIndex === 0 ? 'script.js' : `script${blockIndex}.js`;
+      } else if (taskLower.includes('python') || language === 'python' || language === 'py') {
+        filename = blockIndex === 0 ? 'main.py' : `module${blockIndex}.py`;
+      } else {
+        filename = `file_${blockIndex}.${ext}`;
+      }
     }
-
-    blocks.push({ filename, code, language: lang });
-    i++;
+    blocks.push({ filename, code, language });
+    blockIndex++;
   }
   return blocks;
 }
 
 // ============================================================================
-// XML TOOL PARSER (fallback)
+// XML TOOL PARSER (fallback #2)
 // ============================================================================
 
-function parseXMLTools(text) {
+function parseToolCalls(text) {
   const toolCalls = [];
-  const regex = /<tool\s+name="([^"]+)">([\s\S]*?)<\/tool>/g;
+  const toolRegex = /<tool\s+name="([^"]+)">([\s\S]*?)<\/tool>/g;
   let match;
-  while ((match = regex.exec(text)) !== null) {
-    const name = match[1];
-    const body = match[2];
+  while ((match = toolRegex.exec(text)) !== null) {
+    const toolName = match[1];
+    const toolBody = match[2];
     const args = {};
     const argRegex = /<arg\s+name="([^"]+)">([\s\S]*?)<\/arg>/g;
     let argMatch;
-    while ((argMatch = argRegex.exec(body)) !== null) {
+    while ((argMatch = argRegex.exec(toolBody)) !== null) {
       args[argMatch[1]] = argMatch[2].replace(/^\n+/, '').replace(/\n+$/, '');
     }
-    toolCalls.push({ name, args });
+    toolCalls.push({ name: toolName, args });
   }
-  return { reasoning: text.replace(regex, '').trim(), toolCalls };
+  return { reasoning: text.replace(toolRegex, '').trim(), toolCalls };
 }
 
 // ============================================================================
-// FILE LANGUAGE DETECTION
+// HELPER: LANGUAGE DETECTION (for file_created events)
 // ============================================================================
-// Used by the frontend to decide how to render the artifact (HTML = iframe,
-// SVG = inline, .py = code block, etc.)
+
 function detectLanguage(path) {
   const ext = (path.split('.').pop() || '').toLowerCase();
   const map = {
-    html: 'html', htm: 'html',
-    css: 'css',
+    html: 'html', htm: 'html', css: 'css',
     js: 'javascript', mjs: 'javascript', cjs: 'javascript',
-    jsx: 'jsx',
-    ts: 'typescript', tsx: 'tsx',
-    json: 'json',
-    py: 'python',
-    rb: 'ruby',
-    go: 'go',
-    rs: 'rust',
-    java: 'java',
-    c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp',
-    cs: 'csharp',
-    php: 'php',
-    sh: 'bash', bash: 'bash',
-    yml: 'yaml', yaml: 'yaml',
-    xml: 'xml',
-    svg: 'svg',
-    md: 'markdown', markdown: 'markdown',
-    txt: 'text',
-    sql: 'sql',
-    dart: 'dart',
-    swift: 'swift',
-    kt: 'kotlin',
-    vue: 'vue',
-    svelte: 'svelte'
+    jsx: 'jsx', ts: 'typescript', tsx: 'tsx',
+    json: 'json', py: 'python', rb: 'ruby', go: 'go',
+    rs: 'rust', java: 'java', c: 'c', cpp: 'cpp',
+    php: 'php', sh: 'bash', yml: 'yaml', yaml: 'yaml',
+    xml: 'xml', svg: 'svg', md: 'markdown', txt: 'text',
+    sql: 'sql'
   };
   return map[ext] || 'text';
 }
 
-/**
- * Broadcast a file creation event to the WebSocket room.
- * Called whenever write_file or edit_file succeeds.
- */
-function notifyFileCreated(sessionId, path, content, toolName) {
-  try {
-    broadcastFileCreated(sessionId, {
-      path,
-      content,
-      language: detectLanguage(path),
-      tool: toolName,
-      size: content.length
-    });
-  } catch (e) {
-    // Non-fatal — file was still written
-    logger.debug('notifyFileCreated failed', { error: e.message });
-  }
-}
+// ============================================================================
+// HELPER: WAIT FOR USER CONFIRMATION (Stage 6C)
+// ============================================================================
 
 /**
- * Build the full tool list: built-in AGENT_TOOLS + any connected connector tools.
- * Called at the start of each ReAct loop so newly-connected connectors show up.
+ * Poll the database for a confirmation resolution.
+ * Returns true if approved, false if rejected or timed out.
  */
-function buildFullToolList() {
-  const tools = [...AGENT_TOOLS];
-  try {
-    const connectorTools = getAllConnectorTools();
-    for (const ct of connectorTools) {
-      // Convert connector tool spec to OpenAI function-calling format
-      const properties = {};
-      const required = [];
-      if (ct.params && typeof ct.params === 'object') {
-        for (const [key, desc] of Object.entries(ct.params)) {
-          // Parse the description to detect type — default to string
-          const isNumber = /^\s*number/i.test(desc);
-          const isObject = /^\s*object/i.test(desc);
-          const isRequired = /\(required\)/i.test(desc);
-          properties[key] = {
-            type: isNumber ? 'number' : isObject ? 'object' : 'string',
-            description: desc
-          };
-          if (isRequired) required.push(key);
-        }
+async function waitForConfirmation(confirmationId, timeoutMs) {
+  const startTime = Date.now();
+  const pollInterval = 1000; // 1 second
+
+  while (Date.now() - startTime < timeoutMs) {
+    try {
+      const status = permissionGuard.getConfirmationStatus(confirmationId);
+      if (status) {
+        if (status.status === 'approved') return true;
+        if (status.status === 'rejected') return false;
       }
-      tools.push({
-        type: 'function',
-        function: {
-          name: ct.name,
-          description: ct.description,
-          parameters: {
-            type: 'object',
-            properties,
-            required
-          }
-        }
-      });
+    } catch (e) {
+      // DB not ready — keep waiting
     }
-    if (connectorTools.length > 0) {
-      logger.info('Connector tools added to agent', {
-        count: connectorTools.length,
-        names: connectorTools.map(t => t.name)
-      });
-    }
-  } catch (e) {
-    logger.warn('Failed to load connector tools', { error: e.message });
+    await new Promise(resolve => setTimeout(resolve, pollInterval));
   }
-  return tools;
+  return false; // timed out
 }
 
 // ============================================================================
@@ -438,40 +514,12 @@ function buildFullToolList() {
 
 export async function executeReActLoop(task, sessionId, userId, options = {}) {
   const workspacePath = options.workspacePath || process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
+  const effectiveUserId = userId || 'default-user';
 
-  logger.info('REACT_LOOP_START', { task: task.substring(0, 100), sessionId });
+  logger.info('REACT_LOOP_START', { task: task.substring(0, 100), sessionId, userId: effectiveUserId });
 
-  // Inject relevant memories
-  const memoryContext = getRelevantMemories(task);
-
-  // Build the full tool list (built-in + connected connectors)
-  const fullToolList = buildFullToolList();
-
-  // Build a description of available connectors for the system prompt
-  let connectorPrompt = '';
-  try {
-    const { listConnectors } = await import('./connectors.js');
-    const connected = listConnectors().filter(c => c.connected);
-    if (connected.length > 0) {
-      connectorPrompt = '\n\nConnected integrations (you can use these):\n' +
-        connected.map(c => `- ${c.name}: ${c.tools.join(', ')}`).join('\n') +
-        '\n\nUse these tools to help the user. Be careful with destructive operations — always confirm before deleting or updating data.';
-    }
-  } catch (e) { /* ok */ }
-
-  const systemPrompt = 'You are MAX, an autonomous AI agent. Complete the task fully by using the available tools.\n' +
-    'You work in: ' + workspacePath + '\n\n' +
-    'Rules:\n' +
-    '- Use tools to DO things, not just describe them.\n' +
-    '- Write real, complete, working code.\n' +
-    '- After writing files, run them to verify.\n' +
-    '- Use memory_save for anything the user might ask about later.\n' +
-    '- When completely done, call task_complete with a summary.\n' +
-    '- For connector tools (github_*, supabase_*, gmail_*, calendar_*, drive_*), always confirm with the user before any destructive action (delete, drop, update, send email, create PR).\n' +
-    '- Never exfiltrate data or perform actions the user did not request.' +
-    (memoryContext ? memoryContext : '') +
-    connectorPrompt;
-
+  // Build system prompt with RAG context injected (Stage 7D)
+  const systemPrompt = await buildSystemPromptWithRAG(workspacePath, effectiveUserId, task);
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: task }
@@ -483,46 +531,43 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
   let isDone = false;
 
   broadcastProgress(sessionId, { phase: 'react', status: 'running', iteration: 0, task });
+  broadcastMessage(sessionId, { role: 'assistant', content: '', type: 'streaming_start' });
 
   while (iteration < MAX_ITERATIONS && !isDone) {
     iteration++;
     logger.info('REACT_ITERATION', { sessionId, iteration });
 
-    broadcastProgress(sessionId, { phase: 'react', status: 'thinking', iteration, maxIterations: MAX_ITERATIONS });
+    broadcastProgress(sessionId, { phase: 'react', status: 'thinking', iteration });
 
-    // Call LLM directly (bypasses adapter — ensures tools pass through)
+    // Call LLM with function calling tools
     let llmResult;
     try {
-      llmResult = await callLLM(messages, fullToolList, { sessionId });
+      const condensedMessages = await condenseMessages(messages, { maxTokens: 6000, keepRecent: 8 });
 
-      // CRITICAL: If model returns empty content AND no tool calls, retry WITHOUT tools
-      // Some free models (gpt-oss-20b) return empty when they see function calling tools
-      if (!llmResult.content && !llmResult.tool_calls) {
-        logger.warn('REACT_EMPTY_RESPONSE_RETRY', { sessionId, iteration, model: llmResult.model });
-        llmResult = await callLLM(messages, null, { sessionId }); // retry without tools
-      }
+      // Disable Echo for real tasks
+      const prevEcho = process.env.ECHO_PROVIDER_ENABLED;
+      process.env.ECHO_PROVIDER_ENABLED = 'false';
+
+      llmResult = await generateCompletion(condensedMessages, {
+        temperature: 0.2,
+        maxTokens: MAX_ACTION_TOKENS,
+        tools: FUNCTION_TOOLS,
+        tool_choice: 'auto'
+      });
+
+      process.env.ECHO_PROVIDER_ENABLED = prevEcho;
     } catch (err) {
       logger.error('REACT_LLM_ERROR', { iteration, error: err.message });
-
-      // If tools call failed, try without tools as fallback
-      try {
-        logger.warn('REACT_FALLBACK_NO_TOOLS', { sessionId, iteration });
-        llmResult = await callLLM(messages, null, { sessionId });
-      } catch (err2) {
-        finalSummary = 'LLM error: ' + err2.message;
-        break;
-      }
+      finalSummary = 'I could not process this because all LLM providers failed: ' + err.message;
+      break;
     }
 
-    const llmContent = llmResult.content || '';
-    const llmToolCalls = llmResult.tool_calls || null;
+    const llmContent = llmResult?.content || '';
+    const llmToolCalls = llmResult?.tool_calls || null;
 
-    // Add assistant response to messages
-    const assistantMsg = { role: 'assistant', content: llmContent };
-    if (llmToolCalls) assistantMsg.tool_calls = llmToolCalls;
-    messages.push(assistantMsg);
+    messages.push({ role: 'assistant', content: llmContent, tool_calls: llmToolCalls || undefined });
 
-    // ===== PATH 1: Function calling =====
+    // ===== PATH 1: Function calling (preferred) =====
     if (llmToolCalls && Array.isArray(llmToolCalls) && llmToolCalls.length > 0) {
       logger.info('REACT_FUNCTION_CALLS', { sessionId, iteration, count: llmToolCalls.length });
 
@@ -531,51 +576,114 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
         let toolArgs = {};
         try { toolArgs = JSON.parse(tc.function?.arguments || '{}'); } catch (e) { toolArgs = {}; }
 
-        // task_complete ends the loop
+        // Check for task_complete
         if (toolName === 'task_complete') {
           finalSummary = toolArgs.summary || 'Task complete';
           isDone = true;
-          logger.info('REACT_DONE', { sessionId, iteration });
+          logger.info('REACT_DONE', { sessionId, iteration, summary: finalSummary.substring(0, 100) });
           break;
         }
 
-        // Map old_str/new_str aliases
+        // Map edit_file old_str/new_str to old_text/new_text (keep consistent)
         if (toolName === 'edit_file' && toolArgs.old_str) {
           toolArgs.old_text = toolArgs.old_str;
           toolArgs.new_text = toolArgs.new_str;
         }
 
+        // Track file modifications + broadcast file_created events (Stage 6E)
         if (toolName === 'write_file' || toolName === 'edit_file') {
           if (toolArgs.path) {
             filesModified.add(toolArgs.path);
-            // Broadcast file content to the WebSocket room so the frontend
-            // can save it to IndexedDB and show an artifact card.
             const fileContent = toolArgs.content || toolArgs.new_text || '';
-            notifyFileCreated(sessionId, toolArgs.path, fileContent, toolName);
+            try {
+              broadcastFileCreated(sessionId, {
+                path: toolArgs.path,
+                content: fileContent,
+                language: detectLanguage(toolArgs.path),
+                tool: toolName,
+                size: fileContent.length
+              });
+            } catch (e) { /* non-fatal */ }
           }
         }
 
         logger.info('REACT_TOOL_CALL', { sessionId, iteration, tool: toolName, args: JSON.stringify(toolArgs).substring(0, 200) });
         broadcastProgress(sessionId, { phase: 'react', status: 'executing_tool', iteration, tool: toolName, args: toolArgs });
 
-        const toolResult = await executeTool(toolName, toolArgs);
+        // ===== STAGE 6C: PERMISSION GUARD =====
+        // Check permission before executing ANY tool
+        let toolResult;
+        try {
+          const check = await permissionGuard.checkPermission(effectiveUserId, toolName, toolArgs);
+
+          if (check.blocked) {
+            // Permanently blocked — tell LLM immediately
+            toolResult = `BLOCKED: ${check.reason}`;
+            permissionGuard.logAction(effectiveUserId, sessionId, toolName, toolArgs, toolResult, { wasDestructive: false });
+          } else if (check.requiresConfirmation) {
+            // Pause loop — ask user to confirm via WebSocket
+            const confirmationId = permissionGuard.createPendingConfirmation(
+              sessionId, effectiveUserId, toolName, toolArgs,
+              check.description, check.riskLevel
+            );
+            broadcastConfirmation(sessionId, {
+              confirmationId,
+              description: check.description,
+              riskLevel: check.riskLevel,
+              tool: toolName,
+              args: toolArgs,
+              reason: check.reason
+            });
+
+            // Wait up to 120 seconds for user response
+            const confirmed = await waitForConfirmation(confirmationId, 120000);
+
+            if (!confirmed) {
+              toolResult = 'User did not confirm this action. Skipping.';
+              permissionGuard.logAction(effectiveUserId, sessionId, toolName, toolArgs, toolResult, {
+                wasDestructive: true, requiredConfirmation: true, userConfirmed: false
+              });
+            } else {
+              // User confirmed — execute the tool
+              toolResult = await executeTool(toolName, toolArgs, { userId: effectiveUserId, sessionId });
+              permissionGuard.logAction(effectiveUserId, sessionId, toolName, toolArgs, toolResult, {
+                wasDestructive: true, requiredConfirmation: true, userConfirmed: true
+              });
+            }
+          } else if (!check.allowed) {
+            // Not permitted — tell LLM to ask for permission
+            toolResult = `PERMISSION DENIED: ${check.reason}`;
+            permissionGuard.logAction(effectiveUserId, sessionId, toolName, toolArgs, toolResult);
+          } else {
+            // Allowed — execute normally
+            toolResult = await executeTool(toolName, toolArgs, { userId: effectiveUserId, sessionId });
+            permissionGuard.logAction(effectiveUserId, sessionId, toolName, toolArgs, toolResult, {
+              wasDestructive: false
+            });
+          }
+        } catch (permErr) {
+          logger.error('Permission guard error', { tool: toolName, error: permErr.message });
+          // Fail safe — don't execute if guard itself throws
+          toolResult = `Permission check failed: ${permErr.message}. Tool not executed.`;
+        }
 
         broadcastProgress(sessionId, { phase: 'react', status: 'tool_result', iteration, tool: toolName, result: toolResult.substring(0, 500) });
 
-        // Vision: screenshots sent as image_url
+        // Vision: if result is a screenshot (base64 image), send as vision message
         if (toolResult.startsWith('data:image/')) {
           messages.push({
             role: 'user',
             content: [
-              { type: 'text', text: 'Screenshot from ' + toolName + '. Analyze what you see:' },
+              { type: 'text', text: '(Screenshot from ' + toolName + ') — analyze what you see and decide next action:' },
               { type: 'image_url', image_url: { url: toolResult, detail: 'high' } }
             ]
           });
         } else {
+          // Add tool result as a tool message (OpenAI format)
           messages.push({
             role: 'tool',
             tool_call_id: tc.id || toolName,
-            content: String(toolResult)
+            content: toolResult
           });
         }
       }
@@ -584,12 +692,13 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
       continue;
     }
 
-    // ===== PATH 2: XML tool parsing =====
-    const { toolCalls: xmlCalls } = parseXMLTools(llmContent);
-    if (xmlCalls.length > 0) {
-      logger.info('REACT_XML_TOOLS', { sessionId, iteration, count: xmlCalls.length });
+    // ===== PATH 2: XML tool parsing (fallback) =====
+    const { reasoning, toolCalls: xmlToolCalls } = parseToolCalls(llmContent);
 
-      for (const tc of xmlCalls) {
+    if (xmlToolCalls.length > 0) {
+      logger.info('REACT_XML_TOOLS', { sessionId, iteration, count: xmlToolCalls.length });
+
+      for (const tc of xmlToolCalls) {
         if (tc.name === 'task_complete') {
           finalSummary = tc.args.summary || 'Task complete';
           isDone = true;
@@ -600,14 +709,52 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
           if (tc.args.path) {
             filesModified.add(tc.args.path);
             const fileContent = tc.args.content || tc.args.new_text || '';
-            notifyFileCreated(sessionId, tc.args.path, fileContent, tc.name);
+            try {
+              broadcastFileCreated(sessionId, {
+                path: tc.args.path,
+                content: fileContent,
+                language: detectLanguage(tc.args.path),
+                tool: tc.name,
+                size: fileContent.length
+              });
+            } catch (e) { /* non-fatal */ }
           }
         }
 
-        logger.info('REACT_TOOL_CALL', { sessionId, iteration, tool: tc.name });
+        logger.info('REACT_TOOL_CALL', { sessionId, iteration, tool: tc.name, args: JSON.stringify(tc.args).substring(0, 200) });
         broadcastProgress(sessionId, { phase: 'react', status: 'executing_tool', iteration, tool: tc.name, args: tc.args });
 
-        const toolResult = await executeTool(tc.name, tc.args);
+        // Permission guard check for XML path too
+        let toolResult;
+        try {
+          const check = await permissionGuard.checkPermission(effectiveUserId, tc.name, tc.args);
+          if (check.blocked) {
+            toolResult = `BLOCKED: ${check.reason}`;
+          } else if (check.requiresConfirmation) {
+            const confirmationId = permissionGuard.createPendingConfirmation(
+              sessionId, effectiveUserId, tc.name, tc.args, check.description, check.riskLevel
+            );
+            broadcastConfirmation(sessionId, {
+              confirmationId, description: check.description, riskLevel: check.riskLevel,
+              tool: tc.name, args: tc.args, reason: check.reason
+            });
+            const confirmed = await waitForConfirmation(confirmationId, 120000);
+            if (confirmed) {
+              toolResult = await executeTool(tc.name, tc.args, { userId: effectiveUserId, sessionId });
+              permissionGuard.logAction(effectiveUserId, sessionId, tc.name, tc.args, toolResult, { wasDestructive: true, requiredConfirmation: true, userConfirmed: true });
+            } else {
+              toolResult = 'User did not confirm. Skipping.';
+              permissionGuard.logAction(effectiveUserId, sessionId, tc.name, tc.args, toolResult, { wasDestructive: true, requiredConfirmation: true, userConfirmed: false });
+            }
+          } else if (!check.allowed) {
+            toolResult = `PERMISSION DENIED: ${check.reason}`;
+          } else {
+            toolResult = await executeTool(tc.name, tc.args, { userId: effectiveUserId, sessionId });
+            permissionGuard.logAction(effectiveUserId, sessionId, tc.name, tc.args, toolResult);
+          }
+        } catch (permErr) {
+          toolResult = `Permission check failed: ${permErr.message}. Tool not executed.`;
+        }
 
         broadcastProgress(sessionId, { phase: 'react', status: 'tool_result', iteration, tool: tc.name, result: toolResult.substring(0, 500) });
         messages.push({ role: 'user', content: '(Tool result for ' + tc.name + '):\n' + toolResult });
@@ -617,20 +764,31 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
       continue;
     }
 
-    // ===== PATH 3: Code block extraction =====
+    // ===== PATH 3: Code block extraction (last resort) =====
     const codeBlocks = extractCodeBlocks(llmContent);
+
     if (codeBlocks.length > 0) {
       logger.info('REACT_CODE_EXTRACTION', { sessionId, iteration, blocks: codeBlocks.length });
 
       for (const block of codeBlocks) {
         try {
-          const result = await executeTool('write_file', { path: block.filename, content: block.code });
+          const result = await executeTool('write_file', { path: block.filename, content: block.code }, { userId: effectiveUserId, sessionId });
           filesModified.add(block.filename);
-          // Broadcast the auto-extracted file to the frontend
-          notifyFileCreated(sessionId, block.filename, block.code, 'write_file (auto-extracted)');
-          logger.info('REACT_AUTO_WRITE', { sessionId, file: block.filename });
+          logger.info('REACT_AUTO_WRITE', { sessionId, file: block.filename, size: block.code.length });
+
+          // Broadcast file_created for code-block extraction too
+          try {
+            broadcastFileCreated(sessionId, {
+              path: block.filename,
+              content: block.code,
+              language: detectLanguage(block.filename),
+              tool: 'write_file (auto-extracted)',
+              size: block.code.length
+            });
+          } catch (e) { /* non-fatal */ }
+
           broadcastProgress(sessionId, { phase: 'react', status: 'tool_result', iteration, tool: 'write_file (auto)', result: result.substring(0, 200) });
-          messages.push({ role: 'user', content: '(Auto-saved to ' + block.filename + ')\n' + result });
+          messages.push({ role: 'user', content: '(Auto-extracted and saved to ' + block.filename + ')\n' + result });
         } catch (e) {
           logger.warn('REACT_AUTO_WRITE_FAILED', { file: block.filename, error: e.message });
         }
@@ -641,10 +799,12 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
         isDone = true;
         break;
       }
+
+      messages.push({ role: 'user', content: 'Code saved. Continue if needed, or call task_complete to finish.' });
       continue;
     }
 
-    // ===== PATH 4: No tools — conversational response =====
+    // ===== PATH 4: No tools, no code — conversational response =====
     finalSummary = llmContent.trim();
     isDone = true;
     logger.info('REACT_NO_TOOLS_DONE', { sessionId, iteration, len: finalSummary.length });
@@ -652,21 +812,21 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
   }
 
   if (!isDone && !finalSummary) {
-    finalSummary = 'Reached max iterations (' + MAX_ITERATIONS + '). Files: ' + (Array.from(filesModified).join(', ') || 'none');
+    finalSummary = 'Reached max iterations (' + MAX_ITERATIONS + '). Files modified: ' + (Array.from(filesModified).join(', ') || 'none');
   }
 
-  // Save and broadcast
   broadcastProgress(sessionId, { phase: 'react', status: 'complete', iteration, summary: finalSummary, filesModified: Array.from(filesModified) });
 
   try {
-    await addConversationMessage(sessionId, 'assistant', finalSummary, { type: 'task_complete', iterations: iteration, filesModified: Array.from(filesModified) });
+    await addConversationMessage(sessionId, 'assistant', finalSummary, {
+      type: 'task_complete', iterations: iteration, filesModified: Array.from(filesModified)
+    });
   } catch (e) {
     logger.warn('Failed to save summary', { error: e.message });
   }
 
   broadcastMessage(sessionId, { role: 'assistant', content: finalSummary, type: 'task_complete', filesModified: Array.from(filesModified) });
 
-  // Upload to Supabase
   if (isSupabaseConfigured() && filesModified.size > 0) {
     for (const filePath of filesModified) {
       try { await uploadToSupabase(filePath, sessionId); } catch (e) { /* ok */ }
@@ -674,8 +834,9 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
   }
 
   logger.info('REACT_LOOP_COMPLETE', { sessionId, iterations: iteration, filesModified: filesModified.size, success: isDone });
+
   return { success: isDone, summary: finalSummary, iterations: iteration, filesModified: Array.from(filesModified) };
 }
 
-export { AGENT_TOOLS, extractCodeBlocks, parseXMLTools, callLLM };
-export default { executeReActLoop, AGENT_TOOLS };
+export { parseToolCalls, extractCodeBlocks, FUNCTION_TOOLS };
+export default { executeReActLoop, parseToolCalls, extractCodeBlocks, FUNCTION_TOOLS };

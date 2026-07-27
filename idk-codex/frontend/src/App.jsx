@@ -1,10 +1,8 @@
 /**
  * Main Application Component
  *
- * Default route (/) is the new consumer chat UI (ChatPage) — clean, mobile-first,
- * streaming, with image upload and model picker.
- *
- /dev route exposes the full Developer Dashboard (file tree, terminal, runtime, etc).
+ * Default route (/) is the new mobile-first ChatPage (consumer UI).
+ * Developer dashboard is at /dev.
  */
 
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
@@ -25,12 +23,12 @@ function App() {
     <BrowserRouter>
       <div className="min-h-screen bg-background">
         <Routes>
-          {/* New consumer-first routes */}
+          {/* Consumer-first routes (default) */}
           <Route path="/" element={<ChatPage />} />
           <Route path="/chat" element={<ChatPage />} />
           <Route path="/chat/:sessionId" element={<ChatPage />} />
 
-          {/* Developer dashboard routes (still accessible) */}
+          {/* Developer dashboard routes */}
           <Route path="/dev" element={<HomePage />} />
           <Route path="/dev/chat" element={<ChatListPage />} />
           <Route path="/dev/chat/:sessionId" element={<ChatDetailPage />} />
@@ -38,7 +36,7 @@ function App() {
           <Route path="/dev/repo" element={<RepoPage />} />
           <Route path="/dev/tasks" element={<TasksPage />} />
 
-          {/* Legacy Routes */}
+          {/* Legacy */}
           <Route path="/simple" element={<SimpleChat />} />
           <Route path="/max-legacy" element={<MAXDashboard />} />
 
@@ -46,19 +44,15 @@ function App() {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
 
-        {/* Bottom Navigation only on /dev routes */}
         <ConditionalBottomNav />
       </div>
     </BrowserRouter>
   );
 }
 
-// Only show BottomNav on /dev routes
 function ConditionalBottomNav() {
   const location = useLocation();
-  if (location.pathname.startsWith('/dev')) {
-    return <BottomNav />;
-  }
+  if (location.pathname.startsWith('/dev')) return <BottomNav />;
   return null;
 }
 

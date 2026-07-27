@@ -14,9 +14,7 @@ export default function BottomNav() {
   ];
 
   const isActive = (path) => {
-    if (path === '/dev') {
-      return location.pathname === '/dev';
-    }
+    if (path === '/dev') return location.pathname === '/dev';
     return location.pathname.startsWith(path);
   };
 
