@@ -837,43 +837,6 @@ async function handleCancelCommand(ctx, userId) {
   await ctx.reply('✅ Cancelled. Send me a new message anytime.');
 }
 
-async function handleWatchCommand(ctx, userId, url) {
-  if (!url) {
-    await ctx.reply('Usage: /watch <url>\nExample: /watch https://api.example.com/health');
-    return;
-  }
-  try {
-    const { default: watchdog } = await import('../watchdog/watchdog.js');
-    const id = watchdog.addRule({ user_id: String(userId), name: url.substring(0, 50), url, watch_type: 'api_change', check_interval_hours: 24 });
-    await ctx.reply('👁 Watching: ' + url + '\nRule ID: ' + id + '\nI\'ll check every 24h and report changes.');
-  } catch (e) { await ctx.reply('Error: ' + e.message); }
-}
-
-async function handleUnwatchCommand(ctx, userId, id) {
-  if (!id) { await ctx.reply('Usage: /unwatch <rule-id>'); return; }
-  try {
-    const { default: watchdog } = await import('../watchdog/watchdog.js');
-    const ok = watchdog.deleteRule(parseInt(id, 10));
-    await ctx.reply(ok ? '✅ Stopped watching rule ' + id : 'Rule not found');
-  } catch (e) { await ctx.reply('Error: ' + e.message); }
-}
-
-async function handleRulesCommand(ctx, userId) {
-  try {
-    const { default: watchdog } = await import('../watchdog/watchdog.js');
-    const rules = watchdog.listRules();
-    if (!rules.length) { await ctx.reply('No watchdog rules. Use /watch <url> to start.'); return; }
-    const text = rules.map(r => '#' + r.id + ' [' + (r.is_active ? '✅' : '⏸') + '] ' + r.name + ' — ' + (r.url || r.repo_url || 'no URL') + ' (every ' + r.check_interval_hours + 'h)').join('\n');
-    await ctx.reply('👁 Watchdog Rules:\n\n' + text);
-  } catch (e) { await ctx.reply('Error: ' + e.message); }
-}
-
-async function handleShareCommand(ctx, userId) {
-  const sessionId = await getOrCreateSession(userId, 'telegram');
-  const shareUrl = 'https://maxxxxx-production.up.railway.app/?session=' + sessionId;
-  await ctx.reply('🔗 Share this link to collaborate in real-time:\n' + shareUrl);
-}
-
 async function handleLogsCommand(ctx, text) {
   await ctx.reply('📝 Logs are available in the Railway dashboard or server console.');
 }
