@@ -567,18 +567,31 @@ async function waitForConfirmation(confirmationId, timeoutMs) {
  * Models not in this list (like deepseek-r1) use ReAct text format.
  */
 const FUNCTION_CALLING_MODELS = [
-  'llama', 'mistral', 'qwen', 'gemini', 'claude', 'gpt', 'groq', 'kimi', 'glm'
+  'llama', 'mistral', 'qwen', 'gemini', 'claude', 'gpt', 'groq', 'kimi', 'glm', 'gpt-oss'
+];
+
+/**
+ * Models that are KNOWN to NOT support function calling.
+ * These always use ReAct text format.
+ */
+const NON_FUNCTION_CALLING_MODELS = [
+  'deepseek-r1', 'deepseek/deepseek-r1', 'o1', 'o3'
 ];
 
 /**
  * Check if the current model supports native function calling.
+ * CRITICAL: Don't just check if GROQ_API_KEY exists — the active provider
+ * might be openai-compatible with a model that doesn't support FC.
  */
 function modelSupportsFunctionCalling() {
   const model = (process.env.OPENAI_COMPATIBLE_MODEL || '').toLowerCase();
-  const provider = (process.env.GROQ_API_KEY ? 'groq' : '');
-  // Groq always supports function calling
-  if (provider === 'groq') return true;
-  // Check model name against the list
+
+  // Check if model is explicitly in the non-FC list (deepseek-r1, etc.)
+  if (NON_FUNCTION_CALLING_MODELS.some(m => model.includes(m))) {
+    return false;
+  }
+
+  // Check if model name matches a known FC-supporting model
   return FUNCTION_CALLING_MODELS.some(m => model.includes(m));
 }
 
@@ -655,7 +668,39 @@ function parseLLMResponse(llmResult) {
     };
   }
 
-  // Format 3: XML <tool> tags (old fallback)
+  // Format 3: deepseek-r1 <|python_tag|> format
+  // deepseek-r1 outputs: <|python_tag|>write_file("test.txt", "hello world")
+  const pythonTagMatch = llmContent.match(/<\|python_tag\|>\s*(\w+)\s*\(([\s\S]*?)\)/);
+  if (pythonTagMatch) {
+    const toolName = pythonTagMatch[1].trim();
+    const argsStr = pythonTagMatch[2].trim();
+    let args = {};
+    // Parse function-call style args: path="test.txt", content="hello world"
+    try {
+      // Try JSON parse first (in case it's valid JSON)
+      args = JSON.parse('{' + argsStr + '}');
+    } catch {
+      // Parse comma-separated key="value" pairs
+      const argRegex = /(\w+)\s*=\s*"((?:[^"\\]|\\.)*)"/g;
+      let m;
+      while ((m = argRegex.exec(argsStr)) !== null) {
+        args[m[1]] = m[2];
+      }
+      // Also try single-quoted values
+      const argRegex2 = /(\w+)\s*=\s*'((?:[^'\\]|\\.)*)'/g;
+      while ((m = argRegex2.exec(argsStr)) !== null) {
+        args[m[1]] = m[2];
+      }
+    }
+    logger.info('RESPONSE_FORMAT', { format: 'python_tag', tool: toolName, args: JSON.stringify(args).substring(0, 100) });
+    return {
+      content: llmContent,
+      toolCalls: [{ id: `tc_${Date.now()}`, name: toolName, args }],
+      done: toolName === 'task_complete'
+    };
+  }
+
+  // Format 4: XML <tool> tags (old fallback)
   const { toolCalls: xmlCalls } = parseToolCalls(llmContent);
   if (xmlCalls.length > 0) {
     logger.info('RESPONSE_FORMAT', { format: 'xml', count: xmlCalls.length });
