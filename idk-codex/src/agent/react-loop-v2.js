@@ -650,7 +650,8 @@ function parseLLMResponse(llmResult) {
     return {
       content: llmContent,
       toolCalls,
-      done: toolCalls.some(t => t.name === 'task_complete')
+      done: toolCalls.some(t => t.name === 'task_complete'),
+      format: 'function_calling'
     };
   }
 
@@ -844,8 +845,18 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
     const parsed = parseLLMResponse(llmResult);
     const llmContent = parsed.content;
     const llmToolCalls = parsed.toolCalls;
+    const wasNativeFunctionCall = parsed.format === 'function_calling';
 
-    messages.push({ role: 'assistant', content: llmContent });
+    // If native function calling, include tool_calls in assistant message
+    if (wasNativeFunctionCall && llmToolCalls && llmToolCalls.length > 0) {
+      messages.push({
+        role: 'assistant',
+        content: llmContent,
+        tool_calls: llmResult.tool_calls
+      });
+    } else {
+      messages.push({ role: 'assistant', content: llmContent });
+    }
 
     // ===== PATH 1: Tool calls (function calling OR ReAct text OR XML) =====
     if (llmToolCalls && llmToolCalls.length > 0) {
@@ -957,16 +968,16 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
               { type: 'image_url', image_url: { url: toolResult, detail: 'high' } }
             ]
           });
-        } else if (modelSupportsFunctionCalling()) {
-          // Function calling mode — add as tool message (OpenAI format)
+        } else if (wasNativeFunctionCall && modelSupportsFunctionCalling()) {
+          // Native function calling mode — add as tool message (OpenAI format)
           messages.push({
             role: 'tool',
             tool_call_id: tc.id || toolName,
             content: toolResult
           });
         } else {
-          // ReAct text mode — add as user message with OBSERVATION prefix
-          // Models like deepseek-r1 need the observation as a user message
+          // Text-parsed tool calls (ReAct, python_tag, XML) OR model fell back
+          // to non-FC provider — use OBSERVATION user message format
           messages.push({
             role: 'user',
             content: `OBSERVATION: Tool "${toolName}" returned:\n${String(toolResult).slice(0, 3000)}\n\nContinue with the next step.`
