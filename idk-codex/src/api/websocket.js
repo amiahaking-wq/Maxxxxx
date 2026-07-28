@@ -4,12 +4,42 @@
 
 import logger from '../utils/logger.js';
 import terminalManager from '../agent/tools/terminal-manager.js';
+import { validateToken } from '../auth/middleware.js';
 
 /**
  * Initialize WebSocket server with Socket.io
  * @param {Object} io - Socket.io server instance
  */
 export function initWebSocket(io) {
+  // Auth middleware for WebSocket connections
+  io.use(async (socket, next) => {
+    const token = socket.handshake.auth?.token ||
+                  socket.handshake.headers?.authorization?.replace('Bearer ', '');
+
+    if (!token || !process.env.SUPABASE_URL) {
+      // Anonymous or no Supabase configured — allow with temp ID
+      socket.data.userId = 'web_user';
+      socket.data.isAuthenticated = false;
+      return next();
+    }
+
+    try {
+      const user = await validateToken(token);
+      if (user) {
+        socket.data.userId = user.id;
+        socket.data.email = user.email;
+        socket.data.isAuthenticated = true;
+      } else {
+        socket.data.userId = 'web_user';
+        socket.data.isAuthenticated = false;
+      }
+    } catch {
+      socket.data.userId = 'web_user';
+      socket.data.isAuthenticated = false;
+    }
+    next();
+  });
+
   io.on('connection', (socket) => {
     logger.info('WebSocket client connected', {
       socketId: socket.id,

@@ -29,6 +29,7 @@ export function useWebSocket(sessionId) {
   useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
 
   useEffect(() => {
+    const authToken = localStorage.getItem('max_auth_token');
     const socket = io(WS_URL, {
       transports: isMobileSafari ? ['polling'] : ['websocket', 'polling'],
       upgrade: !isMobileSafari,
@@ -36,7 +37,8 @@ export function useWebSocket(sessionId) {
       reconnectionDelay: 2000,
       reconnectionDelayMax: 5000,
       reconnectionAttempts: Infinity,
-      timeout: 20000
+      timeout: 20000,
+      auth: authToken ? { token: authToken } : {}
     });
     socketRef.current = socket;
 

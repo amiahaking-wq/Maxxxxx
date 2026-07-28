@@ -18,6 +18,7 @@ import uploadRouter from './upload.js';
 import permissionsRouter from './permissions.js';
 import csRouter from './cs.js';
 import extrasRouter from './extras.js';
+import authRouter from './auth.js';
 
 const router = Router();
 
@@ -60,6 +61,7 @@ router.use('/connectors', connectorsRouter);
 router.use('/upload', uploadRouter);
 router.use('/permissions', permissionsRouter);
 router.use('/cs', csRouter);
+router.use('/auth', authRouter);
 router.use('/', extrasRouter);  // memory + user profile routes
 router.use('/files/download', uploadRouter);
 

@@ -25,7 +25,7 @@ import WelcomeScreen from '../components/WelcomeScreen';
 
 const API_BASE = import.meta.env.VITE_API_URL || window.location.origin;
 
-export default function ChatPage() {
+export default function ChatPage({ authToken, user, onLogout }) {
   const { sessionId } = useParams();
   const navigate = useNavigate();
 
@@ -160,7 +160,7 @@ export default function ChatPage() {
   return (
     <div className="flex h-screen bg-[#1a1a1a] text-[#ececec] overflow-hidden">
       {/* Sidebar */}
-      <Sidebar open={showSidebar} onClose={() => setShowSidebar(false)} currentSessionId={conversationId} onSwitchSession={(id) => navigate(`/chat/${id}`)} onNewChat={handleNewChat} onOpenSettings={() => { setShowSidebar(false); setShowSettings(true); }} />
+      <Sidebar open={showSidebar} onClose={() => setShowSidebar(false)} currentSessionId={conversationId} onSwitchSession={(id) => navigate(`/chat/${id}`)} onNewChat={handleNewChat} onOpenSettings={() => { setShowSidebar(false); setShowSettings(true); }} onLogout={onLogout} user={user} />
 
       {/* Main area */}
       <div className="flex-1 flex flex-col min-w-0">

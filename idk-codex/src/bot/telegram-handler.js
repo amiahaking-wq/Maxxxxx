@@ -172,7 +172,9 @@ function detectIntent(text) {
  */
 export async function handleTelegramMessage(ctx) {
   const chatId = ctx.chat?.id;
-  const userId = ctx.from?.id;
+  // Use Telegram user ID as isolated userId — each Telegram user has
+  // completely separate conversations, memories, knowledge, and credentials
+  const userId = `telegram_${ctx.from?.id}`;
   const text = ctx.message?.text || '';
   const messageType = ctx.message?.text ? 'text' : ctx.updateType;
 

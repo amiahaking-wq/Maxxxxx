@@ -8,7 +8,7 @@ import { Plus, Search, Settings, X, MessageSquare, Trash2, Edit2, Check } from '
 
 const API_BASE = import.meta.env.VITE_API_URL || window.location.origin;
 
-export default function Sidebar({ open, onClose, currentSessionId, onSwitchSession, onNewChat, onOpenSettings }) {
+export default function Sidebar({ open, onClose, currentSessionId, onSwitchSession, onNewChat, onOpenSettings, onLogout, user }) {
   const [conversations, setConversations] = useState([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
@@ -140,15 +140,20 @@ export default function Sidebar({ open, onClose, currentSessionId, onSwitchSessi
           )}
         </div>
 
-        {/* Bottom: User + Settings */}
+        {/* Bottom: User + Settings + Logout */}
         <div className="p-3 border-t border-[#2a2a2a]">
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-full bg-[#FF6B35]/20 text-[#FF6B35] flex items-center justify-center font-bold text-sm">U</div>
+            <div className="w-8 h-8 rounded-full bg-[#FF6B35]/20 text-[#FF6B35] flex items-center justify-center font-bold text-sm">{(user?.name || user?.email || 'U')[0].toUpperCase()}</div>
             <div className="flex-1 min-w-0">
-              <div className="text-xs text-[#ececec] font-medium truncate">User</div>
-              <div className="text-[10px] text-[#666]">web_user</div>
+              <div className="text-xs text-[#ececec] font-medium truncate">{user?.name || user?.email || 'User'}</div>
+              <div className="text-[10px] text-[#666] truncate">{user?.email || ''}</div>
             </div>
             <button onClick={onOpenSettings} className="p-2 hover:bg-[#2a2a2a] rounded-lg text-[#666] hover:text-[#ececec]"><Settings size={16} /></button>
+            {onLogout && (
+              <button onClick={onLogout} className="p-2 hover:bg-[#2a2a2a] rounded-lg text-[#666] hover:text-red-400" title="Sign out">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+              </button>
+            )}
           </div>
         </div>
       </div>
