@@ -97,7 +97,26 @@ class LLMAdapter {
             if (process.env.OPENAI_COMPATIBLE_BASE_URL || process.env.OPENAI_COMPATIBLE_API_KEY) {
               const compatCtx = parseInt(process.env.OPENAI_COMPATIBLE_CONTEXT_WINDOW || '128000', 10);
               const compatMaxOut = parseInt(process.env.OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS || '8192', 10);
-              const compatModel = process.env.OPENAI_COMPATIBLE_MODEL || 'openai/gpt-oss-20b:free';
+
+              // CRITICAL: Check if the configured model is a known-dead free model.
+              // deepseek-r1:free, kimi-k2:free, qwen:free, mistral:free, glm:free
+              // all return 404 on OpenRouter now. Replace with a known-working model.
+              const DEAD_MODELS = [
+                'deepseek/deepseek-r1:free',
+                'moonshotai/kimi-k2:free',
+                'qwen/qwen-2.5-coder-32b-instruct:free',
+                'qwen/qwen-2.5-72b-instruct:free',
+                'mistralai/mistral-small-3.1-24b-instruct:free',
+                'zhipuai/glm-4.5:free',
+                'meta-llama/llama-3.3-70b-instruct:free'
+              ];
+              let compatModel = process.env.OPENAI_COMPATIBLE_MODEL || 'openai/gpt-oss-20b:free';
+              if (DEAD_MODELS.includes(compatModel)) {
+                logger.warn(`⚠️ Configured model "${compatModel}" is dead (404). Replacing with openai/gpt-oss-20b:free`);
+                compatModel = 'openai/gpt-oss-20b:free';
+                process.env.OPENAI_COMPATIBLE_MODEL = compatModel;
+              }
+
               this.providers.push(new OpenAICompatibleProvider({
                 name: 'openai-compatible',
                 baseURL: process.env.OPENAI_COMPATIBLE_BASE_URL || 'http://localhost:8000/v1',
@@ -109,6 +128,7 @@ class LLMAdapter {
               }));
               logger.info('✓ OpenAI-compatible provider initialized', {
                 baseURL: process.env.OPENAI_COMPATIBLE_BASE_URL || 'http://localhost:8000/v1',
+                model: compatModel,
                 contextWindow: compatCtx,
                 maxOutputTokens: compatMaxOut
               });

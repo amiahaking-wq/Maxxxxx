@@ -372,6 +372,9 @@ function detectTaskIntent(lowerMsg, originalMsg) {
     /\b(use the (browser|web|search)|use a tool|use tools|using the browser|using tools)\b/i,
     /\b(find (the |me )?latest|find (online|on the web|on google))\b/i,
     /\b(check (the |my )?(website|url|api|endpoint|status|health))\b/i,
+    // Follow-up search requests — "get more", "more", "20 more", "show me more"
+    /\b(get more|give me more|show me more|more (news|results|articles|stories)|find more|search (for |again )?more|\d+ more)\b/i,
+    /\b(news from|news about|news today|what.*happening|what.*going on)\b/i,
     // GitHub
     /\b(check (my |the )?(repo|github|issues|prs|pull requests))\b/i,
     /\b(list (my |the )?(issues|prs|pull requests|repos))\b/i,
