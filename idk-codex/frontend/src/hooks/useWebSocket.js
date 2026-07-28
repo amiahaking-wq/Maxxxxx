@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { io } from 'socket.io-client';
 
-const WS_URL = import.meta.env.VITE_WS_URL || window.location.origin;
+const WS_URL = import.meta.env.VITE_API_URL || import.meta.env.VITE_WS_URL || window.location.origin;
 const isMobileSafari = /iPhone|iPad|iPod/.test(navigator.userAgent);
 
 if ('serviceWorker' in navigator && !window.__swRegistered) {
