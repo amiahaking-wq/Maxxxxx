@@ -1,13 +1,10 @@
-:80 {
+:{$PORT:80} {
 	root * /app/dist
 	file_server
 
-	# SPA fallback
+	# SPA fallback — serve index.html for all non-file routes
 	try_files {path} /index.html
 
 	# Gzip
 	encode gzip
-
-	# Cache static assets
-	header /assets/* Cache-Control "public, immutable, max-age=31536000"
 }
