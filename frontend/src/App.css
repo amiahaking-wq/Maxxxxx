@@ -1,0 +1,51 @@
+/* Global Styles - Clean and Minimal */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --vh: 1vh; /* Will be updated via JS */
+}
+
+/**
+ * Width Strategy:
+ * - width: 100% ensures full container width
+ * - max-width: 100% (NOT 100vw) prevents scrollbar issues on Windows/Linux
+ * - overflow: hidden keeps original SPA architecture with internal scrolling
+ */
+html, body, #root {
+  width: 100%;
+  max-width: 100%;
+  height: calc(var(--vh, 1vh) * 100);
+  overflow: hidden;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: #0f0f0f;
+  color: #ffffff;
+  position: relative;
+  margin: 0;
+  padding: 0;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Remove default button styles */
+button {
+  font-family: inherit;
+}
+
+input, textarea {
+  font-family: inherit;
+}

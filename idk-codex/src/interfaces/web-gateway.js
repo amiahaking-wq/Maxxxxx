@@ -237,8 +237,13 @@ export class WebGateway {
       maxHttpBufferSize: 1e8
     });
 
-    // Middleware
-    this.app.use(cors());
+    // Middleware — CORS allows all origins (frontend is separate service)
+    this.app.use(cors({
+      origin: '*',
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-Id'],
+      credentials: false
+    }));
     this.app.use(express.json({ limit: '50mb' }));
     this.app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -275,28 +280,29 @@ export class WebGateway {
       logger.info('✅ Telegram webhook route registered', { path: webhookPath });
     }
 
-    // Serve frontend static files from the new Devin-style app build
+    // Serve frontend static files IF they exist (backward compat for single-service deploys)
+    // When frontend is a separate Railway service, this path won't exist — that's fine.
     const frontendDistPath = path.resolve(path.dirname(__dirname), '..', '..', 'app', 'dist');
 
-    // Log frontend path for debugging
-    logger.info('Frontend dist path configured', {
-      frontendDistPath,
-      exists: fs.existsSync(frontendDistPath)
-    });
-
-    this.app.use(express.static(frontendDistPath));
-
-    // SPA fallback with error handling
-    // Skip /socket.io/ requests — Socket.IO handles those at the server level
-    this.app.get(/^(?!\/socket\.io\/).*$/, (req, res) => {
-      const indexPath = path.resolve(frontendDistPath, 'index.html');
-      if (fs.existsSync(indexPath)) {
-        res.sendFile(indexPath);
-      } else {
-        logger.error('index.html not found', { indexPath, frontendDistPath });
-        res.status(404).send('Frontend not built. index.html missing.');
-      }
-    });
+    if (fs.existsSync(frontendDistPath)) {
+      logger.info('Frontend dist path configured', { frontendDistPath, exists: true });
+      this.app.use(express.static(frontendDistPath));
+      // SPA fallback
+      this.app.get(/^(?!\/socket\.io\/|\/api\/).*$/, (req, res) => {
+        const indexPath = path.resolve(frontendDistPath, 'index.html');
+        if (fs.existsSync(indexPath)) {
+          res.sendFile(indexPath);
+        } else {
+          res.status(404).json({ error: 'Not found', hint: 'This is an API-only service. Frontend is deployed separately.' });
+        }
+      });
+    } else {
+      logger.info('Frontend dist not found — running as API-only service');
+      // API-only: return JSON for non-API routes
+      this.app.get('/', (req, res) => {
+        res.json({ service: 'MAX API', status: 'running', docs: '/api/health' });
+      });
+    }
 
     // Initialize WebSocket
     initWebSocket(this.io);
