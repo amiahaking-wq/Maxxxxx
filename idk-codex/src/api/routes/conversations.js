@@ -289,6 +289,16 @@ router.post('/:id/messages', async (req, res) => {
           // Restore Echo for the ReAct agent loop
           process.env.ECHO_PROVIDER_ENABLED = 'true';
 
+          // Retry once if model returns empty (openrouter/auto sometimes does this)
+          if (!result || (!result.content && !result.tool_calls)) {
+            logger.warn('Chat empty response, retrying without tools');
+            try {
+              result = await generateCompletion(messages, { temperature: 0.7, maxTokens: 800 });
+            } catch (retryErr) {
+              // Still empty — throw with model name
+            }
+          }
+
           if (!result || (!result.content && !result.tool_calls)) {
             const currentModel = process.env.OPENAI_COMPATIBLE_MODEL || 'openrouter/auto';
             throw new Error(`Model ${currentModel} returned empty response. Try a different model.`);

@@ -869,6 +869,23 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
         maxTokens: MAX_ACTION_TOKENS
       });
 
+      // CRITICAL: Retry without tools if model returns empty response
+      // openrouter/auto sometimes returns empty when given function calling tools
+      if (!llmResult?.content && !llmResult?.tool_calls) {
+        logger.warn('REACT_EMPTY_RESPONSE_RETRY', { sessionId, iteration, model: 'openrouter/auto' });
+        // Retry WITHOUT tools — some free models can't handle function calling
+        const reactMessages = [...condensedMessages];
+        if (reactMessages[0]?.role === 'system') {
+          const workspacePath = process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
+          reactMessages[0] = { role: 'system', content: buildReActSystemPrompt(workspacePath) + preSearchContext };
+        }
+        llmResult = await hybridLLMCall(reactMessages, {
+          temperature: 0.2,
+          maxTokens: MAX_ACTION_TOKENS
+          // No tools — model uses ReAct text format
+        });
+      }
+
       process.env.ECHO_PROVIDER_ENABLED = prevEcho;
     } catch (err) {
       logger.error('REACT_LLM_ERROR', { iteration, error: err.message });
