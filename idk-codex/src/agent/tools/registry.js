@@ -391,56 +391,9 @@ export const TOOLS = {
     }
   },
 
-  web_search: {
-    name: 'web_search',
-    description: 'Search the web for information. Returns search results with titles, URLs, and snippets. Use for looking up documentation, APIs, or current information.',
-    params: {
-      query: 'string (required) — search query'
-    },
-    execute: async (args) => {
-      const query = args.query;
-      if (!query) return 'Error: query is required';
-
-      try {
-        // Use a simple web search via DuckDuckGo HTML (no API key needed)
-        const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-        const response = await fetch(url, {
-          headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
-
-        if (!response.ok) {
-          return `Error: web search failed (${response.status})`;
-        }
-
-        const html = await response.text();
-
-        // Extract results (simple parsing)
-        const results = [];
-        const resultRegex = /<a rel="nofollow" class="result__a" href="([^"]+)">(.*?)<\/a>[\s\S]*?<a class="result__snippet"[^>]*>(.*?)<\/a>/g;
-        let match;
-        let count = 0;
-        while ((match = resultRegex.exec(html)) !== null && count < 5) {
-          const url = match[1].replace(/&amp;/g, '&');
-          const title = match[2].replace(/<[^>]+>/g, '').trim();
-          const snippet = match[3].replace(/<[^>]+>/g, '').trim();
-          results.push(`${count + 1}. ${title}\n   ${url}\n   ${snippet.substring(0, 200)}`);
-          count++;
-        }
-
-        if (results.length === 0) {
-          return '(no search results found)';
-        }
-
-        return results.join('\n\n');
-      } catch (err) {
-        return `Error: web search failed: ${err.message}`;
-      }
-    }
-  },
-
   web_fetch: {
     name: 'web_fetch',
-    description: 'Fetch a URL and return the text content (HTML stripped to text). Max 5000 chars. Use for reading documentation pages or API responses.',
+    description: 'Fetch a URL and return the text content (HTML stripped to text, readability-optimized). Max 8000 chars. Use for reading documentation pages, articles, or API responses after web_search.',
     params: {
       url: 'string (required) — the URL to fetch'
     },
@@ -450,7 +403,7 @@ export const TOOLS = {
 
       try {
         const response = await fetch(url, {
-          headers: { 'User-Agent': 'Mozilla/5.0' },
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36' },
           signal: AbortSignal.timeout(15000)
         });
 
@@ -466,17 +419,12 @@ export const TOOLS = {
           text = JSON.stringify(json, null, 2);
         } else {
           text = await response.text();
-          // Strip HTML tags
-          text = text
-            .replace(/<script[\s\S]*?<\/script>/gi, '')
-            .replace(/<style[\s\S]*?<\/style>/gi, '')
-            .replace(/<[^>]+>/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
+          // ===== READABILITY-EXTRACTION (Feature #17) =====
+          text = extractReadable(text, url);
         }
 
-        if (text.length > 5000) {
-          text = text.substring(0, 5000) + '\n... (truncated)';
+        if (text.length > 8000) {
+          text = text.substring(0, 8000) + '\n... (truncated)';
         }
 
         return text || '(empty response)';
@@ -487,11 +435,13 @@ export const TOOLS = {
   },
 
   // ========================================================================
-  // WEB SEARCH — search the web using DuckDuckGo HTML (free, no API key)
+  // WEB SEARCH — search the web using Google News RSS + DuckDuckGo (free, no API key)
+  // Returns results with explicit [1], [2] citation markers so the agent can
+  // cite sources in its final answer.
   // ========================================================================
   web_search: {
     name: 'web_search',
-    description: 'Search the web for current information. Returns titles, URLs, and snippets. Use this when the user asks to search, look up, find news, or anything needing current data. ALWAYS use this FIRST for web questions — do not write code or files when asked to search.',
+    description: 'Search the web for current information. Returns titles, URLs, and snippets. Use this when the user asks to search, look up, find news, or anything needing current data. ALWAYS use this FIRST for web questions — do not write code or files when asked to search. ALWAYS cite sources in your final answer using [1], [2] etc.',
     params: {
       query: 'string (required) — what to search for'
     },
@@ -501,118 +451,23 @@ export const TOOLS = {
 
       try {
         logger.info('TOOL:web_search', { query: query.substring(0, 100) });
+        const results = await performWebSearch(query);
 
-        // Detect if this is a news query
-        const isNewsQuery = /\b(news|today|latest|current|happening|breaking)\b/i.test(query);
-        const searchQuery = isNewsQuery ? query + ' news' : query;
-
-        // ===== STRATEGY 1: Google News RSS (always works, no rate limit) =====
-        if (isNewsQuery) {
-          try {
-            const rssUrl = 'https://news.google.com/rss/search?q=' + encodeURIComponent(searchQuery) + '&hl=en-US&gl=US&ceid=US:en';
-            const rssResponse = await fetch(rssUrl, {
-              headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MAX-Agent/2.0)' }
-            });
-            if (rssResponse.ok) {
-              const xml = await rssResponse.text();
-              const results = [];
-              const itemRegex = /<item>([\s\S]*?)<\/item>/g;
-              let match;
-              while ((match = itemRegex.exec(xml)) !== null && results.length < 8) {
-                const item = match[1];
-                const title = item.match(/<title>(.*?)<\/title>/);
-                const link = item.match(/<link>(.*?)<\/link>/);
-                const pubDate = item.match(/<pubDate>(.*?)<\/pubDate>/);
-                const source = item.match(/<source[^>]*>(.*?)<\/source>/);
-                if (title) {
-                  results.push({
-                    title: title[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'),
-                    url: link ? link[1] : '',
-                    snippet: (source ? source[1] + ' — ' : '') + (pubDate ? pubDate[1] : ''),
-                    source: source ? source[1] : 'Google News'
-                  });
-                }
-              }
-              if (results.length > 0) {
-                let output = `News search results for "${query}" (${results.length} found):\n\n`;
-                output += results.map((r, i) => `[${i + 1}] ${r.title}\n    Source: ${r.snippet}\n    URL: ${r.url}`).join('\n\n');
-                return output;
-              }
-            }
-          } catch (e) {
-            logger.warn('Google News RSS failed', { error: e.message });
-          }
-        }
-
-        // ===== STRATEGY 2: DuckDuckGo Lite (general search) =====
-        try {
-          const ddgUrl = 'https://lite.duckduckgo.com/lite/?q=' + encodeURIComponent(searchQuery);
-          const ddgResponse = await fetch(ddgUrl, {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-              'Accept': 'text/html',
-              'Accept-Language': 'en-US,en;q=0.9'
-            }
-          });
-          if (ddgResponse.ok) {
-            const html = await ddgResponse.text();
-            const results = [];
-            // DDG Lite: <a rel="nofollow" href="...">Title</a>
-            const linkRegex = /<a[^>]*rel="nofollow"[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/gs;
-            let match;
-            while ((match = linkRegex.exec(html)) !== null && results.length < 8) {
-              let href = match[1];
-              const uddg = href.match(/uddg=([^&]+)/);
-              if (uddg) href = decodeURIComponent(uddg[1]);
-              const title = match[2].replace(/<[^>]+>/g, '').trim();
-              if (title.length > 5 && href.startsWith('http')) {
-                results.push({ title, url: href, snippet: '' });
-              }
-            }
-            if (results.length > 0) {
-              let output = `Search results for "${query}" (${results.length} found):\n\n`;
-              output += results.map((r, i) => `[${i + 1}] ${r.title}\n    URL: ${r.url}`).join('\n\n');
-              return output;
+        if (results.length === 0) {
+          // AUTO-RETRY: try a simplified query (Feature #8 — multi-step search)
+          const simplified = simplifyQuery(query);
+          if (simplified !== query) {
+            logger.info('web_search retry with simplified query', { original: query, simplified });
+            const retryResults = await performWebSearch(simplified);
+            if (retryResults.length > 0) {
+              return formatSearchResults(simplified, retryResults) +
+                '\n\n(Note: original query returned no results; tried simplified query.)';
             }
           }
-        } catch (e) {
-          logger.warn('DuckDuckGo search failed', { error: e.message });
+          return `No search results found for: "${query}". Try rephrasing your search.`;
         }
 
-        // ===== STRATEGY 3: Google News RSS as fallback for ALL queries =====
-        try {
-          const rssUrl = 'https://news.google.com/rss/search?q=' + encodeURIComponent(searchQuery) + '&hl=en-US&gl=US&ceid=US:en';
-          const rssResponse = await fetch(rssUrl, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MAX-Agent/2.0)' }
-          });
-          if (rssResponse.ok) {
-            const xml = await rssResponse.text();
-            const results = [];
-            const itemRegex = /<item>([\s\S]*?)<\/item>/g;
-            let match;
-            while ((match = itemRegex.exec(xml)) !== null && results.length < 8) {
-              const item = match[1];
-              const title = item.match(/<title>(.*?)<\/title>/);
-              const link = item.match(/<link>(.*?)<\/link>/);
-              if (title) {
-                results.push({
-                  title: title[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'),
-                  url: link ? link[1] : '',
-                  snippet: ''
-                });
-              }
-            }
-            if (results.length > 0) {
-              let output = `Search results for "${query}" (${results.length} found):\n\n`;
-              output += results.map((r, i) => `[${i + 1}] ${r.title}\n    URL: ${r.url}`).join('\n\n');
-              return output;
-            }
-          }
-        } catch (e) {
-          logger.warn('Google News fallback failed', { error: e.message });
-        }
-
-        return `No search results found for: "${query}". Try rephrasing your search.`;
+        return formatSearchResults(query, results);
       } catch (err) {
         logger.error('web_search failed', { error: err.message });
         return `Error: web search failed: ${err.message}`;
@@ -629,6 +484,218 @@ for (const [name, tool] of Object.entries(browserTools)) {
 // Merge memory tools into TOOLS
 for (const [name, tool] of Object.entries(memoryTools)) {
   TOOLS[name] = tool;
+}
+
+// ============================================================================
+// WEB SEARCH HELPERS — Google News RSS + DuckDuckGo, with auto-retry
+// ============================================================================
+
+/**
+ * Simplify a search query for the retry attempt.
+ * Removes filler words and shortens the query.
+ */
+function simplifyQuery(query) {
+  return query
+    .replace(/\b(please|can you|could you|would you|i want to|i need to|find me|search for|look up|google)\b/gi, '')
+    .replace(/\b(today|now|current|latest|recent)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .substring(0, 100);
+}
+
+/**
+ * Perform a web search using multiple strategies:
+ *   1. Google News RSS (always works, no rate limit) — for news queries
+ *   2. DuckDuckGo Lite — for general queries
+ *   3. Google News RSS as fallback — for any query
+ * Returns array of { title, url, snippet, source }.
+ */
+async function performWebSearch(query) {
+  const isNewsQuery = /\b(news|today|latest|current|happening|breaking)\b/i.test(query);
+  const searchQuery = isNewsQuery ? query + ' news' : query;
+
+  // ===== STRATEGY 1: Google News RSS (for news queries) =====
+  if (isNewsQuery) {
+    try {
+      const rssUrl = 'https://news.google.com/rss/search?q=' + encodeURIComponent(searchQuery) + '&hl=en-US&gl=US&ceid=US:en';
+      const rssResponse = await fetch(rssUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MAX-Agent/2.0)' }
+      });
+      if (rssResponse.ok) {
+        const xml = await rssResponse.text();
+        const results = [];
+        const itemRegex = /<item>([\s\S]*?)<\/item>/g;
+        let match;
+        while ((match = itemRegex.exec(xml)) !== null && results.length < 8) {
+          const item = match[1];
+          const title = item.match(/<title>(.*?)<\/title>/);
+          const link = item.match(/<link>(.*?)<\/link>/);
+          const pubDate = item.match(/<pubDate>(.*?)<\/pubDate>/);
+          const source = item.match(/<source[^>]*>(.*?)<\/source>/);
+          if (title) {
+            results.push({
+              title: title[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&#39;/g, "'"),
+              url: link ? link[1] : '',
+              snippet: (source ? source[1] + ' — ' : '') + (pubDate ? pubDate[1] : ''),
+              source: source ? source[1] : 'Google News',
+              date: pubDate ? pubDate[1] : ''
+            });
+          }
+        }
+        if (results.length > 0) return results;
+      }
+    } catch (e) {
+      logger.warn('Google News RSS failed', { error: e.message });
+    }
+  }
+
+  // ===== STRATEGY 2: DuckDuckGo Lite =====
+  try {
+    const ddgUrl = 'https://lite.duckduckgo.com/lite/?q=' + encodeURIComponent(searchQuery);
+    const ddgResponse = await fetch(ddgUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html',
+        'Accept-Language': 'en-US,en;q=0.9'
+      }
+    });
+    if (ddgResponse.ok) {
+      const html = await ddgResponse.text();
+      const results = [];
+      const linkRegex = /<a[^>]*rel="nofollow"[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/gs;
+      let match;
+      while ((match = linkRegex.exec(html)) !== null && results.length < 8) {
+        let href = match[1];
+        const uddg = href.match(/uddg=([^&]+)/);
+        if (uddg) href = decodeURIComponent(uddg[1]);
+        const title = match[2].replace(/<[^>]+>/g, '').trim();
+        if (title.length > 5 && href.startsWith('http')) {
+          results.push({ title, url: href, snippet: '', source: 'DuckDuckGo' });
+        }
+      }
+      if (results.length > 0) return results;
+    }
+  } catch (e) {
+    logger.warn('DuckDuckGo search failed', { error: e.message });
+  }
+
+  // ===== STRATEGY 3: Google News RSS as fallback for ALL queries =====
+  try {
+    const rssUrl = 'https://news.google.com/rss/search?q=' + encodeURIComponent(searchQuery) + '&hl=en-US&gl=US&ceid=US:en';
+    const rssResponse = await fetch(rssUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MAX-Agent/2.0)' }
+    });
+    if (rssResponse.ok) {
+      const xml = await rssResponse.text();
+      const results = [];
+      const itemRegex = /<item>([\s\S]*?)<\/item>/g;
+      let match;
+      while ((match = itemRegex.exec(xml)) !== null && results.length < 8) {
+        const item = match[1];
+        const title = item.match(/<title>(.*?)<\/title>/);
+        const link = item.match(/<link>(.*?)<\/link>/);
+        if (title) {
+          results.push({
+            title: title[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&#39;/g, "'"),
+            url: link ? link[1] : '',
+            snippet: '',
+            source: 'Google News'
+          });
+        }
+      }
+      if (results.length > 0) return results;
+    }
+  } catch (e) {
+    logger.warn('Google News fallback failed', { error: e.message });
+  }
+
+  return [];
+}
+
+/**
+ * Format search results with explicit [1], [2] citation markers.
+ * Tells the agent to cite sources in its final answer.
+ */
+function formatSearchResults(query, results) {
+  let output = `Search results for "${query}" (${results.length} found):\n\n`;
+  output += results.map((r, i) =>
+    `[${i + 1}] ${r.title}\n` +
+    `    Source: ${r.source || 'web'}${r.date ? ' — ' + r.date : ''}\n` +
+    `    URL: ${r.url}\n` +
+    (r.snippet ? `    ${r.snippet.substring(0, 250)}` : '')
+  ).join('\n\n');
+
+  output += '\n\nIMPORTANT: When you respond, cite sources using [1], [2], etc. and include the URLs.';
+  return output;
+}
+
+/**
+ * Readability extraction — pulls main article text from HTML.
+ * Removes scripts, styles, nav, footer, ads. Extracts title, byline, content.
+ * This is a simplified version of Mozilla's Readability algorithm.
+ */
+function extractReadable(html, sourceUrl) {
+  try {
+    // Remove scripts, styles, and other non-content tags
+    let cleaned = html
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<nav[\s\S]*?<\/nav>/gi, '')
+      .replace(/<footer[\s\S]*?<\/footer>/gi, '')
+      .replace(/<header[\s\S]*?<\/header>/gi, '')
+      .replace(/<aside[\s\S]*?<\/aside>/gi, '')
+      .replace(/<form[\s\S]*?<\/form>/gi, '')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/<noscript[\s\S]*?<\/noscript>/gi, '');
+
+    // Extract title
+    const titleMatch = cleaned.match(/<title[^>]*>([^<]+)<\/title>/i);
+    const title = titleMatch ? titleMatch[1].trim() : '';
+
+    // Try to find article body — common patterns
+    const articleMatch =
+      cleaned.match(/<article[\s\S]*?<\/article>/i) ||
+      cleaned.match(/<main[\s\S]*?<\/main>/i) ||
+      cleaned.match(/<div[^>]*class="[^"]*(?:content|article|post|entry|story|body)[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
+
+    const body = articleMatch ? articleMatch[0] : cleaned;
+
+    // Convert to text with paragraph breaks
+    const text = body
+      .replace(/<\/?(p|div|section|article|h[1-6]|li|ul|ol|blockquote|pre|br)[^>]*>/gi, '\n')
+      .replace(/<[^>]+>/g, ' ') // Strip remaining tags
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&#39;/g, "'")
+      .replace(/&quot;/g, '"')
+      .replace(/\n{3,}/g, '\n\n')
+      .replace(/[ \t]+/g, ' ')
+      .trim();
+
+    // If the result is too short, fall back to full page text
+    if (text.length < 200) {
+      const fallback = html
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return `Title: ${title}\nURL: ${sourceUrl}\n\n${fallback.substring(0, 8000)}`;
+    }
+
+    return `Title: ${title}\nURL: ${sourceUrl}\n\n${text.substring(0, 8000)}`;
+  } catch (e) {
+    // Fallback: simple tag strip
+    return html
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .substring(0, 8000);
+  }
 }
 
 // ============================================================================
@@ -784,6 +851,109 @@ TOOLS.knowledge_list = {
 };
 
 // ============================================================================
+// UPLOADED FILE READER — lets the agent read files the user uploaded
+// ============================================================================
+
+TOOLS.read_upload = {
+  name: 'read_upload',
+  description: 'Read a file that the user uploaded. The user message will tell you which files they uploaded (by name). Use this tool to read the content of any uploaded file (text, code, CSV, JSON, etc.). The filename should match what the user told you they uploaded.',
+  params: {
+    filename: 'string (required) — the name of the uploaded file to read'
+  },
+  execute: async (args, ctx = {}) => {
+    const filename = args.filename;
+    if (!filename) return 'Error: filename is required';
+
+    const uploadsDir = path.resolve(SANDBOX, 'uploads');
+    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_').substring(0, 200);
+    const fullPath = path.join(uploadsDir, safeName);
+
+    if (!fs.existsSync(fullPath)) {
+      // Try to find it case-insensitively
+      try {
+        const entries = fs.readdirSync(uploadsDir);
+        const match = entries.find(e => e.toLowerCase() === safeName.toLowerCase());
+        if (match) {
+          return await readUploadFileSafe(path.join(uploadsDir, match));
+        }
+      } catch (e) {}
+      return `Error: uploaded file "${filename}" not found. Available files: ${listUploads().join(', ') || 'none'}`;
+    }
+
+    return await readUploadFileSafe(fullPath);
+  }
+};
+
+function listUploads() {
+  // Lazy-load UPLOADS_DIR to avoid circular import at module load
+  try {
+    const uploadsDir = path.resolve(SANDBOX, 'uploads');
+    return fs.readdirSync(uploadsDir).filter(f => !f.startsWith('.'));
+  } catch (e) {
+    return [];
+  }
+}
+
+async function readUploadFileSafe(fullPath) {
+  const filename = path.basename(fullPath);
+  const stat = fs.statSync(fullPath);
+
+  if (stat.size > 20 * 1024 * 1024) {
+    return `File "${filename}" is too large (${(stat.size / 1024 / 1024).toFixed(1)}MB). Max readable size is 20MB.`;
+  }
+
+  // Inline checks to avoid circular import
+  const ext = path.extname(filename).toLowerCase();
+  const textExts = new Set([
+    '.txt', '.md', '.markdown', '.log', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs',
+    '.py', '.rb', '.go', '.rs', '.java', '.c', '.cpp', '.h', '.cs', '.php', '.swift',
+    '.kt', '.lua', '.pl', '.html', '.htm', '.css', '.scss', '.json', '.yaml', '.yml',
+    '.toml', '.ini', '.cfg', '.conf', '.sh', '.bash', '.zsh', '.ps1', '.bat', '.cmd',
+    '.sql', '.graphql', '.xml', '.svg', '.csv', '.tsv', '.env', '.vue', '.svelte', '.astro'
+  ]);
+  const isText = textExts.has(ext) || ['dockerfile', 'makefile', 'gemfile', 'rakefile', 'license', 'readme'].includes(filename.toLowerCase());
+  const isImage = /\.(png|jpe?g|gif|webp|bmp|tiff?)$/i.test(filename);
+  const isPdf = ext === '.pdf';
+
+  if (isText) {
+    const content = fs.readFileSync(fullPath, 'utf-8');
+    const truncated = content.length > 50000
+      ? content.substring(0, 50000) + `\n... (truncated, ${content.length - 50000} more chars)`
+      : content;
+    return `=== Uploaded file: ${filename} (${stat.size} bytes) ===\n\n${truncated}`;
+  }
+
+  if (isImage) {
+    // Return base64 for vision-capable LLMs
+    const buffer = fs.readFileSync(fullPath);
+    const mimeMap = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
+    const mime = mimeMap[ext.slice(1)] || 'image/png';
+    const base64 = buffer.toString('base64');
+    return `data:${mime};base64,${base64}`;
+  }
+
+  if (isPdf) {
+    // Try to extract text from PDF using pdftotext (if available)
+    try {
+      const result = execSync(`pdftotext "${fullPath}" - 2>/dev/null`, {
+        encoding: 'utf-8',
+        timeout: 15000,
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+      if (result && result.trim().length > 0) {
+        return `=== PDF: ${filename} (extracted text) ===\n\n${result.substring(0, 50000)}`;
+      }
+    } catch (e) {
+      // pdftotext not available
+    }
+    return `PDF file "${filename}" uploaded but text extraction is not available. Tell the user to copy-paste the relevant content.`;
+  }
+
+  // Binary file we can't read as text
+  return `Binary file "${filename}" uploaded (${stat.size} bytes, type unknown). I cannot read binary files directly. If this is a code/text file, ask the user to rename it with a proper extension.`;
+}
+
+// ============================================================================
 // TOOL EXECUTION
 // ============================================================================
 
@@ -824,7 +994,21 @@ export async function executeTool(toolName, args, ctx = {}) {
     logger.warn('Connector tool dispatch failed', { tool: toolName, error: e.message });
   }
 
-  return `Error: unknown tool "${toolName}". Available tools: ${Object.keys(TOOLS).join(', ')}, plus connector tools (github_*, supabase_*, gmail_*, calendar_*, drive_*)`;
+  // 3. Try sandboxed code execution
+  if (toolName === 'run_code') {
+    try {
+      const { executeSandboxed } = await import('../../api/routes/sandbox.js');
+      const result = await executeSandboxed(args.code, args.language || 'javascript', {
+        timeoutMs: parseInt(args.timeoutMs || '10000', 10),
+        allowNetwork: args.allowNetwork === true || args.allowNetwork === 'true'
+      });
+      return `Exit code: ${result.exitCode}${result.timedOut ? ' (timed out)' : ''}\nDuration: ${result.durationMs}ms\n\n--- stdout ---\n${result.stdout}\n\n--- stderr ---\n${result.stderr}`;
+    } catch (e) {
+      return `Error running code: ${e.message}`;
+    }
+  }
+
+  return `Error: unknown tool "${toolName}". Available tools: ${Object.keys(TOOLS).join(', ')}, plus connector tools (github_*, supabase_*, gmail_*, calendar_*, drive_*), run_code`;
 }
 
 /**

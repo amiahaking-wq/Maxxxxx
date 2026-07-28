@@ -1,12 +1,46 @@
-// Service Worker for MAX — push notifications + background sync
-const CACHE_NAME = 'max-agent-v2';
+// Service Worker for MAX — push notifications + background sync + offline shell
+const CACHE_NAME = 'max-agent-v3';
+const APP_SHELL = [
+  '/',
+  '/index.html',
+  '/manifest.json',
+  '/favicon.svg',
+  '/favicon-32x32.png',
+  '/icon-192x192.png',
+  '/icon-512x512.png',
+  '/apple-touch-icon.png'
+];
 
 self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL).catch(() => {}))
+  );
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(clients.claim());
+  event.waitUntil(
+    caches.keys().then(keys =>
+      Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
+    ).then(() => clients.claim())
+  );
+});
+
+// ===== FETCH — network-first for API, cache-first for app shell =====
+self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+
+  // Don't intercept API calls or WebSocket upgrades
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/socket.io/')) {
+    return;
+  }
+
+  // Cache-first for static assets
+  if (event.request.method === 'GET' && APP_SHELL.includes(url.pathname)) {
+    event.respondWith(
+      caches.match(event.request).then(cached => cached || fetch(event.request))
+    );
+  }
 });
 
 // ===== PUSH NOTIFICATIONS =====
@@ -20,14 +54,16 @@ self.addEventListener('push', (event) => {
 
   const options = {
     body: data.body,
-    icon: '/favicon.svg',
-    badge: '/favicon.svg',
+    icon: '/icon-192x192.png',
+    badge: '/icon-192x192.png',
     vibrate: [100, 50, 100],
     data: { url: data.url || '/' },
     actions: [
       { action: 'open', title: 'Open' },
       { action: 'close', title: 'Close' }
-    ]
+    ],
+    tag: data.tag || 'max-notification',
+    renotify: !!data.renotify
   };
 
   event.waitUntil(
@@ -86,8 +122,8 @@ async function syncMessages() {
       // Show notification for new messages
       self.registration.showNotification('MAX', {
         body: lastMsg.content?.substring(0, 100) || 'New message',
-        icon: '/favicon.svg',
-        badge: '/favicon.svg',
+        icon: '/icon-192x192.png',
+        badge: '/icon-192x192.png',
         vibrate: [100, 50, 100],
         data: { url: '/' }
       });

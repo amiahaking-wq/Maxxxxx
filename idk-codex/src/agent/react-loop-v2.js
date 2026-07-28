@@ -20,6 +20,7 @@ import { addConversationMessage, createConversation } from '../database/conversa
 import { condenseMessages } from './condenser.js';
 import { uploadToSupabase, isSupabaseConfigured } from './supabase-storage.js';
 import { permissionGuard } from '../security/permission-guard.js';
+import { syncVaultToEnv } from '../security/vault-env-bridge.js';
 import logger from '../utils/logger.js';
 
 const MAX_ITERATIONS = parseInt(process.env.MAX_AGENT_ITERATIONS || '15', 10);
@@ -340,6 +341,20 @@ const FUNCTION_TOOLS = [
       description: 'List all documents in the knowledge base',
       parameters: { type: 'object', properties: {} }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_upload',
+      description: 'Read a file that the user uploaded. Use this when the user mentions they attached or uploaded a file. The user message will tell you the filename.',
+      parameters: {
+        type: 'object',
+        properties: {
+          filename: { type: 'string', description: 'Name of the uploaded file to read' }
+        },
+        required: ['filename']
+      }
+    }
   }
 ];
 
@@ -348,47 +363,66 @@ const FUNCTION_TOOLS = [
 // ============================================================================
 
 function buildSystemPrompt(workspacePath) {
-  return `You are MAX, an autonomous software engineer. Complete the task fully using the available tools.
+  return `You are MAX, an elite autonomous software engineer. You complete tasks fully using the available tools. You are model-agnostic — your harness (this prompt + tool layer) makes ANY underlying LLM behave like a top-tier coding agent.
 
 You work in: ${workspacePath}
 
 CORE PRINCIPLE: Use tools to DO things, not just describe them. You have access to real tools — use them whenever they would help, the way a human developer would.
 
-WHEN TO USE WHICH TOOL (smart tool selection):
+WHEN TO USE WHICH TOOL (smart tool selection — like Claude Code / Cursor):
 - bash → Run shell commands: install packages, run tests, build code, git operations, check files. Use this for ANY system operation.
-- write_file → Create new files or overwrite existing ones. Always write COMPLETE, working code — no placeholders.
-- read_file → Read a file before editing it.
-- edit_file → Make small targeted changes to an existing file.
+- write_file → Create new files or overwrite existing ones. Always write COMPLETE, working code — no placeholders, no TODOs, no "rest of code here".
+- read_file → Read a file before editing it. Always read first.
+- edit_file → Make small targeted changes to an existing file. Faster than rewriting.
 - list_files → See what's in a directory before working.
 - search → Find text across files (grep) or find files by name.
 - web_search → Search the web. Returns titles, URLs, snippets. Use FIRST for any web question.
 - web_fetch → Fetch a specific URL. Use after web_search to get full articles.
+- read_upload → Read a file the user attached to their message. Use this when they mention uploading something.
 - browser_* → For websites needing JavaScript or interaction.
-- memory_save / memory_get → Remember facts about the user.
+- memory_save / memory_get → Remember facts about the user across sessions.
 - knowledge_add / knowledge_search → Save and search business knowledge.
 - credential_save / credential_get → Store and retrieve passwords (encrypted). NEVER print passwords.
 
-CRITICAL RULES:
-1. NEVER say "I can't do X" — you HAVE tools. USE THEM.
-2. When the user asks you to "send as a file" or "show as artifact" — use write_file to create the file. The system automatically shows it as a clickable preview card.
-3. After writing files, run them via bash to verify they work.
-4. If a tool fails, read the error message, fix the issue, and RETRY. Never give up after one failure.
-5. When searching the web, ALWAYS cite your sources with [1], [2] etc. and include the URLs.
-6. If web_search returns no useful results, try a DIFFERENT query. Don't just say "I couldn't find it" — try at least 2 different search queries before giving up.
-7. When done, call task_complete with a clear summary of what was accomplished.
-8. Keep text responses short. Let tool calls do the work.
-9. When creating files, give them descriptive names (not file_0.txt).
+CRITICAL RULES (HARD CONSTRAINTS — VIOLATION = FAILURE):
+1. NEVER say "I can't do X" — you HAVE tools. USE THEM. If a tool fails, try a DIFFERENT tool or approach. NEVER give up after one failure.
+2. NEVER say "I can't send files" or "I can't show files" — use write_file to create the file. The system automatically shows it as a clickable preview card. HTML files render live.
+3. NEVER say "I would do X" — DO X. Use the tools to actually do it.
+4. NEVER paste large code blocks in your text response. If you wrote it with write_file, just say "I created X" — the artifact card will appear automatically.
+5. NEVER respond with just a description of what you would do — ALWAYS DO IT with tools.
+6. If a tool returns an error, read the error message CAREFULLY, fix the issue, and RETRY. Most failures are fixable on retry.
+7. When searching the web, ALWAYS cite your sources with [1], [2] etc. and include the URLs in your final answer.
+8. If web_search returns no useful results, try a DIFFERENT query. Don't just say "I couldn't find it" — try at least 2 different search queries before giving up.
+9. When the user uploads a file, use read_upload to actually READ it before responding. Don't guess what's in it.
+10. When done, call task_complete with a clear summary of what was accomplished.
+11. Keep text responses SHORT. Let tool calls do the work. Maximum 2-3 sentences between tool calls.
+12. When creating files, give them descriptive names (not file_0.txt).
+13. After writing files, run them via bash to verify they work. If verification fails, FIX the file.
+
+ARTIFACT RULES (CRITICAL — THIS IS HOW YOU "SEND FILES"):
+- Every file you create with write_file is AUTOMATICALLY shown as a clickable preview card in the chat.
+- HTML files render live (the user can interact with them in the chat).
+- When the user asks to "preview", "show", "send as a file", "send as an artifact", or "give me the file" — use write_file to create or re-create the file.
+- DO NOT paste code in your text response if you've already created it as a file. Just say "I created X" and the card will appear.
+- If the user asks for "the script" or "the code" or "the file" — create it as a file, don't paste it.
 
 SECURITY RULES:
 - NEVER include passwords or API keys in your text response.
 - For destructive actions, you will be asked to confirm — this is normal.
 - Never exfiltrate data or perform actions the user did not request.
 
-ARTIFACT RULES:
-- Every file you create with write_file is automatically shown as a clickable preview card in the chat.
-- HTML files render live (the user can interact with them).
-- When the user asks to "preview", "show", or "send as a file" — use write_file to create or re-create the file.
-- Do NOT paste code in your text response if you've already created it as a file. Just say "I created X" and the card will appear.`;
+AUTONOMOUS BEHAVIOR (be like Claude Code):
+- Make decisions. Don't ask "should I do X?" — just do X if it's reasonable.
+- After every tool call, evaluate the result. If it failed, fix it. If it succeeded, decide the next step.
+- Don't stop until the task is ACTUALLY done. "Done" means the user can use what you built.
+- If you're not sure how to do something, search the web for documentation, then do it.
+- Prefer simple, working solutions over clever, fragile ones.
+
+EFFICIENCY RULES:
+- Don't read the same file twice in one session — remember what you read.
+- Don't write the same file twice in one session unless fixing an error.
+- If a tool returns a long output, scan it for the relevant part — don't re-fetch.
+- When doing multi-step tasks, batch related operations (e.g. create all files first, then test).`;
 }
 
 /**
@@ -403,13 +437,15 @@ function buildReActSystemPrompt(workspacePath) {
     return `- ${t.function.name}: ${t.function.description}\n  Params: ${params}`;
   }).join('\n');
 
-  return `You are MAX, an autonomous software engineer. Complete tasks by using tools.
+  return `You are MAX, an elite autonomous software engineer. You complete tasks by using tools.
 
 You work in: ${workspacePath}
 
+You are model-agnostic — your harness (this prompt + tool layer) makes ANY underlying LLM behave like a top-tier coding agent.
+
 You MUST use tools in this EXACT text format:
 
-THOUGHT: (your reasoning about what to do next)
+THOUGHT: (your reasoning about what to do next — keep it 1-2 sentences)
 ACTION: tool_name_here
 INPUT: {"param": "value"}
 
@@ -420,14 +456,19 @@ When the task is fully complete, use:
 ACTION: task_complete
 INPUT: {"summary": "what was accomplished"}
 
-RULES:
+CRITICAL RULES (HARD CONSTRAINTS):
 - Always write THOUGHT before ACTION
 - Always provide valid JSON in INPUT
 - Never just describe what you would do — actually DO it by calling tools
 - After writing files, run bash to verify
 - If a tool fails, read the error and try a different approach
 - NEVER say "I can't" — you have tools, USE THEM
-- Keep THOUGHT brief (1-2 sentences)`;
+- NEVER say "I can't send files" — use write_file, the system shows it as a card automatically
+- NEVER paste code in your text response if you've already written it as a file
+- Keep THOUGHT brief (1-2 sentences)
+- When searching the web, ALWAYS cite sources with [1], [2] etc. and include URLs
+- If a web_search returns no useful results, try a DIFFERENT query (at least 2 attempts)
+- When the user uploads a file, use read_upload to actually READ it before responding`;
 }
 
 /**
@@ -563,6 +604,81 @@ async function waitForConfirmation(confirmationId, timeoutMs) {
     await new Promise(resolve => setTimeout(resolve, pollInterval));
   }
   return false; // timed out
+}
+
+// ============================================================================
+// HELPER: EXECUTE TOOL WITH RETRY (Feature #5 — Error Recovery)
+// ============================================================================
+
+/**
+ * Execute a tool with automatic retry on transient failures.
+ * - Retries up to 2 times (3 total attempts) for network/timing errors
+ * - Does NOT retry for: BLOCKED, PERMISSION DENIED, "not found", or "Error:" prefix in result
+ * - Logs each retry
+ */
+async function executeToolWithRetry(toolName, args, ctx, maxRetries = 2) {
+  let lastError = null;
+  let lastResult = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await executeTool(toolName, args, ctx);
+      lastResult = result;
+
+      // Check if the result indicates a transient error that's worth retrying
+      if (typeof result === 'string' && result.startsWith('Error:')) {
+        const isTransient = isTransientError(result);
+        const isNotFound = /not found|does not exist|no such file|cannot find/i.test(result);
+        const isBlocked = /BLOCKED|PERMISSION DENIED/i.test(result);
+
+        if (isBlocked || isNotFound) {
+          // Don't retry these — let the LLM see the error and decide
+          return result;
+        }
+
+        if (isTransient && attempt < maxRetries) {
+          logger.warn('TOOL_TRANSIENT_ERROR_RETRY', {
+            tool: toolName, attempt: attempt + 1, maxRetries,
+            error: result.substring(0, 200)
+          });
+          // Brief backoff before retry
+          await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+          continue;
+        }
+      }
+
+      return result;
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxRetries) {
+        logger.warn('TOOL_EXCEPTION_RETRY', {
+          tool: toolName, attempt: attempt + 1, maxRetries,
+          error: err.message
+        });
+        await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+        continue;
+      }
+      // Final attempt failed — return error string
+      return `Error executing ${toolName}: ${err.message}`;
+    }
+  }
+
+  return lastResult || (lastError ? `Error: ${lastError.message}` : 'Unknown error');
+}
+
+/**
+ * Check if an error message looks transient (worth retrying).
+ */
+function isTransientError(errorMsg) {
+  const transientPatterns = [
+    /ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN/i,
+    /socket hang up|network error|fetch failed/i,
+    /timeout|timed out/i,
+    /429|rate limit|too many requests/i,
+    /503|502|500|service unavailable|bad gateway/i,
+    /aborted/i
+  ];
+  return transientPatterns.some(p => p.test(errorMsg));
 }
 
 // ============================================================================
@@ -769,6 +885,9 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
 
   logger.info('REACT_LOOP_START', { task: task.substring(0, 100), sessionId, userId: effectiveUserId });
 
+  // Sync vault credentials to env so connector tools can use them
+  try { syncVaultToEnv(effectiveUserId); } catch (e) { /* non-fatal */ }
+
   // ===== PRE-SEARCH STEP =====
   // If the task is a web search request, execute web_search BEFORE the ReAct
   // loop, auto-fetch the top 2 results for full content, and inject everything
@@ -791,7 +910,7 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
       broadcastProgress(sessionId, { phase: 'react', status: 'searching_web', iteration: 0, query: searchQuery, tool: 'web_search' });
 
       // Step 1: Execute web_search
-      const searchResult = await executeTool('web_search', { query: searchQuery }, { userId: effectiveUserId, sessionId });
+      const searchResult = await executeToolWithRetry('web_search', { query: searchQuery }, { userId: effectiveUserId, sessionId });
 
       if (searchResult && !searchResult.startsWith('Error:') && !searchResult.startsWith('No search results')) {
         logger.info('PRE_SEARCH_SUCCESS', { sessionId, resultLength: searchResult.length });
@@ -809,7 +928,7 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
           broadcastProgress(sessionId, { phase: 'react', status: 'fetching_results', iteration: 0, tool: 'web_fetch', count: urls.length });
           for (let i = 0; i < Math.min(urls.length, 2); i++) {
             try {
-              const fetchResult = await executeTool('web_fetch', { url: urls[i] }, { userId: effectiveUserId, sessionId });
+              const fetchResult = await executeToolWithRetry('web_fetch', { url: urls[i] }, { userId: effectiveUserId, sessionId });
               if (fetchResult && !fetchResult.startsWith('Error:')) {
                 fetchedContent += `\n\n--- Article ${i + 1}: ${urls[i]} ---\n${fetchResult.substring(0, 3000)}\n`;
               }
@@ -994,8 +1113,8 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
                 wasDestructive: true, requiredConfirmation: true, userConfirmed: false
               });
             } else {
-              // User confirmed — execute the tool
-              toolResult = await executeTool(toolName, toolArgs, { userId: effectiveUserId, sessionId });
+              // User confirmed — execute the tool (with retry on transient errors)
+              toolResult = await executeToolWithRetry(toolName, toolArgs, { userId: effectiveUserId, sessionId });
               permissionGuard.logAction(effectiveUserId, sessionId, toolName, toolArgs, toolResult, {
                 wasDestructive: true, requiredConfirmation: true, userConfirmed: true
               });
@@ -1005,8 +1124,8 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
             toolResult = `PERMISSION DENIED: ${check.reason}`;
             permissionGuard.logAction(effectiveUserId, sessionId, toolName, toolArgs, toolResult);
           } else {
-            // Allowed — execute normally
-            toolResult = await executeTool(toolName, toolArgs, { userId: effectiveUserId, sessionId });
+            // Allowed — execute normally (with retry on transient errors)
+            toolResult = await executeToolWithRetry(toolName, toolArgs, { userId: effectiveUserId, sessionId });
             permissionGuard.logAction(effectiveUserId, sessionId, toolName, toolArgs, toolResult, {
               wasDestructive: false
             });
@@ -1097,7 +1216,7 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
             });
             const confirmed = await waitForConfirmation(confirmationId, 120000);
             if (confirmed) {
-              toolResult = await executeTool(tc.name, tc.args, { userId: effectiveUserId, sessionId });
+              toolResult = await executeToolWithRetry(tc.name, tc.args, { userId: effectiveUserId, sessionId });
               permissionGuard.logAction(effectiveUserId, sessionId, tc.name, tc.args, toolResult, { wasDestructive: true, requiredConfirmation: true, userConfirmed: true });
             } else {
               toolResult = 'User did not confirm. Skipping.';
@@ -1106,7 +1225,7 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
           } else if (!check.allowed) {
             toolResult = `PERMISSION DENIED: ${check.reason}`;
           } else {
-            toolResult = await executeTool(tc.name, tc.args, { userId: effectiveUserId, sessionId });
+            toolResult = await executeToolWithRetry(tc.name, tc.args, { userId: effectiveUserId, sessionId });
             permissionGuard.logAction(effectiveUserId, sessionId, tc.name, tc.args, toolResult);
           }
         } catch (permErr) {
@@ -1192,7 +1311,7 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
   try {
     await addConversationMessage(sessionId, 'assistant', finalSummary, {
       type: 'task_complete', iterations: iteration, filesModified: Array.from(filesModified)
-    });
+    }, { userId: effectiveUserId, platform: 'telegram' });
   } catch (e) {
     logger.warn('Failed to save summary', { error: e.message });
   }

@@ -19,6 +19,7 @@ import { executeReActLoop } from '../agent/react-loop-v2.js';
 import { generateCompletion } from '../groq/client.js';
 import { getModelOptions, getModelById, getDefaultModel } from '../llm/model-registry.js';
 import { Markup } from 'telegraf';
+import { tgEditMessage, tgSendLong, tgReply, escapeHtml } from './tg-safe-send.js';
 
 // ============================================================================
 // INTENT DETECTION
@@ -395,12 +396,9 @@ The user's Telegram user ID is ${userId}. Be casual and friendly.`
         // Telegram message limit is 4096 chars
         const displayText = text.length > 4000 ? text.substring(0, 4000) + '...' : text;
         if (displayText !== lastEditText && displayText.length > 0) {
-          await ctx.telegram.editMessageText(
-            ctx.chat.id,
-            sentMsg.message_id,
-            null,
-            displayText
-          );
+          // PLAIN TEXT — never use parse_mode for streaming LLM output.
+          // The LLM may emit *, _, [, ], etc. which break Telegram's Markdown parser.
+          await tgEditMessage(ctx, ctx.chat.id, sentMsg.message_id, displayText, {}, false);
           lastEditText = displayText;
         }
       } catch (e) {
@@ -497,20 +495,21 @@ The user's Telegram user ID is ${userId}. Be casual and friendly.`
 
     await addMessage(sessionId, 'assistant', response);
 
-    // Final edit with complete response (handles >4096 chars by splitting)
+    // Final edit with complete response — uses safe-sender (no parse_mode) so
+    // special characters like *, _, [ never break Telegram's parser.
     try {
       if (response.length > 4000) {
         // Edit first message with first chunk, then send remaining chunks
-        await ctx.telegram.editMessageText(ctx.chat.id, sentMsg.message_id, null, response.substring(0, 4000));
+        await tgEditMessage(ctx, ctx.chat.id, sentMsg.message_id, response.substring(0, 4000), {}, false);
         for (let i = 4000; i < response.length; i += 4000) {
-          await ctx.reply(response.substring(i, i + 4000));
+          await tgReply(ctx, response.substring(i, i + 4000), {}, false);
         }
       } else {
-        await ctx.telegram.editMessageText(ctx.chat.id, sentMsg.message_id, null, response);
+        await tgEditMessage(ctx, ctx.chat.id, sentMsg.message_id, response, {}, false);
       }
     } catch (e) {
       // If edit fails (e.g. message too old), just send a new message
-      await ctx.reply(response);
+      await tgSendLong(ctx, response, {}, false);
     }
   } catch (err) {
     logger.error('CHAT_FAILED', { userId, error: err.message, stack: err.stack });
@@ -663,10 +662,10 @@ async function handleTaskCommand(ctx, userId, text) {
     if (results?.filesModified?.length > 0) {
       summary += '\n\n📁 Files created:\n' + results.filesModified.map(f => '  • ' + f).join('\n');
     }
-    summary += '\n\n_' + (results.iterations || 0) + ' iterations_';
+    summary += '\n\n(' + (results.iterations || 0) + ' iterations)';
 
-    // Send the text summary (no Markdown to avoid parsing errors)
-    await ctx.reply(summary);
+    // Send the text summary — PLAIN TEXT (no parse_mode) so special chars don't break Telegram
+    await tgSendLong(ctx, summary, {}, false);
 
     // Send each created file as a Telegram document
     if (results?.filesModified?.length > 0) {
@@ -682,7 +681,7 @@ async function handleTaskCommand(ctx, userId, text) {
             if (stats.size < 10 * 1024 * 1024) { // 10MB limit
               await ctx.replyWithDocument({ source: fullPath, filename: filePath.split('/').pop() });
             } else {
-              await ctx.reply('📎 ' + filePath + ' (too large to send, ' + (stats.size / 1024 / 1024).toFixed(1) + 'MB)');
+              await tgReply(ctx, '📎 ' + filePath + ' (too large to send, ' + (stats.size / 1024 / 1024).toFixed(1) + 'MB)', {}, false);
             }
           }
         } catch (e) {
@@ -692,7 +691,7 @@ async function handleTaskCommand(ctx, userId, text) {
     }
   } catch (err) {
     logger.error('TASK_FAILED', { userId, task: taskText, error: err.message, stack: err.stack });
-    await ctx.reply('❌ Failed: ' + err.message);
+    await tgReply(ctx, '❌ Failed: ' + err.message, {}, false);
   }
 }
 

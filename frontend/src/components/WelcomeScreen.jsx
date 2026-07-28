@@ -1,9 +1,15 @@
 /**
  * WelcomeScreen — shown when no messages.
+ * Uses proactive suggestions from the backend (Feature #24) when available,
+ * falls back to static suggestions.
  */
+import { useEffect, useState } from 'react';
 import { Globe, Code, Bot, MessageSquare } from 'lucide-react';
+import { getAuthHeaders } from '../lib/auth.js';
 
-const SUGGESTIONS = [
+const API_BASE = import.meta.env.VITE_API_URL || window.location.origin;
+
+const FALLBACK_SUGGESTIONS = [
   { icon: Globe, title: 'Browse the web', subtitle: 'Research anything online', prompt: 'Search the web for the latest tech news' },
   { icon: Code, title: 'Write code', subtitle: 'Build apps, scripts, tools', prompt: 'Build a snake game in HTML that I can play' },
   { icon: Bot, title: 'Automate a task', subtitle: 'Let MAX do the work', prompt: 'Check the open issues in my GitHub repo' },
@@ -11,6 +17,27 @@ const SUGGESTIONS = [
 ];
 
 export default function WelcomeScreen({ onSuggestionClick }) {
+  const [suggestions, setSuggestions] = useState(FALLBACK_SUGGESTIONS);
+
+  useEffect(() => {
+    // Fetch proactive suggestions from backend
+    fetch(`${API_BASE}/api/suggestions`, { headers: getAuthHeaders() })
+      .then(r => r.json())
+      .then(data => {
+        if (data.suggestions && data.suggestions.length > 0) {
+          // Map backend suggestions to the format we need
+          const mapped = data.suggestions.map(s => ({
+            icon: s.icon === '🎮' ? Code : s.icon === '🔍' ? Globe : s.icon === '🔄' ? Bot : MessageSquare,
+            title: s.title,
+            subtitle: s.prompt?.substring(0, 50) + (s.prompt?.length > 50 ? '...' : ''),
+            prompt: s.prompt
+          }));
+          setSuggestions(mapped);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   return (
     <div className="flex flex-col items-center justify-center min-h-[60vh] px-4">
       {/* Logo */}
@@ -22,7 +49,7 @@ export default function WelcomeScreen({ onSuggestionClick }) {
 
       {/* Suggestion cards */}
       <div className="grid grid-cols-2 gap-2.5 w-full max-w-lg">
-        {SUGGESTIONS.map((s, i) => {
+        {suggestions.map((s, i) => {
           const Icon = s.icon;
           return (
             <button

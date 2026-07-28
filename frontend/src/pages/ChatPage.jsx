@@ -11,11 +11,12 @@
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { Menu, Folder } from 'lucide-react';
+import { Menu, Folder, Terminal as TerminalIcon, Globe } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useViewportHeight } from '../hooks/useViewportHeight';
 import { saveFile, downloadFile, listFiles } from '../lib/fileStore';
 import { getAuthHeaders } from '../lib/auth.js';
+import { t, getLang, setLang, getAvailableLanguages } from '../lib/i18n.js';
 import ArtifactCard from '../components/Artifact/ArtifactCard';
 import ArtifactPreview from '../components/Artifact/ArtifactPreview';
 import FilesPanel from '../components/Artifact/FilesPanel';
@@ -24,6 +25,7 @@ import SettingsPanel from '../components/SettingsPanel';
 import ChatMessage, { ToolCallCard } from '../components/ChatMessage';
 import ChatInput from '../components/ChatInput';
 import WelcomeScreen from '../components/WelcomeScreen';
+import Terminal from '../components/Terminal';
 
 const API_BASE = import.meta.env.VITE_API_URL || window.location.origin;
 
@@ -40,11 +42,14 @@ export default function ChatPage({ authToken, user, onLogout }) {
   const [showSidebar, setShowSidebar] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showFiles, setShowFiles] = useState(false);
+  const [showTerminal, setShowTerminal] = useState(false);
+  const [showLangMenu, setShowLangMenu] = useState(false);
   const [progress, setProgress] = useState(null);
   const [sessionFiles, setSessionFiles] = useState([]);
   const [previewFile, setPreviewFile] = useState(null);
   const [apiModels, setApiModels] = useState([]);
   const [currentModel, setCurrentModel] = useState(() => localStorage.getItem('max_model') || '');
+  const [currentLang, setCurrentLang] = useState(() => getLang());
   const messagesEndRef = useRef(null);
 
   const { connected, isReconnecting, token, message, progress: wsProgress, fileCreated } = useWebSocket(conversationId);
@@ -101,8 +106,8 @@ export default function ChatPage({ authToken, user, onLogout }) {
         try {
           new Notification('MAX', {
             body: message.content.substring(0, 100) + (message.content.length > 100 ? '...' : ''),
-            icon: '/favicon.svg',
-            badge: '/favicon.svg',
+            icon: '/icon-192x192.png',
+            badge: '/icon-192x192.png',
             tag: 'max-response'
           });
         } catch (e) {}
@@ -149,6 +154,13 @@ export default function ChatPage({ authToken, user, onLogout }) {
     }
   }, [currentModel, conversationId]);
 
+  // Listen for language changes
+  useEffect(() => {
+    const handler = () => setCurrentLang(getLang());
+    window.addEventListener('langchange', handler);
+    return () => window.removeEventListener('langchange', handler);
+  }, []);
+
   useEffect(() => { if (!sessionId) { createConversation(); } else { setConversationId(sessionId); loadConversation(sessionId); } }, [sessionId]);
 
   async function createConversation() {
@@ -158,16 +170,45 @@ export default function ChatPage({ authToken, user, onLogout }) {
     try { const r = await fetch(`${API_BASE}/api/conversations/${id}`, { headers: getAuthHeaders() }); const d = await r.json(); if (d.success && d.conversation) { setConversationId(id); setMessages((d.conversation.messages || []).map(m => ({ id: m.id || Date.now() + Math.random(), role: m.role, content: m.content, timestamp: m.created_at || m.timestamp || new Date().toISOString(), filesModified: m.metadata?.filesModified || [] }))); } } catch (e) {}
   }
 
-  const handleSend = async () => {
+  const handleSend = async (pendingFiles = []) => {
     if (!input.trim() || isStreaming || !conversationId) return;
     const text = input.trim();
-    setMessages(prev => [...prev, { id: Date.now(), role: 'user', content: text, timestamp: new Date().toISOString() }]);
+    setMessages(prev => [...prev, { id: Date.now(), role: 'user', content: text, timestamp: new Date().toISOString(), files: pendingFiles.map(f => ({ name: f.name, size: f.size })) }]);
     setInput(''); setIsStreaming(true); setStreamingText('');
+
     try {
+      // Upload any pending files first
+      let uploadedFiles = [];
+      if (pendingFiles.length > 0) {
+        for (const pf of pendingFiles) {
+          try {
+            const file = pf.file;
+            if (!file) continue;
+            const reader = new FileReader();
+            const base64 = await new Promise((resolve, reject) => {
+              reader.onload = () => resolve(reader.result.split(',')[1]);
+              reader.onerror = reject;
+              reader.readAsDataURL(file);
+            });
+            const uploadResp = await fetch(`${API_BASE}/api/upload`, {
+              method: 'POST',
+              headers: getAuthHeaders(),
+              body: JSON.stringify({ filename: pf.name, mimeType: pf.type, data: base64 })
+            });
+            if (uploadResp.ok) {
+              const d = await uploadResp.json();
+              uploadedFiles.push({ filename: d.filename, path: d.path, size: d.size, mimeType: d.mimeType });
+            }
+          } catch (uploadErr) {
+            console.error('Upload failed for', pf.name, uploadErr);
+          }
+        }
+      }
+
       const r = await fetch(`${API_BASE}/api/conversations/${conversationId}/messages`, {
         method: 'POST',
         headers: getAuthHeaders(),
-        body: JSON.stringify({ message: text })
+        body: JSON.stringify({ message: text, files: uploadedFiles })
       });
       if (!r.ok) {
         const errText = await r.text().catch(() => 'Unknown error');
@@ -185,6 +226,12 @@ export default function ChatPage({ authToken, user, onLogout }) {
   const handleOpenArtifact = useCallback((f) => { setPreviewFile({ ...f, sessionId: f.sessionId || conversationId, content: f.content || '' }); }, [conversationId]);
   const handleDownloadArtifact = useCallback(async (f) => { await downloadFile(f.sessionId || conversationId, f.path); }, [conversationId]);
 
+  const changeLanguage = (lang) => {
+    setLang(lang);
+    setCurrentLang(lang);
+    setShowLangMenu(false);
+  };
+
   return (
     <div className="flex bg-[#1a1a1a] text-[#ececec] overflow-hidden fixed inset-0" style={{ height: `${viewportHeight || window.innerHeight}px` }}>
       {/* Sidebar */}
@@ -200,7 +247,23 @@ export default function ChatPage({ authToken, user, onLogout }) {
             <select value={currentModel} onChange={(e) => setCurrentModel(e.target.value)} className="bg-[#212121] border border-[#2a2a2a] rounded-lg px-2 py-1 text-xs text-[#ccc] focus:outline-none max-w-[160px]">
               {apiModels.length === 0 ? <option>Loading...</option> : apiModels.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
             </select>
+            {/* Language selector */}
+            <div className="relative">
+              <button onClick={() => setShowLangMenu(!showLangMenu)} className="p-1.5 hover:bg-[#2a2a2a] rounded-lg text-[#999]" title="Language">
+                <Globe size={14} />
+              </button>
+              {showLangMenu && (
+                <div className="absolute right-0 top-full mt-1 bg-[#212121] border border-[#2a2a2a] rounded-lg py-1 z-50 min-w-[120px]" onClick={() => setShowLangMenu(false)}>
+                  {getAvailableLanguages().map(l => (
+                    <button key={l.code} onClick={() => changeLanguage(l.code)} className={`block w-full text-left px-3 py-1 text-xs ${currentLang === l.code ? 'text-[#FF6B35] bg-[#FF6B35]/10' : 'text-[#ccc] hover:bg-[#2a2a2a]'}`}>
+                      {l.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             {sessionFiles.length > 0 && <button onClick={() => setShowFiles(true)} className="relative p-1.5 hover:bg-[#2a2a2a] rounded-lg text-[#666]"><Folder size={15} /><span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-[#FF6B35] text-white text-[8px] rounded-full flex items-center justify-center font-bold">{sessionFiles.length > 9 ? '9+' : sessionFiles.length}</span></button>}
+            <button onClick={() => setShowTerminal(true)} className="p-1.5 hover:bg-[#2a2a2a] rounded-lg text-[#999]" title="Terminal"><TerminalIcon size={14} /></button>
           </div>
           <button onClick={() => setShowSettings(true)} className="p-2 hover:bg-[#2a2a2a] rounded-lg text-[#999] text-xs">⚙</button>
         </div>
@@ -232,7 +295,9 @@ export default function ChatPage({ authToken, user, onLogout }) {
       {/* Modals & Panels */}
       <FilesPanel sessionId={conversationId} open={showFiles} onClose={() => setShowFiles(false)} onOpenFile={(f) => { setShowFiles(false); handleOpenArtifact(f); }} />
       <SettingsPanel open={showSettings} onClose={() => setShowSettings(false)} models={apiModels} currentModel={currentModel} onModelChange={setCurrentModel} />
+      <Terminal open={showTerminal} onClose={() => setShowTerminal(false)} sessionId={conversationId} />
       {previewFile && <ArtifactPreview file={previewFile} onClose={() => setPreviewFile(null)} onDownload={handleDownloadArtifact} />}
     </div>
   );
 }
+

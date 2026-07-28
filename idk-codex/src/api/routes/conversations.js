@@ -142,7 +142,7 @@ router.post('/:id/messages', async (req, res) => {
   try {
     const conversationId = req.params.id;
     const userId = req.user.id;
-    const { message, runAgent, images } = req.body;
+    const { message, runAgent, images, files } = req.body;
 
     if (!message) {
       return res.status(400).json({ error: 'message is required' });
@@ -154,20 +154,30 @@ router.post('/:id/messages', async (req, res) => {
       return res.status(404).json({ error: 'Conversation not found' });
     }
 
+    // ===== ATTACH UPLOADED FILES TO THE MESSAGE =====
+    // If the user uploaded files, mention them in the message so the agent knows
+    // to use read_upload to read them.
+    let enhancedMessage = message;
+    if (files && Array.isArray(files) && files.length > 0) {
+      const fileList = files.map(f => `- ${f.filename || f.name} (${f.size || 'unknown'} bytes)`).join('\n');
+      enhancedMessage = `${message}\n\n[Attached files — use read_upload to read them:]\n${fileList}`;
+    }
+
     // Save the user's message
-    const userMsg = await addConversationMessage(conversationId, 'user', message);
+    const userMsg = await addConversationMessage(conversationId, 'user', message, files && files.length > 0 ? { files } : null);
 
     // Broadcast the user message
     broadcastMessage(conversationId, {
       role: 'user',
       content: message,
-      conversationId
+      conversationId,
+      files: files || []
     });
 
     // INTENT DETECTION — decide if this is a task or just chat
-    // This prevents "Hi" from triggering a 15-iteration agent loop
+    // If user attached files, ALWAYS run the agent so it can read them
     const lowerMsg = message.toLowerCase().trim();
-    const isTask = detectTaskIntent(lowerMsg, message);
+    const isTask = (files && files.length > 0) ? true : detectTaskIntent(lowerMsg, message);
 
     if (!isTask) {
       // This is a chat message — respond with LLM directly, no agent loop
@@ -340,7 +350,7 @@ router.post('/:id/messages', async (req, res) => {
     // Execute the agent loop asynchronously
     setImmediate(async () => {
       try {
-        const result = await executeReActLoop(message, conversationId, userId, {
+        const result = await executeReActLoop(enhancedMessage, conversationId, userId, {
           workspacePath: process.env.SANDBOX_WORKSPACE || './sandbox-workspace'
         });
 

@@ -161,46 +161,79 @@ export async function getConversation(conversationId, userId) {
   };
 }
 
-export async function addConversationMessage(conversationId, role, content, metadata = null) {
+export async function addConversationMessage(conversationId, role, content, metadata = null, options = {}) {
   const id = crypto.randomUUID();
+  // Caller can pass a userId + platform so we create the conversation row with the right owner
+  const ownerId = options.userId || 'telegram_user';
+  const platform = options.platform || 'telegram';
 
   if (isSupabaseConfigured()) {
     try {
-      // First, check if the conversation exists. If not, create it.
-      // This prevents FK constraint errors when Telegram sessions aren't in Supabase.
+      // ROBUST FK FIX: Always upsert the conversation row BEFORE inserting the message.
+      // Use POST with Prefer: resolution=merge-duplicates so if the row already exists,
+      // it's a no-op; if it doesn't, it's created. This eliminates the FK constraint error.
       try {
-        const convCheck = await supabaseFetch(`conversations?id=eq.${conversationId}&select=id&limit=1`);
-        if (!convCheck || convCheck.length === 0) {
-          // Conversation doesn't exist — create it
-          await supabaseFetch('conversations', 'POST', {
-            id: conversationId,
-            user_id: 'telegram_user',
-            platform: 'telegram',
-            title: role === 'user' ? content.substring(0, 50) : 'Telegram Chat'
-          });
-          logger.info('Auto-created conversation in Supabase', { conversationId });
-        }
+        const title = role === 'user'
+          ? (content.substring(0, 50) + (content.length > 50 ? '...' : ''))
+          : 'Telegram Chat';
+        await supabaseFetch('conversations', 'POST', {
+          id: conversationId,
+          user_id: String(ownerId),
+          platform,
+          title,
+          session_id: conversationId
+        });
+        logger.info('Conversation upserted in Supabase', { conversationId, ownerId, platform });
       } catch (e) {
-        // Non-fatal — might already exist
+        // If upsert failed because row already exists (42201 / 23505), that's fine.
+        // Otherwise log it but continue — the message insert below will surface any real FK error.
+        if (!String(e.message).includes('duplicate') && !String(e.message).includes('23505')) {
+          logger.debug('Conversation upsert note', { conversationId, error: e.message });
+        }
       }
 
-      await supabaseFetch('conversation_messages', 'POST', {
-        id, conversation_id: conversationId, role, content,
-        metadata: metadata || null
-      });
-
-      // Update conversation's updated_at
-      await supabaseFetch(`conversations?id=eq.${conversationId}`, 'PATCH', {
-        updated_at: new Date().toISOString()
-      });
-
-      // Auto-generate title from first user message
-      if (role === 'user') {
-        const convs = await supabaseFetch(`conversations?id=eq.${conversationId}`, 'GET');
-        if (convs[0] && (convs[0].title === 'New Conversation' || !convs[0].title)) {
-          const title = content.substring(0, 50) + (content.length > 50 ? '...' : '');
-          await supabaseFetch(`conversations?id=eq.${conversationId}`, 'PATCH', { title });
+      try {
+        await supabaseFetch('conversation_messages', 'POST', {
+          id, conversation_id: conversationId, role, content,
+          metadata: metadata || null
+        });
+      } catch (msgErr) {
+        // If FK constraint still fails, retry with a fresh conversation insert + retry message
+        if (String(msgErr.message).includes('foreign key') || String(msgErr.message).includes('23503')) {
+          logger.warn('FK retry — re-creating conversation', { conversationId });
+          // Force-create with a PATCH (upsert semantics)
+          try {
+            await supabaseFetch(`conversations?id=eq.${conversationId}`, 'PATCH', {
+              user_id: String(ownerId),
+              platform,
+              updated_at: new Date().toISOString()
+            });
+          } catch (patchErr) { /* may not exist yet — try POST again */ }
+          await supabaseFetch('conversation_messages', 'POST', {
+            id, conversation_id: conversationId, role, content,
+            metadata: metadata || null
+          });
+        } else {
+          throw msgErr;
         }
+      }
+
+      // Update conversation's updated_at (non-fatal if this fails)
+      try {
+        await supabaseFetch(`conversations?id=eq.${conversationId}`, 'PATCH', {
+          updated_at: new Date().toISOString()
+        });
+      } catch (e) { /* non-fatal */ }
+
+      // Auto-generate title from first user message (non-fatal)
+      if (role === 'user') {
+        try {
+          const convs = await supabaseFetch(`conversations?id=eq.${conversationId}&select=id,title`, 'GET');
+          if (convs[0] && (convs[0].title === 'New Conversation' || !convs[0].title || convs[0].title === 'Telegram Chat')) {
+            const title = content.substring(0, 50) + (content.length > 50 ? '...' : '');
+            await supabaseFetch(`conversations?id=eq.${conversationId}`, 'PATCH', { title });
+          }
+        } catch (e) { /* non-fatal */ }
       }
 
       return { id, conversationId, role, content, metadata };

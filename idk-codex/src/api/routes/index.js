@@ -19,6 +19,14 @@ import permissionsRouter from './permissions.js';
 import csRouter from './cs.js';
 import extrasRouter from './extras.js';
 import authRouter from './auth.js';
+import vaultRouter from './vault.js';
+import knowledgeRouter from './knowledge.js';
+import usageRouter from './usage.js';
+import billingRouter from './billing.js';
+import teamsRouter from './teams.js';
+import memoryLongTermRouter from './memory-long-term.js';
+import suggestionsRouter from './suggestions.js';
+import sandboxRouter from './sandbox.js';
 
 const router = Router();
 
@@ -62,6 +70,14 @@ router.use('/upload', uploadRouter);
 router.use('/permissions', permissionsRouter);
 router.use('/cs', csRouter);
 router.use('/auth', authRouter);
+router.use('/vault', vaultRouter);
+router.use('/knowledge', knowledgeRouter);
+router.use('/usage', usageRouter);
+router.use('/billing', billingRouter);
+router.use('/teams', teamsRouter);
+router.use('/memory-long-term', memoryLongTermRouter);  // adds /summarize/:id and /long-term
+router.use('/suggestions', suggestionsRouter);
+router.use('/sandbox', sandboxRouter);
 router.use('/', extrasRouter);  // memory + user profile routes
 router.use('/files/download', uploadRouter);
 
