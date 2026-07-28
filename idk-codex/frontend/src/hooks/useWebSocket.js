@@ -11,7 +11,16 @@ const isMobileSafari = /iPhone|iPad|iPod/.test(navigator.userAgent);
 
 if ('serviceWorker' in navigator && !window.__swRegistered) {
   window.__swRegistered = true;
-  navigator.serviceWorker.register('/sw.js').catch(() => {});
+  navigator.serviceWorker.register('/sw.js').then(reg => {
+    // Request notification permission after registration
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission().then(permission => {
+        if (permission === 'granted') {
+          console.log('[Notifications] Permission granted');
+        }
+      });
+    }
+  }).catch(() => {});
 }
 
 export function useWebSocket(sessionId) {

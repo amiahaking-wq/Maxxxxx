@@ -95,6 +95,18 @@ export default function ChatPage({ authToken, user, onLogout }) {
         return [...prev, { id: Date.now(), role: 'assistant', content: message.content, timestamp: message.timestamp || new Date().toISOString(), filesModified: message.filesModified || [] }];
       });
       setIsStreaming(false); setStreamingText('');
+
+      // Show push notification if tab is not focused
+      if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+        try {
+          new Notification('MAX', {
+            body: message.content.substring(0, 100) + (message.content.length > 100 ? '...' : ''),
+            icon: '/favicon.svg',
+            badge: '/favicon.svg',
+            tag: 'max-response'
+          });
+        } catch (e) {}
+      }
     }
   }, [message, conversationId]);
 
@@ -174,12 +186,12 @@ export default function ChatPage({ authToken, user, onLogout }) {
   const handleDownloadArtifact = useCallback(async (f) => { await downloadFile(f.sessionId || conversationId, f.path); }, [conversationId]);
 
   return (
-    <div className="flex bg-[#1a1a1a] text-[#ececec] overflow-hidden" style={{ height: `${viewportHeight || window.innerHeight}px` }}>
+    <div className="flex bg-[#1a1a1a] text-[#ececec] overflow-hidden fixed inset-0" style={{ height: `${viewportHeight || window.innerHeight}px` }}>
       {/* Sidebar */}
       <Sidebar open={showSidebar} onClose={() => setShowSidebar(false)} currentSessionId={conversationId} onSwitchSession={(id) => navigate(`/chat/${id}`)} onNewChat={handleNewChat} onOpenSettings={() => { setShowSidebar(false); setShowSettings(true); }} onLogout={onLogout} user={user} />
 
       {/* Main area */}
-      <div className="flex-1 flex flex-col min-w-0" style={{ height: `${viewportHeight || window.innerHeight}px` }}>
+      <div className="flex-1 flex flex-col min-w-0 h-full">
         {/* Header — fixed, with iOS safe area top padding */}
         <div className="flex items-center justify-between px-3 py-2.5 border-b border-[#2a2a2a] bg-[#171717] flex-shrink-0" style={{ paddingTop: 'max(0.625rem, env(safe-area-inset-top))' }}>
           <button onClick={() => setShowSidebar(true)} className="p-2 hover:bg-[#2a2a2a] rounded-lg text-[#999]"><Menu size={18} /></button>

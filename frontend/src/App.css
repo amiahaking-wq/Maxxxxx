@@ -9,11 +9,15 @@
 html, body {
   width: 100%;
   max-width: 100%;
-  /* Use the JS-set --app-height variable. Falls back to 100dvh then 100vh. */
-  height: var(--app-height, 100dvh);
+  height: 100%;
   overflow: hidden;
   overscroll-behavior: none;
   -webkit-overflow-scrolling: touch;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
 }
 
 body {
@@ -22,16 +26,6 @@ body {
   -moz-osx-font-smoothing: grayscale;
   background: #1a1a1a;
   color: #ececec;
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  /* Safe area insets for iOS notch/home indicator */
-  padding-top: env(safe-area-inset-top);
-  padding-bottom: env(safe-area-inset-bottom);
-  padding-left: env(safe-area-inset-left);
-  padding-right: env(safe-area-inset-right);
 }
 
 #root {
@@ -40,15 +34,18 @@ body {
   width: 100%;
   height: 100%;
   overflow: hidden;
+  /* Safe area insets */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
 }
 
-/* Prevent text size adjustment on orientation change */
 html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
 }
 
-/* Remove default button styles */
 button {
   font-family: inherit;
   -webkit-tap-highlight-color: transparent;
@@ -60,7 +57,6 @@ input, textarea {
   appearance: none;
 }
 
-/* Scrollbar styling */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }

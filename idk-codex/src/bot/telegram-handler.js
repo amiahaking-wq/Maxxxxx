@@ -342,13 +342,10 @@ async function handleChat(ctx, userId, text) {
   try {
     await ctx.sendChatAction('typing');
 
-    // Get the session
     const sessionId = await getOrCreateSession(userId, 'telegram');
-
-    // Save the user's message
     await addMessage(sessionId, 'user', text);
 
-    // Load the user's preferred model
+    // Load preferred model
     const { getDatabase } = await import('../database/db.js');
     const db = getDatabase();
     const prefs = db.prepare('SELECT preferred_model FROM user_preferences WHERE user_id = ?').get(String(userId));
@@ -361,7 +358,6 @@ async function handleChat(ctx, userId, text) {
       }
     }
 
-    // Build a conversational system prompt
     const messages = [
       {
         role: 'system',
@@ -370,55 +366,144 @@ async function handleChat(ctx, userId, text) {
 You can:
 - Have normal conversations about programming, technology, or anything
 - Answer questions about code, software design, debugging, etc.
-- When the user asks you to BUILD or CREATE something, suggest they say "build X" or "/task build X" to trigger the full agent loop (which writes files to the sandbox)
+- When the user asks you to BUILD or CREATE something, suggest they say "build X" or "/task build X" to trigger the full agent loop
 - Be concise but helpful. Use emojis sparingly. Match the user's tone.
 
 The user's Telegram user ID is ${userId}. Be casual and friendly.`
       },
-      {
-        role: 'user',
-        content: text
-      }
+      { role: 'user', content: text }
     ];
 
-    // Try to get a response from the LLM — NEVER use Echo for chat
-    let response;
+    // Send initial "typing" message
+    const sentMsg = await ctx.reply('⏳ Thinking...');
+    let lastEditText = '';
+    let updateTimer = null;
+
+    // Function to update the Telegram message with streaming text
+    async function updateMessage(text) {
+      // Throttle updates — don't edit more than once per second
+      if (updateTimer) return;
+      updateTimer = setTimeout(() => { updateTimer = null; }, 1000);
+
+      try {
+        // Telegram message limit is 4096 chars
+        const displayText = text.length > 4000 ? text.substring(0, 4000) + '...' : text;
+        if (displayText !== lastEditText && displayText.length > 0) {
+          await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            sentMsg.message_id,
+            null,
+            displayText
+          );
+          lastEditText = displayText;
+        }
+      } catch (e) {
+        // "message is not modified" error is fine — ignore
+      }
+    }
+
+    // Keep sending typing action while waiting
+    const typingInterval = setInterval(() => {
+      ctx.sendChatAction('typing').catch(() => {});
+    }, 4000);
+
+    let response = null;
     try {
-      // Temporarily disable Echo
       const prevEcho = process.env.ECHO_PROVIDER_ENABLED;
       process.env.ECHO_PROVIDER_ENABLED = 'false';
 
-      const result = await generateCompletion(messages, {
-        temperature: 0.7,
-        maxTokens: 1000
-      });
+      // Try streaming from OpenRouter directly
+      const baseURL = process.env.OPENAI_COMPATIBLE_BASE_URL || 'https://openrouter.ai/api/v1';
+      const apiKey = process.env.OPENAI_COMPATIBLE_API_KEY;
+      const model = process.env.OPENAI_COMPATIBLE_MODEL || 'openrouter/auto';
+
+      if (apiKey) {
+        const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` };
+        if (baseURL.includes('openrouter.ai')) {
+          headers['HTTP-Referer'] = 'https://maxxxxx-production.up.railway.app';
+          headers['X-Title'] = 'MAX Agent';
+        }
+
+        const llmResp = await fetch(`${baseURL}/chat/completions`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ model, messages, temperature: 0.7, max_tokens: 1000, stream: true })
+        });
+
+        if (llmResp.ok) {
+          const reader = llmResp.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = '';
+          let fullText = '';
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            let sep;
+            while ((sep = buf.indexOf('\n\n')) >= 0) {
+              const evt = buf.slice(0, sep);
+              buf = buf.slice(sep + 2);
+              for (const line of evt.split('\n')) {
+                if (!line.startsWith('data: ')) continue;
+                const payload = line.slice(6).trim();
+                if (payload === '[DONE]') continue;
+                try {
+                  const chunk = JSON.parse(payload);
+                  const delta = chunk.choices?.[0]?.delta;
+                  if (delta?.content) {
+                    fullText += delta.content;
+                    await updateMessage(fullText);
+                  }
+                } catch (e) {}
+              }
+            }
+          }
+          response = fullText;
+        } else {
+          throw new Error(`HTTP ${llmResp.status}`);
+        }
+      } else {
+        throw new Error('No API key');
+      }
 
       process.env.ECHO_PROVIDER_ENABLED = prevEcho;
-      response = result?.content || null;
     } catch (llmErr) {
-      logger.warn('LLM chat failed', { error: llmErr.message });
-      response = null;
+      logger.warn('LLM chat streaming failed, trying non-streaming', { error: llmErr.message });
+      process.env.ECHO_PROVIDER_ENABLED = 'true';
+
+      // Fallback: non-streaming
+      try {
+        const result = await generateCompletion(messages, { temperature: 0.7, maxTokens: 1000 });
+        response = result?.content || null;
+      } catch (e) {
+        response = null;
+      }
     }
 
-    // If LLM failed, be honest — don't fake it with Echo
+    clearInterval(typingInterval);
+    if (updateTimer) clearTimeout(updateTimer);
+
     if (!response || response.trim() === '') {
-      response = 'I couldn\'t reach any LLM provider right now. This usually means:\n\n' +
-        '- Groq rate limit hit (wait a minute)\n' +
-        '- Gemini quota exceeded\n' +
-        '- Phone not connected\n\n' +
-        'Try again in a moment, or connect your phone with Ollama for local inference.';
+      const currentModel = process.env.OPENAI_COMPATIBLE_MODEL || 'openrouter/auto';
+      response = `⚠️ Model ${currentModel} could not respond. Try again or switch models with /model`;
     }
 
-    // Save the assistant's response
     await addMessage(sessionId, 'assistant', response);
 
-    // Telegram has a 4096 char limit per message
-    if (response.length > 4000) {
-      // Split into chunks
-      for (let i = 0; i < response.length; i += 4000) {
-        await ctx.reply(response.substring(i, i + 4000));
+    // Final edit with complete response (handles >4096 chars by splitting)
+    try {
+      if (response.length > 4000) {
+        // Edit first message with first chunk, then send remaining chunks
+        await ctx.telegram.editMessageText(ctx.chat.id, sentMsg.message_id, null, response.substring(0, 4000));
+        for (let i = 4000; i < response.length; i += 4000) {
+          await ctx.reply(response.substring(i, i + 4000));
+        }
+      } else {
+        await ctx.telegram.editMessageText(ctx.chat.id, sentMsg.message_id, null, response);
       }
-    } else {
+    } catch (e) {
+      // If edit fails (e.g. message too old), just send a new message
       await ctx.reply(response);
     }
   } catch (err) {
