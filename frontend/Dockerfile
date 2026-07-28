@@ -15,9 +15,7 @@ RUN npm install --no-audit --no-fund
 
 COPY . .
 
-# Build with VITE_API_URL (defaults to same-origin, nginx proxies to backend)
-ARG VITE_API_URL=""
-ENV VITE_API_URL=$VITE_API_URL
+# Build (VITE_API_URL not needed — nginx proxies same-origin)
 RUN npm run build
 
 # Stage 2: Serve via nginx
@@ -26,10 +24,13 @@ FROM nginx:alpine
 # Copy built assets
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# Copy nginx config template
-COPY docker/nginx.conf.template /etc/nginx/templates/default.conf.template
+# Copy startup script
+COPY docker/start.sh /start.sh
+RUN chmod +x /start.sh
 
-# nginx will substitute ${BACKEND_URL} and ${VITE_API_URL} at startup
+# Remove default nginx config (we write our own at startup)
+RUN rm -f /etc/nginx/conf.d/default.conf
+
 EXPOSE 80
 
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["/start.sh"]
