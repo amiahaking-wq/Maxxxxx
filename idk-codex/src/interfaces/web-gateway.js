@@ -230,8 +230,8 @@ export class WebGateway {
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
         credentials: false
       },
-      pingTimeout: 60000,    // 60s — client has 60s to respond to ping
-      pingInterval: 15000,   // ping every 15s — keeps mobile connections alive
+      pingTimeout: 300000,   // 5 min — client has 5 min to respond (slow CPU/phone)
+      pingInterval: 120000,  // ping every 2 min — less frequent = less overhead
       transports: ['websocket', 'polling'],
       allowEIO3: true,
       maxHttpBufferSize: 1e8

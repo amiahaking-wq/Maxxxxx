@@ -34,10 +34,12 @@ export function useWebSocket(sessionId) {
       transports: isMobileSafari ? ['polling'] : ['websocket', 'polling'],
       upgrade: !isMobileSafari,
       reconnection: true,
-      reconnectionDelay: 2000,
-      reconnectionDelayMax: 5000,
+      reconnectionDelay: 1000,      // Start at 1s
+      reconnectionDelayMax: 30000,  // Max 30s between reconnects
       reconnectionAttempts: Infinity,
-      timeout: 20000,
+      timeout: 60000,               // 60s connection timeout (was 20s)
+      pingTimeout: 300000,          // 5 min — match server
+      pingInterval: 120000,         // 2 min — match server
       auth: authToken ? { token: authToken } : {}
     });
     socketRef.current = socket;
