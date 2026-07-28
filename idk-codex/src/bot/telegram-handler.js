@@ -665,8 +665,8 @@ async function handleTaskCommand(ctx, userId, text) {
     }
     summary += '\n\n_' + (results.iterations || 0) + ' iterations_';
 
-    // Send the text summary
-    await ctx.reply(summary, { parse_mode: 'Markdown' });
+    // Send the text summary (no Markdown to avoid parsing errors)
+    await ctx.reply(summary);
 
     // Send each created file as a Telegram document
     if (results?.filesModified?.length > 0) {

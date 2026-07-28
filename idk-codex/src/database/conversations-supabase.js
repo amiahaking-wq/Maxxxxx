@@ -166,6 +166,24 @@ export async function addConversationMessage(conversationId, role, content, meta
 
   if (isSupabaseConfigured()) {
     try {
+      // First, check if the conversation exists. If not, create it.
+      // This prevents FK constraint errors when Telegram sessions aren't in Supabase.
+      try {
+        const convCheck = await supabaseFetch(`conversations?id=eq.${conversationId}&select=id&limit=1`);
+        if (!convCheck || convCheck.length === 0) {
+          // Conversation doesn't exist — create it
+          await supabaseFetch('conversations', 'POST', {
+            id: conversationId,
+            user_id: 'telegram_user',
+            platform: 'telegram',
+            title: role === 'user' ? content.substring(0, 50) : 'Telegram Chat'
+          });
+          logger.info('Auto-created conversation in Supabase', { conversationId });
+        }
+      } catch (e) {
+        // Non-fatal — might already exist
+      }
+
       await supabaseFetch('conversation_messages', 'POST', {
         id, conversation_id: conversationId, role, content,
         metadata: metadata || null
