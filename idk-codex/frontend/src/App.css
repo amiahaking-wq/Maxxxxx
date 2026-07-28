@@ -19,8 +19,16 @@
 html, body, #root {
   width: 100%;
   max-width: 100%;
-  height: calc(var(--vh, 1vh) * 100);
+  /* Use 100dvh (dynamic viewport height) for iOS Safari support */
+  /* Falls back to 100vh for older browsers */
+  height: 100vh;
+  height: 100dvh;
   overflow: hidden;
+  /* Safe area insets for iOS notch/home indicator */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
 }
 
 body {

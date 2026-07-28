@@ -21,7 +21,7 @@ export default function ChatInput({ value, onChange, onSend, onStop, isStreaming
   };
 
   return (
-    <div className="px-3 pb-3 pt-2">
+    <div className="px-3 pt-2 flex-shrink-0" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
       <div className="max-w-3xl mx-auto">
         {/* Agent running indicator */}
         {isStreaming && (
