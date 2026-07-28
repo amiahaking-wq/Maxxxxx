@@ -95,15 +95,16 @@ class LLMAdapter {
 
           case 'openai-compatible':
             if (process.env.OPENAI_COMPATIBLE_BASE_URL || process.env.OPENAI_COMPATIBLE_API_KEY) {
-              const compatCtx = parseInt(process.env.OPENAI_COMPATIBLE_CONTEXT_WINDOW || '8192', 10);
-              const compatMaxOut = parseInt(process.env.OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS || '4096', 10);
+              const compatCtx = parseInt(process.env.OPENAI_COMPATIBLE_CONTEXT_WINDOW || '128000', 10);
+              const compatMaxOut = parseInt(process.env.OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS || '8192', 10);
+              const compatModel = process.env.OPENAI_COMPATIBLE_MODEL || 'openai/gpt-oss-20b:free';
               this.providers.push(new OpenAICompatibleProvider({
                 name: 'openai-compatible',
                 baseURL: process.env.OPENAI_COMPATIBLE_BASE_URL || 'http://localhost:8000/v1',
                 apiKey: process.env.OPENAI_COMPATIBLE_API_KEY,
-                defaultModel: process.env.OPENAI_COMPATIBLE_MODEL || 'default',
+                defaultModel: compatModel,
                 models: [
-                  { id: process.env.OPENAI_COMPATIBLE_MODEL || 'default', maxTokens: compatMaxOut, contextWindow: compatCtx }
+                  { id: compatModel, maxTokens: compatMaxOut, contextWindow: compatCtx }
                 ]
               }));
               logger.info('✓ OpenAI-compatible provider initialized', {
