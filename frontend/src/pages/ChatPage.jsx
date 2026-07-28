@@ -28,7 +28,7 @@ import WelcomeScreen from '../components/WelcomeScreen';
 const API_BASE = import.meta.env.VITE_API_URL || window.location.origin;
 
 export default function ChatPage({ authToken, user, onLogout }) {
-  useViewportHeight();
+  const viewportHeight = useViewportHeight();
   const { sessionId } = useParams();
   const navigate = useNavigate();
 
@@ -151,7 +151,20 @@ export default function ChatPage({ authToken, user, onLogout }) {
     const text = input.trim();
     setMessages(prev => [...prev, { id: Date.now(), role: 'user', content: text, timestamp: new Date().toISOString() }]);
     setInput(''); setIsStreaming(true); setStreamingText('');
-    try { const r = await fetch(`${API_BASE}/api/conversations/${conversationId}/messages`, { method: 'POST', headers: getAuthHeaders(), body: JSON.stringify({ message: text }) }); if (!r.ok) throw new Error('Failed'); } catch (e) { setMessages(prev => [...prev, { id: Date.now(), role: 'assistant', content: 'Error: ' + e.message, timestamp: new Date().toISOString() }]); setIsStreaming(false); }
+    try {
+      const r = await fetch(`${API_BASE}/api/conversations/${conversationId}/messages`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ message: text })
+      });
+      if (!r.ok) {
+        const errText = await r.text().catch(() => 'Unknown error');
+        throw new Error(`HTTP ${r.status}: ${errText.substring(0, 200)}`);
+      }
+    } catch (e) {
+      setMessages(prev => [...prev, { id: Date.now(), role: 'assistant', content: 'Error: ' + e.message, timestamp: new Date().toISOString() }]);
+      setIsStreaming(false);
+    }
   };
 
   const handleStop = async () => { if (!conversationId) return; try { await fetch(`${API_BASE}/api/agent/cancel/${conversationId}`, { method: 'POST', headers: getAuthHeaders() }); } catch (e) {} setIsStreaming(false); if (streamingText) { setMessages(prev => [...prev, { id: Date.now(), role: 'assistant', content: streamingText + '\n\n_(stopped)_', timestamp: new Date().toISOString() }]); setStreamingText(''); } };
@@ -161,12 +174,12 @@ export default function ChatPage({ authToken, user, onLogout }) {
   const handleDownloadArtifact = useCallback(async (f) => { await downloadFile(f.sessionId || conversationId, f.path); }, [conversationId]);
 
   return (
-    <div className="flex bg-[#1a1a1a] text-[#ececec] overflow-hidden" style={{ height: 'var(--app-height, 100dvh)' }}>
+    <div className="flex bg-[#1a1a1a] text-[#ececec] overflow-hidden" style={{ height: `${viewportHeight || window.innerHeight}px` }}>
       {/* Sidebar */}
       <Sidebar open={showSidebar} onClose={() => setShowSidebar(false)} currentSessionId={conversationId} onSwitchSession={(id) => navigate(`/chat/${id}`)} onNewChat={handleNewChat} onOpenSettings={() => { setShowSidebar(false); setShowSettings(true); }} onLogout={onLogout} user={user} />
 
       {/* Main area */}
-      <div className="flex-1 flex flex-col min-w-0" style={{ height: 'var(--app-height, 100dvh)' }}>
+      <div className="flex-1 flex flex-col min-w-0" style={{ height: `${viewportHeight || window.innerHeight}px` }}>
         {/* Header — fixed, with iOS safe area top padding */}
         <div className="flex items-center justify-between px-3 py-2.5 border-b border-[#2a2a2a] bg-[#171717] flex-shrink-0" style={{ paddingTop: 'max(0.625rem, env(safe-area-inset-top))' }}>
           <button onClick={() => setShowSidebar(true)} className="p-2 hover:bg-[#2a2a2a] rounded-lg text-[#999]"><Menu size={18} /></button>

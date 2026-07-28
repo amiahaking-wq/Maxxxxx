@@ -1,48 +1,49 @@
 /**
  * useViewportHeight — bulletproof viewport height for all browsers.
  * Uses Visual Viewport API + window resize to set a CSS variable.
- * Works on: iOS Safari, Chrome Android, Desktop, iPad.
+ * Also triggers a React re-render when the height changes (for keyboard).
  */
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 
 export function useViewportHeight() {
+  const [viewportHeight, setViewportHeight] = useState(0);
+
   useEffect(() => {
-    function setHeight() {
-      // Visual Viewport API — the most accurate on mobile
-      // Accounts for address bar, keyboard, and bottom toolbar
+    function updateHeight() {
       const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-      const vw = window.visualViewport ? window.visualViewport.width : window.innerWidth;
       document.documentElement.style.setProperty('--app-height', `${vh}px`);
-      document.documentElement.style.setProperty('--app-width', `${vw}px`);
-      
-      // Also set --vh for backward compat
       document.documentElement.style.setProperty('--vh', `${vh * 0.01}px`);
+      setViewportHeight(vh);
     }
 
-    setHeight();
+    updateHeight();
 
     // Listen to all possible resize events
-    window.addEventListener('resize', setHeight);
-    window.addEventListener('orientationchange', setHeight);
-    
+    window.addEventListener('resize', updateHeight);
+    window.addEventListener('orientationchange', updateHeight);
+
     if (window.visualViewport) {
-      window.visualViewport.addEventListener('resize', setHeight);
-      window.visualViewport.addEventListener('scroll', setHeight);
+      window.visualViewport.addEventListener('resize', updateHeight);
+      window.visualViewport.addEventListener('scroll', updateHeight);
     }
 
-    // Re-check after a delay (Safari sometimes reports wrong height initially)
-    const timeout = setTimeout(setHeight, 300);
-    const timeout2 = setTimeout(setHeight, 1000);
+    // Re-check after delays (Safari sometimes reports wrong height initially)
+    const t1 = setTimeout(updateHeight, 100);
+    const t2 = setTimeout(updateHeight, 300);
+    const t3 = setTimeout(updateHeight, 1000);
 
     return () => {
-      window.removeEventListener('resize', setHeight);
-      window.removeEventListener('orientationchange', setHeight);
+      window.removeEventListener('resize', updateHeight);
+      window.removeEventListener('orientationchange', updateHeight);
       if (window.visualViewport) {
-        window.visualViewport.removeEventListener('resize', setHeight);
-        window.visualViewport.removeEventListener('scroll', setHeight);
+        window.visualViewport.removeEventListener('resize', updateHeight);
+        window.visualViewport.removeEventListener('scroll', updateHeight);
       }
-      clearTimeout(timeout);
-      clearTimeout(timeout2);
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
     };
   }, []);
+
+  return viewportHeight;
 }
