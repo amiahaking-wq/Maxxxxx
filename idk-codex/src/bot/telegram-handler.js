@@ -570,10 +570,35 @@ async function handleTaskCommand(ctx, userId, text) {
     }
 
     if (results?.filesModified?.length > 0) {
-      summary += '\n\nFiles written:\n' + results.filesModified.map(f => '  • ' + f).join('\n');
+      summary += '\n\n📁 Files created:\n' + results.filesModified.map(f => '  • ' + f).join('\n');
     }
-    summary += '\n\nIterations: ' + (results.iterations || 0) + '/15';
-    await ctx.reply(summary);
+    summary += '\n\n_' + (results.iterations || 0) + ' iterations_';
+
+    // Send the text summary
+    await ctx.reply(summary, { parse_mode: 'Markdown' });
+
+    // Send each created file as a Telegram document
+    if (results?.filesModified?.length > 0) {
+      const fs = await import('fs');
+      const path = await import('path');
+      const workspace = process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
+
+      for (const filePath of results.filesModified) {
+        try {
+          const fullPath = path.resolve(workspace, filePath);
+          if (fs.existsSync(fullPath)) {
+            const stats = fs.statSync(fullPath);
+            if (stats.size < 10 * 1024 * 1024) { // 10MB limit
+              await ctx.replyWithDocument({ source: fullPath, filename: filePath.split('/').pop() });
+            } else {
+              await ctx.reply('📎 ' + filePath + ' (too large to send, ' + (stats.size / 1024 / 1024).toFixed(1) + 'MB)');
+            }
+          }
+        } catch (e) {
+          logger.warn('Failed to send file to Telegram', { file: filePath, error: e.message });
+        }
+      }
+    }
   } catch (err) {
     logger.error('TASK_FAILED', { userId, task: taskText, error: err.message, stack: err.stack });
     await ctx.reply('❌ Failed: ' + err.message);

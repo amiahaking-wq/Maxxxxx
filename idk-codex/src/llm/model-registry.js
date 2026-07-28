@@ -122,13 +122,13 @@ const BASE_MODEL_OPTIONS = [
   },
   {
     id: 'openai-compatible',
-    name: 'OpenRouter / Custom',
+    name: 'OpenRouter Auto (Free)',
     provider: 'openai-compatible',
-    model: process.env.OPENAI_COMPATIBLE_MODEL || 'openai/gpt-oss-20b:free',
+    model: process.env.OPENAI_COMPATIBLE_MODEL || 'openrouter/auto',
     speed: 'medium',
     speedLabel: '🔌',
     bestFor: ['custom', 'local', 'self-hosted'],
-    description: 'OpenRouter or any OpenAI-compatible endpoint',
+    description: 'OpenRouter automatically picks the best free model for each task. One API key, zero configuration.',
     contextWindow: parseInt(process.env.OPENAI_COMPATIBLE_CONTEXT_WINDOW || '128000', 10),
     maxOutputTokens: parseInt(process.env.OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS || '8192', 10),
     default: true

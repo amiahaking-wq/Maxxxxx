@@ -136,7 +136,29 @@ export const knowledgeStore = {
 
       if (!resp.ok) {
         const text = await resp.text();
-        logger.warn('Knowledge search RPC failed', { status: resp.status, error: text.substring(0, 200) });
+        logger.warn('Knowledge search RPC failed, falling back to local search', { status: resp.status, error: text.substring(0, 200) });
+        // Fallback: simple text search in Supabase (no vector similarity)
+        try {
+          const fallbackUrl = `${SUPABASE_URL}/rest/v1/max_knowledge_base?user_id=eq.${encodeURIComponent(userId)}&limit=${limit}&order=created_at.desc`;
+          const fallbackResp = await fetch(fallbackUrl, {
+            headers: {
+              'apikey': SUPABASE_KEY,
+              'Authorization': `Bearer ${SUPABASE_KEY}`
+            }
+          });
+          if (fallbackResp.ok) {
+            const allDocs = await fallbackResp.json();
+            // Simple text matching: filter by keyword overlap
+            const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+            const matched = (allDocs || []).filter(doc => {
+              const content = (doc.content || '').toLowerCase();
+              return queryWords.some(w => content.includes(w));
+            }).slice(0, limit);
+            return matched.map(doc => ({ id: doc.id, title: doc.title, content: doc.content, similarity: 0.5 }));
+          }
+        } catch (e) {
+          logger.warn('Local knowledge search fallback also failed', { error: e.message });
+        }
         return [];
       }
 
