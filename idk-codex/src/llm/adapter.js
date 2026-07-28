@@ -37,7 +37,9 @@ class LLMAdapter {
     logger.info('Initializing LLM Adapter');
 
     // Get priority list, but ALWAYS include openai-compatible if configured
-    let rawPriority = process.env.LLM_PROVIDER_PRIORITY || 'openai-compatible,ollama,openai,groq,anthropic,gemini,phone,echo';
+    // Priority list — openrouter/auto first, then phone (termux), then echo
+    // Groq removed — rate limits too low (12k TPM). Use OpenRouter instead.
+    let rawPriority = process.env.LLM_PROVIDER_PRIORITY || 'openai-compatible,phone,echo';
     // If openai-compatible is not in the priority list but is configured, add it at the front
     if (!rawPriority.includes('openai-compatible') &&
         (process.env.OPENAI_COMPATIBLE_BASE_URL || process.env.OPENAI_COMPATIBLE_API_KEY)) {
