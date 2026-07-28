@@ -58,6 +58,7 @@ COPY --from=backend-builder /app/node_modules ./node_modules
 COPY src/database ./src/database
 COPY src/agent ./src/agent
 COPY src/api ./src/api
+COPY src/auth ./src/auth
 COPY src/bot ./src/bot
 COPY src/context ./src/context
 COPY src/error-resolution ./src/error-resolution
