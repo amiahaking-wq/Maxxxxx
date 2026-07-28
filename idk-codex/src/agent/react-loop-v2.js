@@ -23,7 +23,7 @@ import { permissionGuard } from '../security/permission-guard.js';
 import logger from '../utils/logger.js';
 
 const MAX_ITERATIONS = parseInt(process.env.MAX_AGENT_ITERATIONS || '15', 10);
-const MAX_ACTION_TOKENS = parseInt(process.env.MAX_ACTION_TOKENS || '8000', 10);
+const MAX_ACTION_TOKENS = parseInt(process.env.MAX_ACTION_TOKENS || '4000', 10);
 
 // ============================================================================
 // FUNCTION CALLING TOOL DEFINITIONS
@@ -567,7 +567,8 @@ async function waitForConfirmation(confirmationId, timeoutMs) {
  * Models not in this list (like deepseek-r1) use ReAct text format.
  */
 const FUNCTION_CALLING_MODELS = [
-  'llama', 'mistral', 'qwen', 'gemini', 'claude', 'gpt', 'groq', 'kimi', 'glm', 'gpt-oss'
+  'llama', 'mistral', 'qwen', 'gemini', 'claude', 'gpt', 'groq', 'kimi', 'glm', 'gpt-oss',
+  'auto', 'openrouter/auto'  // openrouter/auto supports function calling
 ];
 
 /**
@@ -589,6 +590,16 @@ function modelSupportsFunctionCalling() {
   // Check if model is explicitly in the non-FC list (deepseek-r1, etc.)
   if (NON_FUNCTION_CALLING_MODELS.some(m => model.includes(m))) {
     return false;
+  }
+
+  // openrouter/auto and any model with 'auto' supports function calling
+  if (model.includes('auto')) {
+    return true;
+  }
+
+  // Groq always supports function calling
+  if (process.env.GROQ_API_KEY && !model) {
+    return true;
   }
 
   // Check if model name matches a known FC-supporting model
@@ -656,12 +667,36 @@ function parseLLMResponse(llmResult) {
   }
 
   // Format 2: ReAct text format (THOUGHT/ACTION/INPUT)
-  const actionMatch = llmContent.match(/ACTION:\s*(\w+)\s*\n\s*INPUT:\s*(\{[\s\S]*?\})/m);
+  // More flexible regex — handles multi-line JSON, same-line INPUT, etc.
+  const actionMatch = llmContent.match(/ACTION:\s*(\w+)\s*\n?/i);
   if (actionMatch) {
     const toolName = actionMatch[1].trim();
+    // Find INPUT: and extract everything after it (try to parse as JSON)
+    const inputMatch = llmContent.match(/INPUT:\s*([\s\S]*?)(?:\n\n|\nTHOUGHT:|$)/i);
     let args = {};
-    try { args = JSON.parse(actionMatch[2]); } catch { /* ok */ }
-    logger.info('RESPONSE_FORMAT', { format: 'react_text', tool: toolName });
+    if (inputMatch) {
+      const inputStr = inputMatch[1].trim();
+      try {
+        // Try JSON parse
+        args = JSON.parse(inputStr);
+      } catch {
+        // If JSON fails, try to extract key-value pairs
+        // Handles: path="test.txt", content="hello world"
+        const kvRegex = /(\w+)\s*[:=]\s*"((?:[^"\\]|\\.)*)"/g;
+        let m;
+        while ((m = kvRegex.exec(inputStr)) !== null) {
+          args[m[1]] = m[2];
+        }
+        // Also try without quotes: path: test.txt
+        if (Object.keys(args).length === 0) {
+          const kvRegex2 = /(\w+)\s*[:=]\s*([^\n,]+)/g;
+          while ((m = kvRegex2.exec(inputStr)) !== null) {
+            args[m[1]] = m[2].trim();
+          }
+        }
+      }
+    }
+    logger.info('RESPONSE_FORMAT', { format: 'react_text', tool: toolName, argsKeys: Object.keys(args) });
     return {
       content: llmContent,
       toolCalls: [{ id: `tc_${Date.now()}`, name: toolName, args }],
@@ -823,7 +858,7 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
     // Call LLM with hybrid approach (function calling OR ReAct text)
     let llmResult;
     try {
-      const condensedMessages = await condenseMessages(messages, { maxTokens: 6000, keepRecent: 8 });
+      const condensedMessages = await condenseMessages(messages, { maxTokens: 4000, keepRecent: 6 });
 
       // Disable Echo for real tasks
       const prevEcho = process.env.ECHO_PROVIDER_ENABLED;
