@@ -179,4 +179,108 @@ router.post('/logout', (req, res) => {
   res.json({ success: true, message: 'Logged out' });
 });
 
+// ============================================================================
+// TELEGRAM ACCOUNT LINKING
+// ============================================================================
+
+import { getDatabase } from '../../database/db.js';
+
+/**
+ * POST /api/auth/link-telegram
+ * Generates a linking code. User sends this code to the Telegram bot
+ * to link their Telegram account to their website account.
+ */
+router.post('/link-telegram', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+
+    const token = authHeader.replace('Bearer ', '');
+    const user = await validateToken(token);
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    // Generate a 6-character linking code
+    const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes
+
+    const db = getDatabase();
+    // Delete any existing codes for this user
+    db.prepare('DELETE FROM max_telegram_codes WHERE user_id = ?').run(user.id);
+    // Insert new code
+    db.prepare('INSERT INTO max_telegram_codes (code, user_id, expires_at) VALUES (?, ?, ?)').run(code, user.id, expiresAt);
+
+    logger.info('TELEGRAM_LINK_CODE_GENERATED', { userId: user.id, code });
+
+    res.json({
+      code,
+      instructions: `Send this code to @Maxxxxclaww_bot on Telegram: ${code}`,
+      expiresAt
+    });
+  } catch (e) {
+    logger.error('TELEGRAM_LINK_CODE_ERROR', { error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * GET /api/auth/telegram-status
+ * Check if the user's Telegram account is linked.
+ */
+router.get('/telegram-status', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+
+    const token = authHeader.replace('Bearer ', '');
+    const user = await validateToken(token);
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    const db = getDatabase();
+    const link = db.prepare('SELECT * FROM max_telegram_links WHERE user_id = ?').get(user.id);
+
+    res.json({
+      linked: !!link,
+      telegramUsername: link?.telegram_username || null,
+      linkedAt: link?.linked_at || null
+    });
+  } catch (e) {
+    res.json({ linked: false });
+  }
+});
+
+/**
+ * POST /api/auth/unlink-telegram
+ * Remove the Telegram link for the current user.
+ */
+router.post('/unlink-telegram', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+
+    const token = authHeader.replace('Bearer ', '');
+    const user = await validateToken(token);
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    const db = getDatabase();
+    db.prepare('DELETE FROM max_telegram_links WHERE user_id = ?').run(user.id);
+
+    logger.info('TELEGRAM_UNLINKED', { userId: user.id });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 export default router;

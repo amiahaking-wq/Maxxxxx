@@ -38,6 +38,8 @@ function detectIntent(text) {
 
   // Slash commands always win
   if (lower.startsWith('/start')) return { intent: 'start' };
+  if (lower.startsWith('/link')) return { intent: 'link', payload: t.replace('/link', '').trim() };
+  if (lower.startsWith('/unlink')) return { intent: 'unlink' };
   if (lower.startsWith('/help')) return { intent: 'help' };
   if (lower.startsWith('/status')) return { intent: 'status' };
   if (lower.startsWith('/repos')) return { intent: 'repos' };
@@ -172,9 +174,27 @@ function detectIntent(text) {
  */
 export async function handleTelegramMessage(ctx) {
   const chatId = ctx.chat?.id;
-  // Use Telegram user ID as isolated userId — each Telegram user has
-  // completely separate conversations, memories, knowledge, and credentials
-  const userId = `telegram_${ctx.from?.id}`;
+  const telegramUserId = String(ctx.from?.id);
+  const telegramUsername = ctx.from?.username || ctx.from?.first_name || 'Unknown';
+
+  // Check if this Telegram user is linked to a website account
+  // If linked → use the website user ID (shared conversations, memories, etc.)
+  // If not linked → use telegram_<id> (isolated Telegram-only account)
+  let userId;
+  try {
+    const { getDatabase } = await import('../database/db.js');
+    const db = getDatabase();
+    const link = db.prepare('SELECT user_id FROM max_telegram_links WHERE telegram_user_id = ?').get(telegramUserId);
+    if (link) {
+      userId = link.user_id; // Linked to website account
+      logger.info('TG_LINKED_USER', { telegramUserId, websiteUserId: userId });
+    } else {
+      userId = `telegram_${telegramUserId}`; // Telegram-only account
+    }
+  } catch (e) {
+    userId = `telegram_${telegramUserId}`; // Fallback
+  }
+
   const text = ctx.message?.text || '';
   const messageType = ctx.message?.text ? 'text' : ctx.updateType;
 
@@ -197,6 +217,12 @@ export async function handleTelegramMessage(ctx) {
     switch (intent) {
       case 'start':
         await handleStartCommand(ctx, userId);
+        break;
+      case 'link':
+        await handleLinkCommand(ctx, telegramUserId, telegramUsername, payload);
+        break;
+      case 'unlink':
+        await handleUnlinkCommand(ctx, telegramUserId);
         break;
       case 'help':
         await handleHelpCommand(ctx);
@@ -1226,6 +1252,123 @@ async function handlePermissionsCommand(ctx, userId) {
     }
     text += '\n\nTo grant more permissions, tell me:\n"allow MAX to git_push"\n"allow MAX to external_api"\n"allow MAX to browser_write"';
     await ctx.reply(text);
+  } catch (e) {
+    await ctx.reply('❌ Failed: ' + e.message);
+  }
+}
+
+// ============================================================================
+// TELEGRAM ACCOUNT LINKING
+// ============================================================================
+
+/**
+ * /link <code> — link this Telegram account to a website account
+ * 
+ * Flow:
+ * 1. User logs into the website
+ * 2. Goes to Settings → Profile → "Link Telegram"
+ * 3. Website generates a 6-char code (e.g. ABC123)
+ * 4. User sends /link ABC123 to the Telegram bot
+ * 5. Bot links the Telegram user ID to the website user ID
+ * 6. From now on, Telegram messages use the same user ID as the website
+ *    → shared conversations, memories, knowledge base, credentials
+ */
+async function handleLinkCommand(ctx, telegramUserId, telegramUsername, code) {
+  if (!code) {
+    // Check if already linked
+    try {
+      const { getDatabase } = await import('../database/db.js');
+      const db = getDatabase();
+      const existing = db.prepare('SELECT * FROM max_telegram_links WHERE telegram_user_id = ?').get(telegramUserId);
+      if (existing) {
+        await ctx.reply(
+          '✅ Your Telegram is already linked to your website account.\n\n' +
+          'Linked since: ' + existing.linked_at + '\n\n' +
+          'Use /unlink to remove the link.'
+        );
+      } else {
+        await ctx.reply(
+          '🔗 **Link Your Telegram to MAX Website**\n\n' +
+          'To link your Telegram account to your website account:\n\n' +
+          '1. Log in to https://maxxxxx-production.up.railway.app\n' +
+          '2. Go to Settings → Profile\n' +
+          '3. Click "Link Telegram"\n' +
+          '4. Copy the 6-character code\n' +
+          '5. Send it here: /link ABC123\n\n' +
+          'Once linked, your conversations, memories, and settings are shared between web and Telegram.'
+        );
+      }
+    } catch (e) {
+      await ctx.reply('Usage: /link <code>\nGet your code from the website Settings → Profile → Link Telegram');
+    }
+    return;
+  }
+
+  // Validate the code
+  code = code.toUpperCase().trim();
+  try {
+    const { getDatabase } = await import('../database/db.js');
+    const db = getDatabase();
+
+    // Check if code exists and is valid
+    const codeRow = db.prepare('SELECT * FROM max_telegram_codes WHERE code = ? AND used = 0').get(code);
+    if (!codeRow) {
+      await ctx.reply('❌ Invalid or already used code. Generate a new one from the website Settings → Profile → Link Telegram.');
+      return;
+    }
+
+    // Check if code is expired
+    const expiresAt = new Date(codeRow.expires_at);
+    if (expiresAt < new Date()) {
+      await ctx.reply('❌ This code has expired. Generate a new one from the website Settings → Profile → Link Telegram.');
+      return;
+    }
+
+    // Check if this Telegram account is already linked to a different user
+    const existingLink = db.prepare('SELECT * FROM max_telegram_links WHERE telegram_user_id = ?').get(telegramUserId);
+    if (existingLink && existingLink.user_id !== codeRow.user_id) {
+      await ctx.reply('❌ This Telegram account is already linked to a different website account. Use /unlink first.');
+      return;
+    }
+
+    // Link the Telegram account to the website user
+    db.prepare('INSERT OR REPLACE INTO max_telegram_links (user_id, telegram_user_id, telegram_username) VALUES (?, ?, ?)')
+      .run(codeRow.user_id, telegramUserId, telegramUsername);
+
+    // Mark code as used
+    db.prepare('UPDATE max_telegram_codes SET used = 1 WHERE code = ?').run(code);
+
+    logger.info('TELEGRAM_LINKED', { telegramUserId, telegramUsername, websiteUserId: codeRow.user_id });
+
+    await ctx.reply(
+      '✅ **Telegram linked successfully!**\n\n' +
+      'Your Telegram account is now connected to your MAX website account.\n\n' +
+      'From now on:\n' +
+      '• Conversations are shared between web and Telegram\n' +
+      '• Memories and knowledge base are shared\n' +
+      '• Settings and permissions are shared\n' +
+      '• Files created on either platform are accessible from both\n\n' +
+      'Use /unlink to remove the link at any time.'
+    );
+  } catch (e) {
+    logger.error('TELEGRAM_LINK_ERROR', { error: e.message });
+    await ctx.reply('❌ Failed to link: ' + e.message);
+  }
+}
+
+/**
+ * /unlink — remove Telegram → website link
+ */
+async function handleUnlinkCommand(ctx, telegramUserId) {
+  try {
+    const { getDatabase } = await import('../database/db.js');
+    const db = getDatabase();
+    const result = db.prepare('DELETE FROM max_telegram_links WHERE telegram_user_id = ?').run(telegramUserId);
+    if (result.changes > 0) {
+      await ctx.reply('✅ Telegram unlinked. Your conversations are now separate from the website.');
+    } else {
+      await ctx.reply('Your Telegram was not linked to any website account.');
+    }
   } catch (e) {
     await ctx.reply('❌ Failed: ' + e.message);
   }

@@ -34,6 +34,8 @@ export default function SettingsPanel({ open, onClose, models, currentModel, onM
   const [newMemory, setNewMemory] = useState({ key: '', value: '' });
   const [auditLog, setAuditLog] = useState([]);
   const [saving, setSaving] = useState(false);
+  const [tgCode, setTgCode] = useState(null);
+  const [tgStatus, setTgStatus] = useState(null);
 
   useEffect(() => {
     if (open) {
@@ -41,6 +43,7 @@ export default function SettingsPanel({ open, onClose, models, currentModel, onM
       loadPermissions();
       loadMemories();
       loadAuditLog();
+      loadTelegramStatus();
     }
   }, [open]);
 
@@ -75,6 +78,31 @@ export default function SettingsPanel({ open, onClose, models, currentModel, onM
     try {
       const r = await fetch(`${API_BASE}/api/permissions/audit?userId=web_user&limit=10`);
       if (r.ok) { const d = await r.json(); setAuditLog(d.auditLog || []); }
+    } catch (e) {}
+  };
+
+  const loadTelegramStatus = async () => {
+    try {
+      const token = localStorage.getItem('max_auth_token');
+      const r = await fetch(`${API_BASE}/api/auth/telegram-status`, { headers: { 'Authorization': `Bearer ${token}` } });
+      if (r.ok) { const d = await r.json(); setTgStatus(d); }
+    } catch (e) {}
+  };
+
+  const generateTelegramCode = async () => {
+    try {
+      const token = localStorage.getItem('max_auth_token');
+      const r = await fetch(`${API_BASE}/api/auth/link-telegram`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}` } });
+      if (r.ok) { const d = await r.json(); setTgCode(d.code); }
+    } catch (e) {}
+  };
+
+  const unlinkTelegram = async () => {
+    try {
+      const token = localStorage.getItem('max_auth_token');
+      await fetch(`${API_BASE}/api/auth/unlink-telegram`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}` } });
+      setTgStatus({ linked: false });
+      setTgCode(null);
     } catch (e) {}
   };
 
@@ -139,6 +167,33 @@ export default function SettingsPanel({ open, onClose, models, currentModel, onM
                 </select>
               </div>
               <button onClick={saveProfile} disabled={saving} className="flex items-center gap-2 px-4 py-2 bg-[#FF6B35] hover:bg-[#e55a24] disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"><Save size={14} /> {saving ? 'Saving...' : 'Save Profile'}</button>
+
+              {/* Telegram Linking */}
+              <div className="pt-4 border-t border-[#2a2a2a]">
+                <label className="block text-xs text-[#666] mb-2">Telegram Account</label>
+                {tgStatus?.linked ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2 p-2.5 bg-green-950/30 border border-green-900 rounded-lg">
+                      <span className="text-green-400 text-sm">✅ Linked to @{tgStatus.telegramUsername}</span>
+                    </div>
+                    <button onClick={unlinkTelegram} className="px-3 py-1.5 text-xs text-red-400 hover:bg-red-950/30 border border-red-900 rounded-lg">Unlink Telegram</button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {tgCode ? (
+                      <div className="p-3 bg-[#212121] border border-[#2a2a2a] rounded-lg">
+                        <div className="text-xs text-[#999] mb-1">Send this code to @Maxxxxclaww_bot on Telegram:</div>
+                        <div className="text-2xl font-mono font-bold text-[#FF6B35] tracking-wider">{tgCode}</div>
+                        <div className="text-[10px] text-[#555] mt-1">Expires in 10 minutes</div>
+                      </div>
+                    ) : (
+                      <button onClick={generateTelegramCode} className="flex items-center gap-2 px-3 py-2 bg-[#212121] hover:bg-[#2a2a2a] border border-[#2a2a2a] text-[#ccc] rounded-lg text-sm">
+                        🔗 Link Telegram Account
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 

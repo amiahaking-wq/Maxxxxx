@@ -133,6 +133,34 @@ export function migrateSecurity(db) {
 
       CREATE INDEX IF NOT EXISTS idx_customer_conversations_escalated
       ON max_customer_conversations(escalated, updated_at DESC);
+
+      -- Telegram account linking table
+      -- Maps Telegram user IDs to website user IDs (Supabase UUIDs)
+      CREATE TABLE IF NOT EXISTS max_telegram_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        telegram_user_id TEXT UNIQUE NOT NULL,
+        telegram_username TEXT,
+        linked_at TEXT DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_telegram_links_user
+      ON max_telegram_links(user_id);
+
+      CREATE INDEX IF NOT EXISTS idx_telegram_links_telegram
+      ON max_telegram_links(telegram_user_id);
+
+      -- Telegram linking codes (temporary, expire after 10 minutes)
+      CREATE TABLE IF NOT EXISTS max_telegram_codes (
+        code TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        expires_at TEXT NOT NULL,
+        used INTEGER DEFAULT 0
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_telegram_codes_user
+      ON max_telegram_codes(user_id);
     `);
 
     logger.info('Security + business profile migration completed');
