@@ -14,6 +14,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Menu, Folder } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { saveFile, downloadFile, listFiles } from '../lib/fileStore';
+import { getAuthHeaders } from '../lib/auth.js';
 import ArtifactCard from '../components/Artifact/ArtifactCard';
 import ArtifactPreview from '../components/Artifact/ArtifactPreview';
 import FilesPanel from '../components/Artifact/FilesPanel';
@@ -48,7 +49,7 @@ export default function ChatPage({ authToken, user, onLogout }) {
 
   // Fetch ALL models from API
   useEffect(() => {
-    fetch(`${API_BASE}/api/config/models`)
+    fetch(`${API_BASE}/api/config/models`, { headers: getAuthHeaders() })
       .then(r => r.json())
       .then(d => {
         if (d.models && d.models.length > 0) {
@@ -130,17 +131,17 @@ export default function ChatPage({ authToken, user, onLogout }) {
   useEffect(() => {
     if (currentModel) {
       localStorage.setItem('max_model', currentModel);
-      if (conversationId) fetch(`${API_BASE}/api/config/model`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: currentModel, userId: 'web_user' }) }).catch(() => {});
+      if (conversationId) fetch(`${API_BASE}/api/config/model`, { method: 'POST', headers: getAuthHeaders(), body: JSON.stringify({ model: currentModel }) }).catch(() => {});
     }
   }, [currentModel, conversationId]);
 
   useEffect(() => { if (!sessionId) { createConversation(); } else { setConversationId(sessionId); loadConversation(sessionId); } }, [sessionId]);
 
   async function createConversation() {
-    try { const r = await fetch(`${API_BASE}/api/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: 'web_user', platform: 'web', title: 'New Chat' }) }); const d = await r.json(); if (d.success) { setConversationId(d.conversation.id); setMessages([]); window.history.replaceState({}, '', `/chat/${d.conversation.id}`); } } catch (e) {}
+    try { const r = await fetch(`${API_BASE}/api/conversations`, { method: 'POST', headers: getAuthHeaders(), body: JSON.stringify({ platform: 'web', title: 'New Chat' }) }); const d = await r.json(); if (d.success) { setConversationId(d.conversation.id); setMessages([]); window.history.replaceState({}, '', `/chat/${d.conversation.id}`); } } catch (e) {}
   }
   async function loadConversation(id) {
-    try { const r = await fetch(`${API_BASE}/api/conversations/${id}?userId=web_user`); const d = await r.json(); if (d.success && d.conversation) { setConversationId(id); setMessages((d.conversation.messages || []).map(m => ({ id: m.id || Date.now() + Math.random(), role: m.role, content: m.content, timestamp: m.created_at || m.timestamp || new Date().toISOString(), filesModified: m.metadata?.filesModified || [] }))); } } catch (e) {}
+    try { const r = await fetch(`${API_BASE}/api/conversations/${id}`, { headers: getAuthHeaders() }); const d = await r.json(); if (d.success && d.conversation) { setConversationId(id); setMessages((d.conversation.messages || []).map(m => ({ id: m.id || Date.now() + Math.random(), role: m.role, content: m.content, timestamp: m.created_at || m.timestamp || new Date().toISOString(), filesModified: m.metadata?.filesModified || [] }))); } } catch (e) {}
   }
 
   const handleSend = async () => {
@@ -148,10 +149,10 @@ export default function ChatPage({ authToken, user, onLogout }) {
     const text = input.trim();
     setMessages(prev => [...prev, { id: Date.now(), role: 'user', content: text, timestamp: new Date().toISOString() }]);
     setInput(''); setIsStreaming(true); setStreamingText('');
-    try { const r = await fetch(`${API_BASE}/api/conversations/${conversationId}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text, userId: 'web_user' }) }); if (!r.ok) throw new Error('Failed'); } catch (e) { setMessages(prev => [...prev, { id: Date.now(), role: 'assistant', content: 'Error: ' + e.message, timestamp: new Date().toISOString() }]); setIsStreaming(false); }
+    try { const r = await fetch(`${API_BASE}/api/conversations/${conversationId}/messages`, { method: 'POST', headers: getAuthHeaders(), body: JSON.stringify({ message: text }) }); if (!r.ok) throw new Error('Failed'); } catch (e) { setMessages(prev => [...prev, { id: Date.now(), role: 'assistant', content: 'Error: ' + e.message, timestamp: new Date().toISOString() }]); setIsStreaming(false); }
   };
 
-  const handleStop = async () => { if (!conversationId) return; try { await fetch(`${API_BASE}/api/agent/cancel/${conversationId}`, { method: 'POST' }); } catch (e) {} setIsStreaming(false); if (streamingText) { setMessages(prev => [...prev, { id: Date.now(), role: 'assistant', content: streamingText + '\n\n_(stopped)_', timestamp: new Date().toISOString() }]); setStreamingText(''); } };
+  const handleStop = async () => { if (!conversationId) return; try { await fetch(`${API_BASE}/api/agent/cancel/${conversationId}`, { method: 'POST', headers: getAuthHeaders() }); } catch (e) {} setIsStreaming(false); if (streamingText) { setMessages(prev => [...prev, { id: Date.now(), role: 'assistant', content: streamingText + '\n\n_(stopped)_', timestamp: new Date().toISOString() }]); setStreamingText(''); } };
 
   const handleNewChat = () => { setShowSidebar(false); setMessages([]); setConversationId(null); navigate('/chat'); setTimeout(() => createConversation(), 100); };
   const handleOpenArtifact = useCallback((f) => { setPreviewFile({ ...f, sessionId: f.sessionId || conversationId, content: f.content || '' }); }, [conversationId]);

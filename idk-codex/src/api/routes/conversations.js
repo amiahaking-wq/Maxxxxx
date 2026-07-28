@@ -11,6 +11,7 @@
  */
 
 import express from 'express';
+import { optionalAuth } from '../../auth/middleware.js';
 import {
   createConversation,
   listConversations,
@@ -26,6 +27,9 @@ import logger from '../../utils/logger.js';
 
 const router = express.Router();
 
+// Apply optionalAuth to all conversation routes — extracts user from JWT if present
+router.use(optionalAuth);
+
 // Run migration on first load
 // Initialize SQLite migration (for fallback when Supabase not configured)
 try {
@@ -33,7 +37,7 @@ try {
   migrateConversations();
 } catch (e) { /* ok */ }
 
-const USER_ID = 'default-user';
+const USER_ID = 'web_user'; // fallback when no auth
 
 // Log storage mode on startup
 logger.info('Conversation storage', { supabase: isSupabaseConfigured() ? 'ENABLED (persistent)' : 'DISABLED (SQLite ephemeral)' });
@@ -43,7 +47,7 @@ logger.info('Conversation storage', { supabase: isSupabaseConfigured() ? 'ENABLE
 // ============================================================================
 router.get('/', async (req, res) => {
   try {
-    const userId = req.query.userId || USER_ID;
+    const userId = req.user.id;
     const conversations = await listConversations(userId);
     res.json({ success: true, conversations, storage: isSupabaseConfigured() ? 'supabase' : 'sqlite' });
   } catch (err) {
@@ -57,7 +61,7 @@ router.get('/', async (req, res) => {
 // ============================================================================
 router.post('/', async (req, res) => {
   try {
-    const userId = req.body.userId || USER_ID;
+    const userId = req.user.id;
     const platform = req.body.platform || 'web';
     const title = req.body.title || 'New Conversation';
 
@@ -74,7 +78,7 @@ router.post('/', async (req, res) => {
 // ============================================================================
 router.get('/:id', async (req, res) => {
   try {
-    const userId = req.query.userId || USER_ID;
+    const userId = req.user.id;
     const conv = await getConversation(req.params.id, userId);
 
     if (!conv) {
@@ -93,7 +97,7 @@ router.get('/:id', async (req, res) => {
 // ============================================================================
 router.delete('/:id', async (req, res) => {
   try {
-    const userId = req.query.userId || USER_ID;
+    const userId = req.user.id;
     const deleted = await deleteConversation(req.params.id, userId);
 
     if (!deleted) {
@@ -112,7 +116,7 @@ router.delete('/:id', async (req, res) => {
 // ============================================================================
 router.patch('/:id', async (req, res) => {
   try {
-    const userId = req.body.userId || USER_ID;
+    const userId = req.user.id;
     const title = req.body.title;
 
     if (!title) {
@@ -137,7 +141,7 @@ router.patch('/:id', async (req, res) => {
 router.post('/:id/messages', async (req, res) => {
   try {
     const conversationId = req.params.id;
-    const userId = req.body.userId || USER_ID;
+    const userId = req.user.id;
     const { message, runAgent, images } = req.body;
 
     if (!message) {

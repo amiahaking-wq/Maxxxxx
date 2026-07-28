@@ -5,6 +5,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Plus, Search, Settings, X, MessageSquare, Trash2, Edit2, Check } from 'lucide-react';
+import { getAuthHeaders } from '../lib/auth.js';
 
 const API_BASE = import.meta.env.VITE_API_URL || window.location.origin;
 
@@ -19,7 +20,7 @@ export default function Sidebar({ open, onClose, currentSessionId, onSwitchSessi
   const loadConversations = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await fetch(`${API_BASE}/api/conversations?userId=web_user`);
+      const r = await fetch(`${API_BASE}/api/conversations`, { headers: getAuthHeaders() });
       if (r.ok) {
         const d = await r.json();
         if (d.success) setConversations(d.conversations || []);
@@ -39,14 +40,14 @@ export default function Sidebar({ open, onClose, currentSessionId, onSwitchSessi
   const handleDelete = async (e, id) => {
     e.stopPropagation();
     if (!confirm('Delete this conversation?')) return;
-    try { await fetch(`${API_BASE}/api/conversations/${id}?userId=web_user`, { method: 'DELETE' }); setConversations(p => p.filter(c => c.id !== id)); } catch (e) {}
+    try { await fetch(`${API_BASE}/api/conversations/${id}`, { method: 'DELETE', headers: getAuthHeaders() }); setConversations(p => p.filter(c => c.id !== id)); } catch (e) {}
   };
 
   const handleRenameStart = (e, c) => { e.stopPropagation(); setEditingId(c.id); setEditingTitle(c.title || ''); };
   const handleRenameSave = async (e, c) => {
     e.stopPropagation();
     if (!editingTitle.trim()) { setEditingId(null); return; }
-    try { await fetch(`${API_BASE}/api/conversations/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: 'web_user', title: editingTitle.trim() }) }); setConversations(p => p.map(x => x.id === c.id ? { ...x, title: editingTitle.trim() } : x)); } catch (e) {} setEditingId(null);
+    try { await fetch(`${API_BASE}/api/conversations/${c.id}`, { method: 'PATCH', headers: getAuthHeaders(), body: JSON.stringify({ title: editingTitle.trim() }) }); setConversations(p => p.map(x => x.id === c.id ? { ...x, title: editingTitle.trim() } : x)); } catch (e) {} setEditingId(null);
   };
 
   const filtered = conversations.filter(c => !search || (c.title || '').toLowerCase().includes(search.toLowerCase()));
