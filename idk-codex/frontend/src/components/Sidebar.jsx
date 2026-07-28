@@ -1,10 +1,14 @@
+/**
+ * Sidebar — Claude-style dark sidebar.
+ * 280px on desktop, full-screen overlay on mobile.
+ */
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { X, Plus, MessageSquare, Trash2, Edit2, Check, Search, Clock } from 'lucide-react';
+import { Plus, Search, Settings, X, MessageSquare, Trash2, Edit2, Check } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || window.location.origin;
 
-export default function Sidebar({ open, onClose, currentSessionId, onSwitchSession, onNewChat }) {
+export default function Sidebar({ open, onClose, currentSessionId, onSwitchSession, onNewChat, onOpenSettings }) {
   const [conversations, setConversations] = useState([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
@@ -16,90 +20,138 @@ export default function Sidebar({ open, onClose, currentSessionId, onSwitchSessi
     setLoading(true);
     try {
       const r = await fetch(`${API_BASE}/api/conversations?userId=web_user`);
-      if (r.ok) { const data = await r.json(); if (data.success) setConversations(data.conversations || []); }
+      if (r.ok) {
+        const d = await r.json();
+        if (d.success) setConversations(d.conversations || []);
+      }
     } catch (e) {} finally { setLoading(false); }
   }, []);
 
   useEffect(() => { if (open) loadConversations(); }, [open, loadConversations]);
 
   const handleNewChat = () => { onNewChat && onNewChat(); onClose && onClose(); };
-  const handleSwitch = (conv) => { if (onSwitchSession) onSwitchSession(conv.id); else navigate(`/chat/${conv.id}`); onClose && onClose(); };
-
-  const handleDelete = async (e, convId) => {
-    e.stopPropagation();
-    if (!confirm('Delete this conversation?')) return;
-    try { await fetch(`${API_BASE}/api/conversations/${convId}?userId=web_user`, { method: 'DELETE' }); setConversations(prev => prev.filter(c => c.id !== convId)); } catch (e) {}
+  const handleSwitch = (c) => {
+    if (onSwitchSession) onSwitchSession(c.id);
+    else navigate(`/chat/${c.id}`);
+    onClose && onClose();
   };
 
-  const handleRenameStart = (e, conv) => { e.stopPropagation(); setEditingId(conv.id); setEditingTitle(conv.title || ''); };
-  const handleRenameSave = async (e, conv) => {
+  const handleDelete = async (e, id) => {
+    e.stopPropagation();
+    if (!confirm('Delete this conversation?')) return;
+    try { await fetch(`${API_BASE}/api/conversations/${id}?userId=web_user`, { method: 'DELETE' }); setConversations(p => p.filter(c => c.id !== id)); } catch (e) {}
+  };
+
+  const handleRenameStart = (e, c) => { e.stopPropagation(); setEditingId(c.id); setEditingTitle(c.title || ''); };
+  const handleRenameSave = async (e, c) => {
     e.stopPropagation();
     if (!editingTitle.trim()) { setEditingId(null); return; }
-    try { await fetch(`${API_BASE}/api/conversations/${conv.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: 'web_user', title: editingTitle.trim() }) }); setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, title: editingTitle.trim() } : c)); } catch (e) {}
-    setEditingId(null);
+    try { await fetch(`${API_BASE}/api/conversations/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: 'web_user', title: editingTitle.trim() }) }); setConversations(p => p.map(x => x.id === c.id ? { ...x, title: editingTitle.trim() } : x)); } catch (e) {} setEditingId(null);
   };
 
   const filtered = conversations.filter(c => !search || (c.title || '').toLowerCase().includes(search.toLowerCase()));
+
+  // Group conversations by date
+  const grouped = {};
+  filtered.forEach(c => {
+    const date = c.updated_at ? new Date(c.updated_at) : new Date();
+    const today = new Date();
+    const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
+    let group;
+    if (date.toDateString() === today.toDateString()) group = 'Today';
+    else if (date.toDateString() === yesterday.toDateString()) group = 'Yesterday';
+    else group = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    if (!grouped[group]) grouped[group] = [];
+    grouped[group].push(c);
+  });
+
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-40 flex" onClick={onClose}>
-      <div className="absolute inset-0 bg-black/60" />
-      <div className="relative bg-gray-950 border-r border-gray-800 w-[85%] max-w-sm h-full flex flex-col" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
-          <div className="flex items-center gap-2"><MessageSquare size={20} className="text-blue-400" /><h2 className="font-semibold text-gray-100">Chats</h2><span className="text-xs text-gray-500 bg-gray-800 px-2 py-0.5 rounded">{conversations.length}</span></div>
-          <button onClick={onClose} className="p-2 hover:bg-gray-800 rounded-lg text-gray-400"><X size={18} /></button>
+    <>
+      {/* Backdrop on mobile */}
+      <div className="fixed inset-0 z-40 bg-black/60 md:hidden" onClick={onClose} />
+
+      {/* Sidebar */}
+      <div className="fixed left-0 top-0 bottom-0 z-50 w-[280px] bg-[#171717] border-r border-[#2a2a2a] flex flex-col">
+        {/* Top: Logo + New Chat */}
+        <div className="p-3 border-b border-[#2a2a2a]">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-full bg-[#FF6B35] flex items-center justify-center text-white font-bold text-sm">M</div>
+              <span className="text-[#ececec] font-semibold text-sm">MAX</span>
+            </div>
+            <button onClick={onClose} className="p-1.5 hover:bg-[#2a2a2a] rounded-lg text-[#666] md:hidden"><X size={18} /></button>
+          </div>
+          <button onClick={handleNewChat} className="w-full flex items-center gap-2 px-3 py-2 bg-[#212121] hover:bg-[#2a2a2a] text-[#ececec] rounded-lg text-sm font-medium transition-colors">
+            <Plus size={16} /> New Chat
+          </button>
         </div>
-        <div className="p-3 border-b border-gray-800">
-          <button onClick={handleNewChat} className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors text-sm font-medium"><Plus size={16} /> New Chat</button>
-        </div>
-        <div className="p-3 border-b border-gray-800">
+
+        {/* Search */}
+        <div className="p-3 border-b border-[#2a2a2a]">
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 w-4 h-4" />
-            <input type="text" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search chats..." className="w-full pl-9 pr-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#666] w-3.5 h-3.5" />
+            <input type="text" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search conversations..." className="w-full pl-8 pr-3 py-1.5 bg-[#212121] border border-[#2a2a2a] rounded-lg text-xs text-[#ececec] placeholder-[#666] focus:outline-none focus:border-[#FF6B35]/50" />
           </div>
         </div>
-        <div className="flex-1 overflow-y-auto">
+
+        {/* Conversation list */}
+        <div className="flex-1 overflow-y-auto px-2 py-2">
           {loading ? (
-            <div className="text-center py-8 text-gray-500 text-sm">Loading...</div>
+            <div className="text-center py-8 text-[#666] text-xs">Loading...</div>
           ) : filtered.length === 0 ? (
-            <div className="text-center py-8 px-4"><Clock size={32} className="mx-auto text-gray-700 mb-2" /><p className="text-gray-500 text-sm">{search ? 'No chats match.' : 'No chats yet.'}</p></div>
-          ) : (
-            <div className="divide-y divide-gray-900">
-              {filtered.map(conv => {
-                const isActive = conv.id === currentSessionId;
-                const isEditing = editingId === conv.id;
-                return (
-                  <div key={conv.id} onClick={() => !isEditing && handleSwitch(conv)} className={`flex items-center gap-3 px-4 py-3 cursor-pointer transition-colors group ${isActive ? 'bg-gray-900 border-l-2 border-blue-500' : 'hover:bg-gray-900 border-l-2 border-transparent'}`}>
-                    <MessageSquare size={16} className={`flex-shrink-0 ${isActive ? 'text-blue-400' : 'text-gray-500'}`} />
-                    <div className="flex-1 min-w-0">
-                      {isEditing ? (
-                        <input type="text" value={editingTitle} onChange={(e) => setEditingTitle(e.target.value)} onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.key === 'Enter' && handleRenameSave(e, conv)} className="w-full px-2 py-1 bg-gray-800 border border-blue-500 rounded text-sm text-white focus:outline-none" autoFocus />
-                      ) : (
-                        <>
-                          <div className={`text-sm truncate ${isActive ? 'text-white font-medium' : 'text-gray-300'}`}>{conv.title || 'Untitled'}</div>
-                          <div className="text-xs text-gray-600 mt-0.5">{conv.updated_at ? new Date(conv.updated_at).toLocaleString() : ''}</div>
-                        </>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                      {isEditing ? (
-                        <button onClick={(e) => handleRenameSave(e, conv)} className="p-1.5 hover:bg-gray-800 rounded text-green-400"><Check size={14} /></button>
-                      ) : (
-                        <>
-                          <button onClick={(e) => handleRenameStart(e, conv)} className="p-1.5 hover:bg-gray-800 rounded text-gray-400"><Edit2 size={14} /></button>
-                          <button onClick={(e) => handleDelete(e, conv.id)} className="p-1.5 hover:bg-gray-800 rounded text-red-400"><Trash2 size={14} /></button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+            <div className="text-center py-8 px-4">
+              <MessageSquare size={24} className="mx-auto text-[#333] mb-2" />
+              <p className="text-[#666] text-xs">{search ? 'No matches' : 'No conversations yet'}</p>
             </div>
+          ) : (
+            Object.entries(grouped).map(([group, convs]) => (
+              <div key={group} className="mb-3">
+                <div className="px-2 py-1 text-[10px] font-semibold text-[#555] uppercase tracking-wider">{group}</div>
+                {convs.map(c => {
+                  const isActive = c.id === currentSessionId;
+                  const isEditing = editingId === c.id;
+                  return (
+                    <div key={c.id} onClick={() => !isEditing && handleSwitch(c)} className={`group flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isActive ? 'bg-[#212121]' : 'hover:bg-[#1e1e1e]'}`}>
+                      <MessageSquare size={13} className={`flex-shrink-0 ${isActive ? 'text-[#FF6B35]' : 'text-[#555]'}`} />
+                      <div className="flex-1 min-w-0">
+                        {isEditing ? (
+                          <input type="text" value={editingTitle} onChange={(e) => setEditingTitle(e.target.value)} onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.key === 'Enter' && handleRenameSave(e, c)} className="w-full px-1.5 py-0.5 bg-[#2a2a2a] border border-[#FF6B35] rounded text-xs text-white focus:outline-none" autoFocus />
+                        ) : (
+                          <div className={`text-xs truncate ${isActive ? 'text-[#ececec]' : 'text-[#999]'}`}>{c.title || 'Untitled'}</div>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                        {isEditing ? (
+                          <button onClick={(e) => handleRenameSave(e, c)} className="p-1 hover:bg-[#2a2a2a] rounded text-green-400"><Check size={12} /></button>
+                        ) : (
+                          <>
+                            <button onClick={(e) => handleRenameStart(e, c)} className="p-1 hover:bg-[#2a2a2a] rounded text-[#666]"><Edit2 size={11} /></button>
+                            <button onClick={(e) => handleDelete(e, c.id)} className="p-1 hover:bg-[#2a2a2a] rounded text-red-400"><Trash2 size={11} /></button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ))
           )}
         </div>
-        <div className="px-4 py-2 border-t border-gray-800 bg-gray-900 text-xs text-gray-500">Chats stored in Supabase — persist forever.</div>
+
+        {/* Bottom: User + Settings */}
+        <div className="p-3 border-t border-[#2a2a2a]">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-full bg-[#FF6B35]/20 text-[#FF6B35] flex items-center justify-center font-bold text-sm">U</div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs text-[#ececec] font-medium truncate">User</div>
+              <div className="text-[10px] text-[#666]">web_user</div>
+            </div>
+            <button onClick={onOpenSettings} className="p-2 hover:bg-[#2a2a2a] rounded-lg text-[#666] hover:text-[#ececec]"><Settings size={16} /></button>
+          </div>
+        </div>
       </div>
-    </div>
+    </>
   );
 }

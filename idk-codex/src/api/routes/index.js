@@ -17,6 +17,7 @@ import connectorsRouter from './connectors.js';
 import uploadRouter from './upload.js';
 import permissionsRouter from './permissions.js';
 import csRouter from './cs.js';
+import extrasRouter from './extras.js';
 
 const router = Router();
 
@@ -59,7 +60,8 @@ router.use('/connectors', connectorsRouter);
 router.use('/upload', uploadRouter);
 router.use('/permissions', permissionsRouter);
 router.use('/cs', csRouter);
-router.use('/files/download', uploadRouter); // mount download at /api/files/download too
+router.use('/', extrasRouter);  // memory + user profile routes
+router.use('/files/download', uploadRouter);
 
 // Expose runtime endpoint at /api/runtime (from agent router)
 import { getDatabase } from '../../database/db.js';
