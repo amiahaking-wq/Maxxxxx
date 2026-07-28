@@ -1,4 +1,4 @@
-/* Global Styles - Clean and Minimal */
+/* Global Styles — Bulletproof mobile layout */
 
 * {
   box-sizing: border-box;
@@ -6,24 +6,27 @@
   padding: 0;
 }
 
-:root {
-  --vh: 1vh; /* Will be updated via JS */
-}
-
-/**
- * Width Strategy:
- * - width: 100% ensures full container width
- * - max-width: 100% (NOT 100vw) prevents scrollbar issues on Windows/Linux
- * - overflow: hidden keeps original SPA architecture with internal scrolling
- */
-html, body, #root {
+html, body {
   width: 100%;
   max-width: 100%;
-  /* Use 100dvh (dynamic viewport height) for iOS Safari support */
-  /* Falls back to 100vh for older browsers */
-  height: 100vh;
-  height: 100dvh;
+  /* Use the JS-set --app-height variable. Falls back to 100dvh then 100vh. */
+  height: var(--app-height, 100dvh);
   overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: #1a1a1a;
+  color: #ececec;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
   /* Safe area insets for iOS notch/home indicator */
   padding-top: env(safe-area-inset-top);
   padding-bottom: env(safe-area-inset-bottom);
@@ -31,29 +34,33 @@ html, body, #root {
   padding-right: env(safe-area-inset-right);
 }
 
-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  background: #0f0f0f;
-  color: #ffffff;
-  position: relative;
-  margin: 0;
-  padding: 0;
-}
-
 #root {
   display: flex;
   flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Prevent text size adjustment on orientation change */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 /* Remove default button styles */
 button {
   font-family: inherit;
+  -webkit-tap-highlight-color: transparent;
 }
 
 input, textarea {
   font-family: inherit;
+  -webkit-appearance: none;
+  appearance: none;
 }
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }

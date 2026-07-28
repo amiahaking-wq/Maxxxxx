@@ -12,11 +12,13 @@ import RepoPage from './pages/RepoPage';
 import TasksPage from './pages/TasksPage';
 import BottomNav from './components/BottomNav';
 import AuthScreen from './components/AuthScreen';
+import { useViewportHeight } from './hooks/useViewportHeight';
 import './App.css';
 
 const API_BASE = import.meta.env.VITE_API_URL || window.location.origin;
 
 function App() {
+  useViewportHeight();
   const [authToken, setAuthToken] = useState(() => localStorage.getItem('max_auth_token'));
   const [currentUser, setCurrentUser] = useState(() => {
     try { return JSON.parse(localStorage.getItem('max_user') || 'null'); } catch { return null; }

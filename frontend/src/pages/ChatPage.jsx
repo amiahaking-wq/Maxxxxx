@@ -13,6 +13,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Menu, Folder } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { useViewportHeight } from '../hooks/useViewportHeight';
 import { saveFile, downloadFile, listFiles } from '../lib/fileStore';
 import { getAuthHeaders } from '../lib/auth.js';
 import ArtifactCard from '../components/Artifact/ArtifactCard';
@@ -27,6 +28,7 @@ import WelcomeScreen from '../components/WelcomeScreen';
 const API_BASE = import.meta.env.VITE_API_URL || window.location.origin;
 
 export default function ChatPage({ authToken, user, onLogout }) {
+  useViewportHeight();
   const { sessionId } = useParams();
   const navigate = useNavigate();
 
@@ -159,12 +161,12 @@ export default function ChatPage({ authToken, user, onLogout }) {
   const handleDownloadArtifact = useCallback(async (f) => { await downloadFile(f.sessionId || conversationId, f.path); }, [conversationId]);
 
   return (
-    <div className="flex bg-[#1a1a1a] text-[#ececec] overflow-hidden" style={{ height: '100dvh', height: '100vh' }}>
+    <div className="flex bg-[#1a1a1a] text-[#ececec] overflow-hidden" style={{ height: 'var(--app-height, 100dvh)' }}>
       {/* Sidebar */}
       <Sidebar open={showSidebar} onClose={() => setShowSidebar(false)} currentSessionId={conversationId} onSwitchSession={(id) => navigate(`/chat/${id}`)} onNewChat={handleNewChat} onOpenSettings={() => { setShowSidebar(false); setShowSettings(true); }} onLogout={onLogout} user={user} />
 
       {/* Main area */}
-      <div className="flex-1 flex flex-col min-w-0" style={{ height: '100dvh', height: '100vh' }}>
+      <div className="flex-1 flex flex-col min-w-0" style={{ height: 'var(--app-height, 100dvh)' }}>
         {/* Header — fixed, with iOS safe area top padding */}
         <div className="flex items-center justify-between px-3 py-2.5 border-b border-[#2a2a2a] bg-[#171717] flex-shrink-0" style={{ paddingTop: 'max(0.625rem, env(safe-area-inset-top))' }}>
           <button onClick={() => setShowSidebar(true)} className="p-2 hover:bg-[#2a2a2a] rounded-lg text-[#999]"><Menu size={18} /></button>
