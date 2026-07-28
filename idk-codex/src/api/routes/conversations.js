@@ -300,7 +300,8 @@ router.post('/:id/messages', async (req, res) => {
         } catch (err) {
           logger.error('Chat response failed', { error: err.message });
           process.env.ECHO_PROVIDER_ENABLED = 'true';
-          const fallback = '⚠️ I could not generate a response right now.\n\nTo fix this permanently, add a free OpenRouter API key:\n1. Go to https://openrouter.ai/keys\n2. Create a free key\n3. Add OPENAI_COMPATIBLE_BASE_URL and OPENAI_COMPATIBLE_API_KEY to Railway';
+          const currentModel = process.env.OPENAI_COMPATIBLE_MODEL || 'openrouter/auto';
+          const fallback = `⚠️ The selected model (${currentModel}) could not respond.\n\nError: ${err.message}\n\nTry selecting a different model from the dropdown.`;
           await addConversationMessage(conversationId, 'assistant', fallback);
           broadcastMessage(conversationId, {
             role: 'assistant',

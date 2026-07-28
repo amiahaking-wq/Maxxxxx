@@ -468,7 +468,10 @@ class LLMAdapter {
     }
 
     // Legacy fallback logic
-    const autoFallback = process.env.LLM_AUTO_FALLBACK !== 'false';
+    // DISABLED auto-fallback by default — if the user selected a specific model,
+    // respect that choice. If it fails, return the error instead of silently
+    // switching to a different provider. The user gets told what happened.
+    const autoFallback = process.env.LLM_AUTO_FALLBACK === 'true'; // Must be explicitly enabled
 
     // Filter out Echo provider unless explicitly enabled at call time
     // This prevents Echo from being used as a fallback for real tasks/chat

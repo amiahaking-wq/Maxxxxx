@@ -872,7 +872,8 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
       process.env.ECHO_PROVIDER_ENABLED = prevEcho;
     } catch (err) {
       logger.error('REACT_LLM_ERROR', { iteration, error: err.message });
-      finalSummary = 'I could not process this because all LLM providers failed: ' + err.message;
+      const currentModel = process.env.OPENAI_COMPATIBLE_MODEL || 'openrouter/auto';
+      finalSummary = `⚠️ The selected model (${currentModel}) could not process this request.\n\nError: ${err.message}\n\nTry selecting a different model from the dropdown, or check if your Phone/Termux device is connected.`;
       break;
     }
 
