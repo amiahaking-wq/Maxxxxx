@@ -289,7 +289,12 @@ router.post('/:id/messages', async (req, res) => {
           // Restore Echo for the ReAct agent loop
           process.env.ECHO_PROVIDER_ENABLED = 'true';
 
-          const response = result?.content || 'Sorry, I could not generate a response.';
+          if (!result || (!result.content && !result.tool_calls)) {
+            const currentModel = process.env.OPENAI_COMPATIBLE_MODEL || 'openrouter/auto';
+            throw new Error(`Model ${currentModel} returned empty response. Try a different model.`);
+          }
+
+          const response = result.content || 'Sorry, I could not generate a response.';
 
           await addConversationMessage(conversationId, 'assistant', response);
           broadcastMessage(conversationId, {
