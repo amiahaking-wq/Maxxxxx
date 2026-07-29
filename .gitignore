@@ -53,3 +53,18 @@ idk-codex/terminal-smoke-test.js
 
 # Obsidian vault (live-sync target)
 obsidian-vault/
+
+# Next.js build output (Phase 1)
+idk-codex/max-frontend/.next/
+idk-codex/max-frontend/out/
+idk-codex/max-frontend/.env*.local
+
+# PWA generated icons (regenerate with scripts/gen_pwa_icons.py)
+idk-codex/max-frontend/public/icon-*.png
+idk-codex/max-frontend/public/apple-touch-icon.png
+idk-codex/max-frontend/public/maskable-icon-512x512.png
+idk-codex/max-frontend/public/favicon-32x32.png
+
+# Keep the logo.svg (source) and existing favicon.svg
+!idk-codex/max-frontend/public/logo.svg
+!idk-codex/max-frontend/public/favicon.svg
