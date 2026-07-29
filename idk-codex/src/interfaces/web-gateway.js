@@ -229,13 +229,13 @@ export class WebGateway {
     // Configure Socket.IO with extended ping timeout to prevent Railway transport close errors
     this.io = new SocketIO(this.server, {
       cors: {
-        origin: process.env.WEB_UI_ORIGIN || '*',
+        origin: '*',
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
         credentials: false
       },
       pingTimeout: 300000,   // 5 min — client has 5 min to respond (slow CPU/phone)
       pingInterval: 120000,  // ping every 2 min — less frequent = less overhead
-      transports: ['websocket', 'polling'],
+      transports: ['polling', 'websocket'],  // polling first — Railway proxy doesn't support WS upgrades
       allowEIO3: true,
       maxHttpBufferSize: 1e8
     });
