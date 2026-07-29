@@ -90,7 +90,8 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
     console.log('[MAX] Connecting Socket.IO to:', socketUrl);
     const socket = io(socketUrl, {
       auth: { token },
-      transports: ['polling', 'websocket'],  // polling first — more reliable through Railway proxy
+      transports: ['polling'],  // polling ONLY — Railway proxy doesn't support WebSocket upgrades
+      upgrade: false,           // don't try to upgrade to websocket
       reconnection: true,
       reconnectionAttempts: 10,
       reconnectionDelay: 2000
