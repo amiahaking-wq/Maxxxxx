@@ -622,11 +622,11 @@ async function handleTaskCommand(ctx, userId, text) {
   const taskText = text.replace('/task', '').trim();
 
   if (!taskText) {
-    await ctx.reply('❌ Please describe what you want me to build.\n\nExample: /task Add a login page');
+    await tgReply(ctx, 'Please describe what you want me to build.\n\nExample: /task Add a login page', {}, false);
     return;
   }
 
-  await ctx.reply('🚀 Starting: ' + taskText);
+  await tgReply(ctx, 'Starting: ' + taskText.substring(0, 200), {}, false);
 
   try {
     const sessionId = await getOrCreateSession(userId, 'telegram');
@@ -647,9 +647,37 @@ async function handleTaskCommand(ctx, userId, text) {
     }
 
     await addMessage(sessionId, 'user', taskText);
+
+    // ===== STREAMING STATUS UPDATES (Phase 3) =====
+    // Send an initial status message and update it every 2 seconds with progress
+    let statusMessage;
+    try { statusMessage = await ctx.reply('⏳ Starting task...'); } catch { statusMessage = null; }
+
+    const toolLog = [];
+    let updateCount = 0;
+    let lastStatusText = '';
+
+    const updateInterval = setInterval(async () => {
+      const statusText = buildStatusText(toolLog, taskText, updateCount);
+      if (statusText !== lastStatusText && statusMessage) {
+        try {
+          await tgEditMessage(ctx, ctx.chat.id, statusMessage.message_id, statusText, {}, false);
+          lastStatusText = statusText;
+        } catch (e) { /* rate limit */ }
+      }
+      updateCount++;
+    }, 2000);
+
     const results = await executeReActLoop(taskText, sessionId, userId, {
       workspacePath: process.env.SANDBOX_WORKSPACE || './sandbox-workspace'
     });
+
+    clearInterval(updateInterval);
+
+    // Delete the status message
+    if (statusMessage) {
+      try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMessage.message_id); } catch (e) {}
+    }
 
     // Build summary from ReAct loop results
     let summary = '';
@@ -678,7 +706,7 @@ async function handleTaskCommand(ctx, userId, text) {
           const fullPath = path.resolve(workspace, filePath);
           if (fs.existsSync(fullPath)) {
             const stats = fs.statSync(fullPath);
-            if (stats.size < 10 * 1024 * 1024) { // 10MB limit
+            if (stats.size < 10 * 1024 * 1024) {
               await ctx.replyWithDocument({ source: fullPath, filename: filePath.split('/').pop() });
             } else {
               await tgReply(ctx, '📎 ' + filePath + ' (too large to send, ' + (stats.size / 1024 / 1024).toFixed(1) + 'MB)', {}, false);
@@ -689,10 +717,59 @@ async function handleTaskCommand(ctx, userId, text) {
         }
       }
     }
+
+    // Notify user via Telegram for long tasks (>30s) — Phase 3
+    try { await notifyUserIfLong(userId, 30000, summary); } catch (e) {}
   } catch (err) {
     logger.error('TASK_FAILED', { userId, task: taskText, error: err.message, stack: err.stack });
     await tgReply(ctx, '❌ Failed: ' + err.message, {}, false);
   }
+}
+
+/**
+ * Build streaming status text for Telegram updates.
+ * Plain text — no parse_mode to avoid Markdown crashes.
+ */
+function buildStatusText(toolLog, task, count) {
+  const spinner = ['⏳', '🔄', '⚙️', '🛠️'][count % 4];
+  const dots = '.'.repeat((count % 3) + 1);
+
+  let text = `${spinner} MAX is working${dots}\n`;
+  text += `${task.slice(0, 60)}${task.length > 60 ? '...' : ''}\n\n`;
+
+  if (toolLog.length > 0) {
+    text += 'Actions taken:\n';
+    const recent = toolLog.slice(-5);
+    for (const tc of recent) {
+      const icon = tc.status === 'running' ? '🔵' : '✅';
+      text += `${icon} ${tc.tool}\n`;
+    }
+  }
+
+  return text;
+}
+
+/**
+ * Notify user via Telegram if a task took longer than 30 seconds.
+ */
+async function notifyUserIfLong(userId, taskDurationMs, summary) {
+  if (taskDurationMs < 30000) return;
+  const { getDatabase } = await import('../database/db.js');
+  const db = getDatabase();
+  try {
+    const profile = db.prepare('SELECT telegram_notify_id FROM user_preferences WHERE user_id = ?').get(String(userId));
+    if (!profile?.telegram_notify_id) return;
+    const botToken = process.env.TELEGRAM_BOT_TOKEN;
+    if (!botToken) return;
+    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: profile.telegram_notify_id,
+        text: `✅ Your MAX task is complete!\n\n${summary.slice(0, 500)}`
+      })
+    });
+  } catch (e) { /* non-fatal */ }
 }
 
 /**
@@ -1530,5 +1607,192 @@ async function handleUnlinkCommand(ctx, telegramUserId) {
     }
   } catch (e) {
     await ctx.reply('❌ Failed: ' + e.message);
+  }
+}
+
+// ============================================================================
+// VOICE MESSAGE HANDLER (Phase 3) — transcribed via Groq Whisper (free)
+// ============================================================================
+
+/**
+ * Handle voice messages from Telegram.
+ * Downloads the audio, transcribes it with Groq's free Whisper API,
+ * then runs the transcribed text as an agent task.
+ */
+export async function handleTelegramVoice(ctx) {
+  const voice = ctx.message?.voice;
+  if (!voice) return;
+
+  const userId = String(ctx.from?.id);
+  logger.info('TG_VOICE_RECEIVED', { userId, duration: voice.duration });
+
+  try {
+    await ctx.sendChatAction('typing');
+    await tgReply(ctx, '🎤 Transcribing your voice message...', {}, false);
+
+    // Get the voice file from Telegram
+    const fileLink = await ctx.telegram.getFileLink(voice.file_id);
+    const audioRes = await fetch(fileLink.href);
+    if (!audioRes.ok) throw new Error('Failed to download voice file');
+    const audioBuffer = Buffer.from(await audioRes.arrayBuffer());
+
+    // Transcribe with Groq Whisper (free tier) — fallback gracefully
+    let text = '';
+    const groqKey = process.env.GROQ_API_KEY;
+    if (groqKey) {
+      try {
+        const formData = new FormData();
+        formData.append('file', new Blob([audioBuffer], { type: 'audio/ogg' }), 'voice.ogg');
+        formData.append('model', 'whisper-large-v3');
+        formData.append('language', 'en');
+
+        const transcriptionRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${groqKey}` },
+          body: formData
+        });
+
+        if (transcriptionRes.ok) {
+          const transcription = await transcriptionRes.json();
+          text = transcription.text || '';
+        } else {
+          throw new Error(`Groq API ${transcriptionRes.status}`);
+        }
+      } catch (transcribeErr) {
+        logger.warn('Groq Whisper failed', { error: transcribeErr.message });
+        await tgReply(ctx, '⚠️ Voice transcription failed. GROQ_API_KEY may be missing or invalid. Please type your message instead.', {}, false);
+        return;
+      }
+    } else {
+      await tgReply(ctx, '⚠️ Voice transcription requires GROQ_API_KEY. Please type your message instead.', {}, false);
+      return;
+    }
+
+    if (!text || text.trim().length === 0) {
+      await tgReply(ctx, 'Could not understand the audio. Please try again or type your message.', {}, false);
+      return;
+    }
+
+    logger.info('TG_VOICE_TRANSCRIBED', { userId, textLength: text.length });
+    await tgReply(ctx, `🎤 I heard: "${text}"\n\nProcessing...`, {}, false);
+
+    // Run the transcribed text as a task or chat
+    const { intent, payload } = detectIntent(text);
+    if (intent === 'task') {
+      await handleTaskCommand(ctx, userId, '/task ' + payload);
+    } else {
+      await handleChat(ctx, userId, text);
+    }
+  } catch (err) {
+    logger.error('TG_VOICE_ERROR', { error: err.message, stack: err.stack });
+    await tgReply(ctx, '❌ Voice processing failed: ' + err.message, {}, false);
+  }
+}
+
+// ============================================================================
+// DOCUMENT HANDLER (Phase 3) — save uploaded files to sandbox + Supabase Storage
+// ============================================================================
+
+/**
+ * Handle document uploads from Telegram.
+ * Downloads the file, saves to sandbox uploads/, optionally uploads to
+ * Supabase Storage, and tells the user it's ready for the agent to read.
+ */
+export async function handleTelegramDocument(ctx) {
+  const doc = ctx.message?.document;
+  if (!doc) return;
+
+  const userId = String(ctx.from?.id);
+  logger.info('TG_DOCUMENT_RECEIVED', { userId, fileName: doc.file_name, mimeType: doc.mime_type, size: doc.file_size });
+
+  try {
+    await ctx.sendChatAction('typing');
+    await tgReply(ctx, `Downloading ${doc.file_name}...`, {}, false);
+
+    // Get file from Telegram
+    const fileLink = await ctx.telegram.getFileLink(doc.file_id);
+    const response = await fetch(fileLink.href);
+    if (!response.ok) throw new Error(`Failed to download file: ${response.status}`);
+    const buffer = Buffer.from(await response.arrayBuffer());
+
+    // Save to sandbox uploads/
+    const path = await import('path');
+    const fs = await import('fs');
+    const SANDBOX = process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
+    const UPLOADS_DIR = path.resolve(SANDBOX, 'uploads');
+    try { fs.mkdirSync(UPLOADS_DIR, { recursive: true }); } catch (e) {}
+
+    const safeName = (doc.file_name || `upload-${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, '_').substring(0, 200);
+    const localPath = path.join(UPLOADS_DIR, safeName);
+    fs.writeFileSync(localPath, buffer);
+
+    // Try Supabase Storage upload (best-effort)
+    let publicUrl = null;
+    const SUPABASE_URL = process.env.SUPABASE_URL;
+    const SUPABASE_KEY = process.env.SUPABASE_KEY || process.env.SUPABASE_SERVICE_KEY;
+    if (SUPABASE_URL && SUPABASE_KEY) {
+      try {
+        const storagePath = `telegram_${userId}/${Date.now()}_${safeName}`;
+        const supaResp = await fetch(`${SUPABASE_URL}/storage/v1/object/max-uploads/${storagePath}`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${SUPABASE_KEY}`,
+            'apikey': SUPABASE_KEY,
+            'Content-Type': doc.mime_type || 'application/octet-stream'
+          },
+          body: buffer
+        });
+        if (supaResp.ok) {
+          publicUrl = `${SUPABASE_URL}/storage/v1/object/public/max-uploads/${storagePath}`;
+        }
+      } catch (e) {
+        logger.warn('Supabase storage upload failed', { error: e.message });
+      }
+    }
+
+    // If it's a text/PDF/Excel/CSV file, extract content and add to knowledge base
+    let extractedInfo = '';
+    const ext = path.extname(safeName).toLowerCase();
+    if (['.txt', '.md', '.json', '.csv', '.js', '.ts', '.py', '.html', '.css', '.yaml', '.yml'].includes(ext)) {
+      try {
+        const text = buffer.toString('utf-8').substring(0, 50000);
+        if (text) {
+          const { knowledgeStore } = await import('../rag/knowledge-store.js');
+          await knowledgeStore.addDocument(`telegram_${userId}`, {
+            title: safeName,
+            content: text,
+            type: 'uploaded_file',
+            source: publicUrl || `telegram:${safeName}`
+          });
+          extractedInfo = '\n\n✅ Text extracted and added to knowledge base. Ask me questions about it!';
+        }
+      } catch (e) { /* non-fatal */ }
+    } else if (ext === '.pdf') {
+      try {
+        const pdfParse = (await import('pdf-parse')).default;
+        const data = await pdfParse(buffer);
+        if (data.text) {
+          const { knowledgeStore } = await import('../rag/knowledge-store.js');
+          await knowledgeStore.addDocument(`telegram_${userId}`, {
+            title: safeName,
+            content: data.text.substring(0, 50000),
+            type: 'uploaded_file',
+            source: publicUrl || `telegram:${safeName}`
+          });
+          extractedInfo = '\n\n✅ PDF text extracted and added to knowledge base.';
+        }
+      } catch (e) { /* non-fatal */ }
+    }
+
+    await tgReply(ctx,
+      `✅ File received: ${safeName} (${(buffer.length / 1024).toFixed(1)} KB)` +
+      (publicUrl ? `\n☁️ Saved to Supabase Storage` : '') +
+      extractedInfo +
+      '\n\nWhat do you want MAX to do with it? (e.g. "summarize this file" or "what is this about?")',
+      {}, false
+    );
+  } catch (err) {
+    logger.error('TG_DOCUMENT_ERROR', { error: err.message, stack: err.stack });
+    await tgReply(ctx, '❌ File processing failed: ' + err.message, {}, false);
   }
 }

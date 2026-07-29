@@ -1,5 +1,5 @@
 import { Telegraf } from 'telegraf';
-import { handleTelegramMessage, handleTelegramCallback } from './telegram-handler.js';
+import { handleTelegramMessage, handleTelegramCallback, handleTelegramVoice, handleTelegramDocument } from './telegram-handler.js';
 import logger from '../utils/logger.js';
 
 /**
@@ -13,7 +13,6 @@ export function initBot() {
     throw new Error('TELEGRAM_BOT_TOKEN environment variable is required');
   }
 
-  // Telemetry logging for token verification
   logger.info('Initializing Telegram bot', {
     tokenPrefix: token?.substring(0, 5),
     tokenLength: token?.length
@@ -21,7 +20,6 @@ export function initBot() {
 
   const bot = new Telegraf(token);
 
-  // Log all updates for debugging
   bot.use((ctx, next) => {
     logger.debug('Telegram update received', {
       updateType: ctx.updateType,
@@ -31,28 +29,30 @@ export function initBot() {
     return next();
   });
 
+  // ===== VOICE MESSAGES (Phase 3) — transcribed via Groq Whisper (free) =====
+  bot.on('voice', handleTelegramVoice);
+
+  // ===== DOCUMENT UPLOADS (Phase 3) — saved to sandbox + Supabase Storage =====
+  bot.on('document', handleTelegramDocument);
+
   // Handle all messages (commands and text) with unified handler
   bot.on('message', handleTelegramMessage);
 
   // Handle callback queries (inline keyboard responses)
   bot.on('callback_query', handleTelegramCallback);
 
-  // Error handler
   bot.catch((err, ctx) => {
     logger.error('Telegram bot error', {
       error: err.message,
       stack: err.stack,
       updateType: ctx.updateType
     });
-
-    // Try to notify user
     if (ctx.reply) {
       ctx.reply('❌ An error occurred. Please try again.').catch(() => {});
     }
   });
 
   logger.info('Telegram bot initialized with new handler');
-
   return bot;
 }
 
