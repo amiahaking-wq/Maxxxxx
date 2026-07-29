@@ -1,7 +1,7 @@
 'use client';
 import { useState } from 'react';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'https://maxxxxx-production.up.railway.app';
 
 function apiUrl(path: string): string {
   if (path.startsWith('http')) return path;

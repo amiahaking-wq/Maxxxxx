@@ -46,7 +46,7 @@ interface MainAppProps {
   onLogout: () => void;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'https://maxxxxx-production.up.railway.app';
 
 // Helper: prefix relative API paths with the backend URL
 function apiUrl(path: string): string {

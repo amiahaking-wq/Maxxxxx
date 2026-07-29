@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react';
 import { X, User, Bot, Shield, Brain, BookOpen, Clock, BarChart3, Info, Save, Trash2, Plus, Check, ExternalLink, Eye, EyeOff, Calendar, Play, Pause, Users } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'https://maxxxxx-production.up.railway.app';
 
 function apiUrl(path: string): string {
   if (path.startsWith('http')) return path;
