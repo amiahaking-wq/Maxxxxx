@@ -1,11 +1,19 @@
 'use client';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { Menu, Plus, Mic, Paperclip, Send, X, Check, Loader2, Volume2, ChevronDown, ChevronRight, Settings as SettingsIcon, Folder, Terminal as TerminalIcon, Globe } from 'lucide-react';
+import { Menu, Plus, Mic, Paperclip, Send, X, Check, Loader2, ChevronDown, ChevronRight, Settings as SettingsIcon, Folder, Terminal as TerminalIcon, Globe } from 'lucide-react';
 import { SettingsPanel } from './SettingsPanel';
 import { Sidebar } from './Sidebar';
 import { Terminal } from './Terminal';
 import { useTranslation } from 'react-i18next';
+
+// Backend URL — set NEXT_PUBLIC_API_URL env var on Railway, or use default
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'https://maxxxxx-production.up.railway.app';
+
+function apiUrl(path: string): string {
+  if (path.startsWith('http')) return path;
+  return `${API_BASE}${path}`;
+}
 
 interface Message {
   id: string;
@@ -46,25 +54,14 @@ interface MainAppProps {
   onLogout: () => void;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'https://maxxxxx-production.up.railway.app';
-
-// Helper: prefix relative API paths with the backend URL
-function apiUrl(path: string): string {
-  if (path.startsWith('http')) return path;
-  return `${API_BASE}${path}`;
-}
-
 export function MainApp({ token, user, onLogout }: MainAppProps) {
   const { t, i18n } = useTranslation('common');
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [streamingContent, setStreamingContent] = useState('');
-  const [reasoningContent, setReasoningContent] = useState('');
   const [isRunning, setIsRunning] = useState(false);
   const [toolCalls, setToolCalls] = useState<ToolCall[]>([]);
-  const [narration, setNarration] = useState<{ icon: string; description: string; detail: string } | null>(null);
-  const [showCamera, setShowCamera] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [terminalOpen, setTerminalOpen] = useState(false);
@@ -79,19 +76,18 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<any>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const narrationTimeoutRef = useRef<any>(null);
 
   const activeConversation = conversations.find(c => c.id === activeId);
+  const messages = activeConversation?.messages || [];
 
-  // Connect socket with auth — connects directly to backend
+  // ===== SOCKET.IO CONNECTION =====
+  // Connect once on mount, subscribe to active conversation when it changes
   useEffect(() => {
-    // Always use the backend URL for Socket.IO (NOT the frontend proxy — WebSockets can't be proxied)
-    const socketUrl = API_BASE || 'https://maxxxxx-production.up.railway.app';
-    console.log('[MAX] Connecting Socket.IO to:', socketUrl);
-    const socket = io(socketUrl, {
+    console.log('[MAX] Connecting Socket.IO to:', API_BASE);
+    const socket = io(API_BASE, {
       auth: { token },
-      transports: ['polling'],  // polling ONLY — Railway proxy doesn't support WebSocket upgrades
-      upgrade: false,           // don't try to upgrade to websocket
+      transports: ['polling'],
+      upgrade: false,
       reconnection: true,
       reconnectionAttempts: 10,
       reconnectionDelay: 2000
@@ -102,48 +98,20 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
       console.log('[MAX] Socket.IO connected:', socket.id);
     });
     socket.on('connect_error', (err: any) => {
-      console.error('[MAX] Socket.IO connection error:', err.message);
+      console.error('[MAX] Socket.IO error:', err.message);
     });
 
+    // Token streaming
     socket.on('token', (data: any) => {
-      if (data.type === 'start') { setStreamingContent(''); setReasoningContent(''); setIsRunning(true); setToolCalls([]); }
+      if (data.type === 'start') { setStreamingContent(''); setIsRunning(true); setToolCalls([]); }
       else if (data.type === 'token') { setStreamingContent(prev => prev + data.text); }
-      else if (data.type === 'done') { setIsRunning(false); }
-    });
-
-    // Phase 2.4 — agent:stream events (real-time token streaming from the agent)
-    socket.on('agent:stream', (data: any) => {
-      if (data?.text) {
-        setIsRunning(true);
-        setStreamingContent(prev => prev + data.text);
+      else if (data.type === 'done') {
+        // Don't set isRunning(false) here — wait for the final 'message' event
+        // which contains the complete response
       }
     });
 
-    // Phase 2.4 — agent:reasoning events (deepseek-r1 / o1 style thinking)
-    socket.on('agent:reasoning', (data: any) => {
-      if (data?.text) {
-        setReasoningContent(prev => prev + data.text);
-      }
-    });
-
-    // Phase 2.4 — agent:narration events (tool execution narration toast)
-    socket.on('agent:narration', (data: any) => {
-      if (!data) return;
-      setNarration({
-        icon: data.icon || '🛠️',
-        description: data.description || `Executing ${data.action}`,
-        detail: data.detail || ''
-      });
-      // Auto-dismiss after 4 seconds
-      if (narrationTimeoutRef.current) clearTimeout(narrationTimeoutRef.current);
-      narrationTimeoutRef.current = setTimeout(() => setNarration(null), 4000);
-    });
-
-    // Phase 6.4 — agent:request_camera events (camera capture request)
-    socket.on('agent:request_camera', () => {
-      setShowCamera(true);
-    });
-
+    // Progress (tool calls)
     socket.on('progress', (data: any) => {
       if (data.status === 'executing_tool') {
         setToolCalls(prev => [...prev, { tool: data.tool, args: data.args, status: 'running' }]);
@@ -156,9 +124,12 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
       }
     });
 
+    // Final message — this is what completes the response
     socket.on('message', (data: any) => {
-      if (data.role === 'assistant' && (data.type === 'task_complete' || data.conversationId === activeId)) {
+      console.log('[MAX] Received message event:', data.type, data.conversationId);
+      if (data.role === 'assistant') {
         if (!data.content || data.content.trim().length === 0) return;
+        
         const msg: Message = {
           id: Date.now().toString(),
           role: 'assistant',
@@ -166,18 +137,21 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
           timestamp: new Date(),
           filesModified: data.filesModified
         };
+        
+        // Use data.conversationId if available, otherwise use activeId
+        const targetId = data.conversationId || activeId;
         setConversations(prev => prev.map(c =>
-          c.id === activeId ? { ...c, messages: [...c.messages, msg], updatedAt: new Date() } : c
+          c.id === targetId ? { ...c, messages: [...c.messages, msg], updatedAt: new Date() } : c
         ));
         setStreamingContent('');
-        setReasoningContent('');
         setIsRunning(false);
       }
     });
 
     socket.on('file_created', (data: any) => {
+      const targetId = data.sessionId || activeId;
       setConversations(prev => prev.map(c => {
-        if (c.id !== activeId) return c;
+        if (c.id !== targetId) return c;
         const msgs = [...c.messages];
         const last = msgs[msgs.length - 1];
         if (last && last.role === 'assistant') {
@@ -195,16 +169,22 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
       }
     });
 
-    return () => {
-      socket.disconnect();
-      if (narrationTimeoutRef.current) clearTimeout(narrationTimeoutRef.current);
-    };
-  }, [token, activeId]);
+    return () => { socket.disconnect(); };
+  }, [token]); // Only reconnect when token changes
+
+  // ===== SUBSCRIBE TO CONVERSATION ROOM =====
+  // CRITICAL: When activeId changes, tell the backend to send events for this conversation
+  useEffect(() => {
+    if (activeId && socketRef.current) {
+      console.log('[MAX] Subscribing to session:', activeId);
+      socketRef.current.emit('subscribe', activeId);
+    }
+  }, [activeId, socketRef.current]);
 
   // Auto-scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activeConversation?.messages, streamingContent, reasoningContent, toolCalls]);
+  }, [messages, streamingContent, toolCalls]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -234,7 +214,7 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
         }));
         setConversations(convs);
       }
-    } catch {}
+    } catch (e) { console.error('Failed to load conversations:', e); }
   }
 
   async function fetchModels() {
@@ -251,7 +231,7 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
           if (def) setCurrentModel(def.id);
         }
       }
-    } catch {}
+    } catch (e) { console.error('Failed to load models:', e); }
   }
 
   async function loadConversation(id: string) {
@@ -269,83 +249,124 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
           })) } : c
         ));
       }
-    } catch {}
+    } catch (e) { console.error('Failed to load conversation:', e); }
   }
 
-  function newConversation() {
-    const id = crypto.randomUUID();
-    const conv: Conversation = {
-      id, title: 'New conversation', messages: [], createdAt: new Date(), updatedAt: new Date()
-    };
-    setConversations(prev => [conv, ...prev]);
-    setActiveId(id);
-    setStreamingContent('');
-    setToolCalls([]);
-    setSidebarOpen(false);
-    // Create on backend
-    fetch(apiUrl('/api/conversations'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ platform: 'web', title: 'New Conversation' })
-    }).then(r => r.json()).then(d => {
-      if (d.success) {
-        setConversations(prev => prev.map(c => c.id === id ? { ...c, id: d.conversation.id } : c));
-        setActiveId(d.conversation.id);
-        window.history.replaceState({}, '', `/?c=${d.conversation.id}`);
+  async function newConversation() {
+    // Create on backend FIRST, then update UI with the real ID
+    try {
+      const res = await fetch(apiUrl('/api/conversations'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ platform: 'web', title: 'New Conversation' })
+      });
+      const data = await res.json();
+      if (data.success && data.conversation) {
+        const conv: Conversation = {
+          id: data.conversation.id,
+          title: 'New conversation',
+          messages: [],
+          createdAt: new Date(),
+          updatedAt: new Date()
+        };
+        setConversations(prev => [conv, ...prev]);
+        setActiveId(data.conversation.id);
+        setStreamingContent('');
+        setToolCalls([]);
+        setSidebarOpen(false);
+        window.history.replaceState({}, '', `/?c=${data.conversation.id}`);
       }
-    }).catch(() => {});
+    } catch (e) {
+      console.error('Failed to create conversation:', e);
+      // Fallback: create locally with client UUID
+      const id = crypto.randomUUID();
+      const conv: Conversation = { id, title: 'New conversation', messages: [], createdAt: new Date(), updatedAt: new Date() };
+      setConversations(prev => [conv, ...prev]);
+      setActiveId(id);
+      setSidebarOpen(false);
+    }
   }
 
   async function sendMessage() {
     if (!input.trim() && uploadedFiles.length === 0) return;
     if (isRunning) return;
 
+    // Ensure we have a conversation — create one if needed
     let currentId = activeId;
     if (!currentId) {
-      currentId = crypto.randomUUID();
-      const conv: Conversation = {
-        id: currentId, title: input.slice(0, 40) || 'New conversation',
-        messages: [], createdAt: new Date(), updatedAt: new Date()
-      };
-      setConversations(prev => [conv, ...prev]);
-      setActiveId(currentId);
+      // Create on backend first
+      try {
+        const res = await fetch(apiUrl('/api/conversations'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ platform: 'web', title: input.slice(0, 40) || 'New conversation' })
+        });
+        const data = await res.json();
+        if (data.success && data.conversation) {
+          currentId = data.conversation.id;
+          const conv: Conversation = {
+            id: currentId, title: input.slice(0, 40) || 'New conversation',
+            messages: [], createdAt: new Date(), updatedAt: new Date()
+          };
+          setConversations(prev => [conv, ...prev]);
+          setActiveId(currentId);
+        }
+      } catch (e) {
+        console.error('Failed to create conversation:', e);
+        return;
+      }
     }
 
+    if (!currentId) return;
+
+    const taskInput = input.trim();
     const userMsg: Message = {
       id: Date.now().toString(),
       role: 'user',
-      content: input.trim(),
+      content: taskInput,
       timestamp: new Date(),
       files: uploadedFiles
     };
 
+    // Add user message to UI IMMEDIATELY
     setConversations(prev => prev.map(c =>
       c.id === currentId ? { ...c, messages: [...c.messages, userMsg] } : c
     ));
 
-    // Upload files first
-    let uploadedFileNames: string[] = [];
-    if (uploadedFiles.length > 0) {
-      // Files already uploaded via /api/upload
-      uploadedFileNames = uploadedFiles.map(f => f.name);
+    // Subscribe to this conversation's Socket.IO room (in case it's new)
+    if (socketRef.current) {
+      socketRef.current.emit('subscribe', currentId);
     }
-
-    const taskInput = input.trim() + (uploadedFileNames.length > 0
-      ? `\n\n[Attached files — use read_upload to read them: ${uploadedFileNames.join(', ')}]`
-      : '');
 
     setInput('');
     setUploadedFiles([]);
     setIsRunning(true);
     setToolCalls([]);
+    setStreamingContent('');
 
     try {
-      await fetch(apiUrl(`/api/conversations/${currentId}/messages`), {
+      const res = await fetch(apiUrl(`/api/conversations/${currentId}/messages`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ message: taskInput, files: uploadedFiles })
       });
+      
+      if (!res.ok) {
+        const errText = await res.text().catch(() => 'Unknown error');
+        throw new Error(`HTTP ${res.status}: ${errText.substring(0, 200)}`);
+      }
+      
+      const data = await res.json();
+      console.log('[MAX] Message sent:', data);
+      
+      // If it's a chat message (not a task), the response comes via Socket.IO
+      // If the backend didn't start the agent, we need to handle it
+      if (data.intent === 'chat' && !data.agentStarted) {
+        // Chat response comes async via Socket.IO 'message' event
+        // isRunning stays true until the message event arrives
+      }
     } catch (err) {
+      console.error('[MAX] Send failed:', err);
       setIsRunning(false);
       setConversations(prev => prev.map(c =>
         c.id === currentId ? { ...c, messages: [...c.messages, {
@@ -364,7 +385,7 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
     }
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      alert('Voice input not supported in this browser. Try Chrome or Edge.');
+      alert('Voice input not supported. Try Chrome or Edge.');
       return;
     }
     const recognition = new SpeechRecognition();
@@ -373,8 +394,7 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
     recognition.lang = 'en-US';
     recognitionRef.current = recognition;
     recognition.onresult = (event: any) => {
-      let final = '';
-      let interim = '';
+      let final = '', interim = '';
       for (let i = event.resultIndex; i < event.results.length; i++) {
         if (event.results[i].isFinal) final += event.results[i][0].transcript;
         else interim += event.results[i][0].transcript;
@@ -390,7 +410,6 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
     if (!files || files.length === 0) return;
     for (const file of Array.from(files)) {
       try {
-        // Read as base64 and POST as JSON (matches backend upload.js)
         const reader = new FileReader();
         const base64 = await new Promise<string>((resolve, reject) => {
           reader.onload = () => resolve(String(reader.result).split(',')[1]);
@@ -443,7 +462,6 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
     setLangMenuOpen(false);
   }
 
-  const messages = activeConversation?.messages || [];
   const LANGUAGES = [
     { code: 'en', name: '🇬🇧 English' },
     { code: 'pidgin', name: '🇳🇬 Pidgin' },
@@ -519,7 +537,7 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto">
-          {messages.length === 0 && !streamingContent && !reasoningContent ? (
+          {messages.length === 0 && !streamingContent ? (
             <WelcomeScreen onSelect={(p) => setInput(p)} />
           ) : (
             <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
@@ -528,9 +546,6 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
                 <div className="space-y-2">
                   {toolCalls.map((tc, i) => <ToolCallCard key={i} toolCall={tc} />)}
                 </div>
-              )}
-              {reasoningContent && (
-                <ThinkingBlock content={reasoningContent} />
               )}
               {streamingContent && (
                 <div className="flex gap-3">
@@ -610,33 +625,6 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
 
       {settingsOpen && <SettingsPanel token={token} user={user} onClose={() => setSettingsOpen(false)} models={models} currentModel={currentModel} onModelChange={changeModel} />}
       {terminalOpen && <Terminal token={token} onClose={() => setTerminalOpen(false)} />}
-
-      {/* Phase 2.4 — Narration toast (bottom of page) */}
-      {narration && (
-        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 max-w-md w-[90%] pointer-events-none">
-          <div className="bg-[#1e1e1e] border border-[#FF6B35]/40 rounded-xl px-4 py-3 shadow-lg flex items-center gap-3 animate-[fadeIn_0.2s_ease-in]">
-            <span className="text-xl flex-shrink-0">{narration.icon}</span>
-            <div className="flex-1 min-w-0">
-              <div className="text-sm text-[#ececec] font-medium truncate">{narration.description}</div>
-              {narration.detail && (
-                <div className="text-xs text-[#888] font-mono truncate mt-0.5">{narration.detail}</div>
-              )}
-            </div>
-            <Loader2 size={14} className="text-[#FF6B35] animate-spin flex-shrink-0" />
-          </div>
-        </div>
-      )}
-
-      {/* Phase 6.4 — Camera capture modal */}
-      {showCamera && (
-        <CameraCapture
-          onClose={() => setShowCamera(false)}
-          onCapture={(dataUrl) => {
-            socketRef.current?.emit('camera:image', { sessionId: activeId, image: dataUrl });
-            setShowCamera(false);
-          }}
-        />
-      )}
     </div>
   );
 }
@@ -769,133 +757,6 @@ function ToolCallCard({ toolCall }: { toolCall: ToolCall }) {
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-// ============================================================================
-// Phase 2.4 — ThinkingBlock: shows reasoning content (deepseek-r1 / o1 style)
-// in an amber-colored block above the streaming response.
-// ============================================================================
-function ThinkingBlock({ content }: { content: string }) {
-  const [expanded, setExpanded] = useState(true);
-  return (
-    <div className="bg-amber-950/30 border border-amber-700/40 rounded-xl overflow-hidden">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-amber-900/20"
-      >
-        <span className="text-amber-400 text-sm">💭</span>
-        <span className="text-xs text-amber-300 font-medium">Reasoning</span>
-        <ChevronDown size={11} className={`ml-auto text-amber-500/60 transition-transform ${expanded ? 'rotate-180' : ''}`} />
-      </button>
-      {expanded && (
-        <div className="px-3 pb-3">
-          <pre className="text-[11px] text-amber-200/80 font-mono whitespace-pre-wrap overflow-x-auto max-h-48 overflow-y-auto">
-            {content}
-          </pre>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ============================================================================
-// Phase 6.4 — CameraCapture: opens the device camera and lets the user
-// capture a photo. Emits the photo back to the server via onCapture.
-// ============================================================================
-function CameraCapture({ onClose, onCapture }: { onClose: () => void; onCapture: (dataUrl: string) => void }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const [stream, setStream] = useState<MediaStream | null>(null);
-  const [error, setError] = useState<string>('');
-
-  useEffect(() => {
-    let active = true;
-    let localStream: MediaStream | null = null;
-
-    async function startCamera() {
-      try {
-        if (!navigator.mediaDevices?.getUserMedia) {
-          setError('Camera not supported in this browser.');
-          return;
-        }
-        localStream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment' },
-          audio: false
-        });
-        if (!active) {
-          localStream.getTracks().forEach(t => t.stop());
-          return;
-        }
-        setStream(localStream);
-        if (videoRef.current) {
-          videoRef.current.srcObject = localStream;
-          await videoRef.current.play().catch(() => {});
-        }
-      } catch (err: any) {
-        setError(err?.message || 'Failed to access camera.');
-      }
-    }
-
-    startCamera();
-
-    return () => {
-      active = false;
-      if (localStream) localStream.getTracks().forEach(t => t.stop());
-    };
-  }, []);
-
-  function capture() {
-    const video = videoRef.current;
-    if (!video) return;
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
-    onCapture(dataUrl);
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4">
-      <div className="w-full max-w-2xl bg-[#1a1a1a] border border-[#2a2a2a] rounded-2xl overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-[#2a2a2a]">
-          <h3 className="text-sm text-white font-medium">Camera Capture</h3>
-          <button onClick={onClose} className="text-[#888] hover:text-white">
-            <X size={18} />
-          </button>
-        </div>
-        <div className="bg-black relative">
-          {error ? (
-            <div className="p-8 text-center text-red-400 text-sm">{error}</div>
-          ) : (
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="w-full max-h-[60vh] object-contain"
-            />
-          )}
-        </div>
-        <div className="flex items-center justify-center gap-3 px-4 py-4 border-t border-[#2a2a2a]">
-          <button
-            onClick={capture}
-            disabled={!!error || !stream}
-            className="bg-[#FF6B35] hover:bg-[#e05a28] disabled:bg-[#2a2a2a] disabled:text-[#555] text-white px-6 py-2 rounded-lg text-sm font-medium transition-colors"
-          >
-            Capture Photo
-          </button>
-          <button
-            onClick={onClose}
-            className="bg-[#2a2a2a] hover:bg-[#333] text-[#ccc] px-6 py-2 rounded-lg text-sm font-medium transition-colors"
-          >
-            Cancel
-          </button>
-        </div>
-      </div>
     </div>
   );
 }
