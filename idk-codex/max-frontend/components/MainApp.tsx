@@ -54,8 +54,11 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [streamingContent, setStreamingContent] = useState('');
+  const [reasoningContent, setReasoningContent] = useState('');
   const [isRunning, setIsRunning] = useState(false);
   const [toolCalls, setToolCalls] = useState<ToolCall[]>([]);
+  const [narration, setNarration] = useState<{ icon: string; description: string; detail: string } | null>(null);
+  const [showCamera, setShowCamera] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [terminalOpen, setTerminalOpen] = useState(false);
@@ -70,6 +73,7 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<any>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const narrationTimeoutRef = useRef<any>(null);
 
   const activeConversation = conversations.find(c => c.id === activeId);
 
@@ -82,9 +86,42 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
     socketRef.current = socket;
 
     socket.on('token', (data: any) => {
-      if (data.type === 'start') { setStreamingContent(''); setIsRunning(true); setToolCalls([]); }
+      if (data.type === 'start') { setStreamingContent(''); setReasoningContent(''); setIsRunning(true); setToolCalls([]); }
       else if (data.type === 'token') { setStreamingContent(prev => prev + data.text); }
       else if (data.type === 'done') { setIsRunning(false); }
+    });
+
+    // Phase 2.4 — agent:stream events (real-time token streaming from the agent)
+    socket.on('agent:stream', (data: any) => {
+      if (data?.text) {
+        setIsRunning(true);
+        setStreamingContent(prev => prev + data.text);
+      }
+    });
+
+    // Phase 2.4 — agent:reasoning events (deepseek-r1 / o1 style thinking)
+    socket.on('agent:reasoning', (data: any) => {
+      if (data?.text) {
+        setReasoningContent(prev => prev + data.text);
+      }
+    });
+
+    // Phase 2.4 — agent:narration events (tool execution narration toast)
+    socket.on('agent:narration', (data: any) => {
+      if (!data) return;
+      setNarration({
+        icon: data.icon || '🛠️',
+        description: data.description || `Executing ${data.action}`,
+        detail: data.detail || ''
+      });
+      // Auto-dismiss after 4 seconds
+      if (narrationTimeoutRef.current) clearTimeout(narrationTimeoutRef.current);
+      narrationTimeoutRef.current = setTimeout(() => setNarration(null), 4000);
+    });
+
+    // Phase 6.4 — agent:request_camera events (camera capture request)
+    socket.on('agent:request_camera', () => {
+      setShowCamera(true);
     });
 
     socket.on('progress', (data: any) => {
@@ -113,6 +150,7 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
           c.id === activeId ? { ...c, messages: [...c.messages, msg], updatedAt: new Date() } : c
         ));
         setStreamingContent('');
+        setReasoningContent('');
         setIsRunning(false);
       }
     });
@@ -137,13 +175,16 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
       }
     });
 
-    return () => { socket.disconnect(); };
+    return () => {
+      socket.disconnect();
+      if (narrationTimeoutRef.current) clearTimeout(narrationTimeoutRef.current);
+    };
   }, [token, activeId]);
 
   // Auto-scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activeConversation?.messages, streamingContent, toolCalls]);
+  }, [activeConversation?.messages, streamingContent, reasoningContent, toolCalls]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -458,7 +499,7 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto">
-          {messages.length === 0 && !streamingContent ? (
+          {messages.length === 0 && !streamingContent && !reasoningContent ? (
             <WelcomeScreen onSelect={(p) => setInput(p)} />
           ) : (
             <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
@@ -467,6 +508,9 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
                 <div className="space-y-2">
                   {toolCalls.map((tc, i) => <ToolCallCard key={i} toolCall={tc} />)}
                 </div>
+              )}
+              {reasoningContent && (
+                <ThinkingBlock content={reasoningContent} />
               )}
               {streamingContent && (
                 <div className="flex gap-3">
@@ -546,6 +590,33 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
 
       {settingsOpen && <SettingsPanel token={token} user={user} onClose={() => setSettingsOpen(false)} models={models} currentModel={currentModel} onModelChange={changeModel} />}
       {terminalOpen && <Terminal token={token} onClose={() => setTerminalOpen(false)} />}
+
+      {/* Phase 2.4 — Narration toast (bottom of page) */}
+      {narration && (
+        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 max-w-md w-[90%] pointer-events-none">
+          <div className="bg-[#1e1e1e] border border-[#FF6B35]/40 rounded-xl px-4 py-3 shadow-lg flex items-center gap-3 animate-[fadeIn_0.2s_ease-in]">
+            <span className="text-xl flex-shrink-0">{narration.icon}</span>
+            <div className="flex-1 min-w-0">
+              <div className="text-sm text-[#ececec] font-medium truncate">{narration.description}</div>
+              {narration.detail && (
+                <div className="text-xs text-[#888] font-mono truncate mt-0.5">{narration.detail}</div>
+              )}
+            </div>
+            <Loader2 size={14} className="text-[#FF6B35] animate-spin flex-shrink-0" />
+          </div>
+        </div>
+      )}
+
+      {/* Phase 6.4 — Camera capture modal */}
+      {showCamera && (
+        <CameraCapture
+          onClose={() => setShowCamera(false)}
+          onCapture={(dataUrl) => {
+            socketRef.current?.emit('camera:image', { sessionId: activeId, image: dataUrl });
+            setShowCamera(false);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -678,6 +749,133 @@ function ToolCallCard({ toolCall }: { toolCall: ToolCall }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Phase 2.4 — ThinkingBlock: shows reasoning content (deepseek-r1 / o1 style)
+// in an amber-colored block above the streaming response.
+// ============================================================================
+function ThinkingBlock({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(true);
+  return (
+    <div className="bg-amber-950/30 border border-amber-700/40 rounded-xl overflow-hidden">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-amber-900/20"
+      >
+        <span className="text-amber-400 text-sm">💭</span>
+        <span className="text-xs text-amber-300 font-medium">Reasoning</span>
+        <ChevronDown size={11} className={`ml-auto text-amber-500/60 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+      </button>
+      {expanded && (
+        <div className="px-3 pb-3">
+          <pre className="text-[11px] text-amber-200/80 font-mono whitespace-pre-wrap overflow-x-auto max-h-48 overflow-y-auto">
+            {content}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Phase 6.4 — CameraCapture: opens the device camera and lets the user
+// capture a photo. Emits the photo back to the server via onCapture.
+// ============================================================================
+function CameraCapture({ onClose, onCapture }: { onClose: () => void; onCapture: (dataUrl: string) => void }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  const [error, setError] = useState<string>('');
+
+  useEffect(() => {
+    let active = true;
+    let localStream: MediaStream | null = null;
+
+    async function startCamera() {
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) {
+          setError('Camera not supported in this browser.');
+          return;
+        }
+        localStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' },
+          audio: false
+        });
+        if (!active) {
+          localStream.getTracks().forEach(t => t.stop());
+          return;
+        }
+        setStream(localStream);
+        if (videoRef.current) {
+          videoRef.current.srcObject = localStream;
+          await videoRef.current.play().catch(() => {});
+        }
+      } catch (err: any) {
+        setError(err?.message || 'Failed to access camera.');
+      }
+    }
+
+    startCamera();
+
+    return () => {
+      active = false;
+      if (localStream) localStream.getTracks().forEach(t => t.stop());
+    };
+  }, []);
+
+  function capture() {
+    const video = videoRef.current;
+    if (!video) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    onCapture(dataUrl);
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4">
+      <div className="w-full max-w-2xl bg-[#1a1a1a] border border-[#2a2a2a] rounded-2xl overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-[#2a2a2a]">
+          <h3 className="text-sm text-white font-medium">Camera Capture</h3>
+          <button onClick={onClose} className="text-[#888] hover:text-white">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="bg-black relative">
+          {error ? (
+            <div className="p-8 text-center text-red-400 text-sm">{error}</div>
+          ) : (
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full max-h-[60vh] object-contain"
+            />
+          )}
+        </div>
+        <div className="flex items-center justify-center gap-3 px-4 py-4 border-t border-[#2a2a2a]">
+          <button
+            onClick={capture}
+            disabled={!!error || !stream}
+            className="bg-[#FF6B35] hover:bg-[#e05a28] disabled:bg-[#2a2a2a] disabled:text-[#555] text-white px-6 py-2 rounded-lg text-sm font-medium transition-colors"
+          >
+            Capture Photo
+          </button>
+          <button
+            onClick={onClose}
+            className="bg-[#2a2a2a] hover:bg-[#333] text-[#ccc] px-6 py-2 rounded-lg text-sm font-medium transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -7,8 +7,40 @@
  */
 
 import 'dotenv/config';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 import { initializeInterface } from './src/interfaces/router.js';
 import logger from './src/utils/logger.js';
+
+// ============================================================================
+// LOAD USER CONFIG (Phase 5.6) — ~/.max/config.json
+// Apply values to process.env ONLY if not already set in the environment.
+// This lets users store API keys and other settings in a config file instead
+// of managing env vars.
+// ============================================================================
+function loadUserConfig() {
+  try {
+    const configPath = path.join(os.homedir(), '.max', 'config.json');
+    if (!fs.existsSync(configPath)) return;
+    const raw = fs.readFileSync(configPath, 'utf-8');
+    const config = JSON.parse(raw);
+    let applied = 0;
+    for (const [key, value] of Object.entries(config)) {
+      if (process.env[key] === undefined && value !== undefined && value !== null) {
+        process.env[key] = String(value);
+        applied++;
+      }
+    }
+    if (applied > 0) {
+      logger.info(`Loaded ${applied} config value(s) from ~/.max/config.json`);
+    }
+  } catch (e) {
+    logger.debug('No ~/.max/config.json loaded', { error: e.message });
+  }
+}
+
+loadUserConfig();
 
 /**
  * Main application entry point

@@ -13,7 +13,7 @@
  *   4. Repeats until task_complete is called or max iterations
  */
 
-import { generateCompletion } from '../groq/client.js';
+import { completion, getCurrentProvider, streamCompletion } from '../llm/adapter.js';
 import { executeTool, getToolDescriptions } from './tools/registry.js';
 import { broadcastProgress, broadcastMessage, broadcastConfirmation, broadcastFileCreated, broadcastToken } from '../api/websocket.js';
 import { addConversationMessage, createConversation } from '../database/conversations-supabase.js';
@@ -21,6 +21,8 @@ import { condenseMessages } from './condenser.js';
 import { uploadToSupabase, isSupabaseConfigured } from './supabase-storage.js';
 import { permissionGuard } from '../security/permission-guard.js';
 import { syncVaultToEnv } from '../security/vault-env-bridge.js';
+import { PersonalityEngine } from './personality-engine.js';
+import { getRelevantMemories } from './tools/memory-tool.js';
 import logger from '../utils/logger.js';
 
 const MAX_ITERATIONS = parseInt(process.env.MAX_AGENT_ITERATIONS || '15', 10);
@@ -735,7 +737,7 @@ function detectLanguage(path) {
  */
 async function waitForConfirmation(confirmationId, timeoutMs) {
   const startTime = Date.now();
-  const pollInterval = 1000; // 1 second
+  let pollInterval = 1000; // Start at 1 second
 
   while (Date.now() - startTime < timeoutMs) {
     try {
@@ -748,6 +750,7 @@ async function waitForConfirmation(confirmationId, timeoutMs) {
       // DB not ready — keep waiting
     }
     await new Promise(resolve => setTimeout(resolve, pollInterval));
+    pollInterval = Math.min(pollInterval * 2, 10000); // Exponential backoff, max 10s
   }
   return false; // timed out
 }
@@ -772,7 +775,7 @@ async function executeToolWithRetry(toolName, args, ctx, maxRetries = 2) {
       lastResult = result;
 
       // Check if the result indicates a transient error that's worth retrying
-      if (typeof result === 'string' && result.startsWith('Error:')) {
+      if (typeof result === 'string' && (result.startsWith('Error') || result.startsWith('error') || result.toLowerCase().includes('error:'))) {
         const isTransient = isTransientError(result);
         const isNotFound = /not found|does not exist|no such file|cannot find/i.test(result);
         const isBlocked = /BLOCKED|PERMISSION DENIED/i.test(result);
@@ -854,60 +857,321 @@ const NON_FUNCTION_CALLING_MODELS = [
  * might be openai-compatible with a model that doesn't support FC.
  */
 function modelSupportsFunctionCalling() {
-  const model = (process.env.OPENAI_COMPATIBLE_MODEL || '').toLowerCase();
-
-  // Check if model is explicitly in the non-FC list (deepseek-r1, etc.)
-  if (NON_FUNCTION_CALLING_MODELS.some(m => model.includes(m))) {
-    return false;
-  }
-
-  // openrouter/auto and any model with 'auto' supports function calling
-  if (model.includes('auto')) {
-    return true;
-  }
-
-  // Groq always supports function calling
-  if (process.env.GROQ_API_KEY && !model) {
-    return true;
-  }
-
-  // Check if model name matches a known FC-supporting model
-  return FUNCTION_CALLING_MODELS.some(m => model.includes(m));
+  const provider = getCurrentProvider();
+  const model = (provider?.model || '').toLowerCase();
+  const fcModels = [
+    'gpt-4', 'gpt-4o', 'gpt-3.5', 'claude-3', 'claude-sonnet', 'claude-opus',
+    'gemini', 'gemini-pro', 'gemini-1.5', 'llama-3.3', 'qwen', 'qwq',
+    'deepseek-chat', 'deepseek-coder', 'mistral-large', 'mistral-medium',
+    'command-r', 'grok', 'glm-4', 'glm-5', 'auto'
+  ];
+  return fcModels.some(m => model.includes(m));
 }
 
 /**
  * Call the LLM with hybrid approach:
  * - If model supports function calling → use tools array
  * - If not (deepseek-r1, etc.) → use ReAct text format (THOUGHT/ACTION/INPUT)
+ *
+ * Now uses streaming: collects the full content + reasoning + tool_calls
+ * from the stream and returns the assembled result. Tokens are broadcast
+ * via WebSocket as they arrive (agent:stream / agent:reasoning events).
  */
 async function hybridLLMCall(messages, options = {}) {
   const supportsFC = modelSupportsFunctionCalling();
+  const sessionId = options.sessionId || null;
+
+  // Common stream options
+  const streamOpts = {
+    messages,
+    temperature: options.temperature || 0.2,
+    max_tokens: options.maxTokens || MAX_ACTION_TOKENS,
+    echoEnabled: options.echoEnabled,
+    sessionId // passed through for logging only
+  };
 
   if (supportsFC) {
     // Native function calling
-    logger.info('LLM_CALL', { mode: 'function_calling', model: process.env.OPENAI_COMPATIBLE_MODEL || 'groq' });
-    return await generateCompletion(messages, {
-      temperature: options.temperature || 0.2,
-      maxTokens: options.maxTokens || MAX_ACTION_TOKENS,
-      tools: FUNCTION_TOOLS,
-      tool_choice: 'auto'
-    });
+    streamOpts.tools = FUNCTION_TOOLS;
+    streamOpts.tool_choice = 'auto';
+    logger.info('LLM_CALL', { mode: 'function_calling_streaming', model: process.env.OPENAI_COMPATIBLE_MODEL || 'groq' });
   } else {
     // ReAct text format — replace system prompt with ReAct instructions
-    logger.info('LLM_CALL', { mode: 'react_text', model: process.env.OPENAI_COMPATIBLE_MODEL });
+    logger.info('LLM_CALL', { mode: 'react_text_streaming', model: process.env.OPENAI_COMPATIBLE_MODEL });
 
-    // Replace the system prompt with ReAct instructions
-    const reactMessages = [...messages];
-    if (reactMessages[0]?.role === 'system') {
+    streamOpts.messages = [...messages];
+    if (streamOpts.messages[0]?.role === 'system') {
       const workspacePath = process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
-      reactMessages[0] = { role: 'system', content: buildReActSystemPrompt(workspacePath) };
+      streamOpts.messages[0] = { role: 'system', content: buildReActSystemPrompt(workspacePath) };
+    }
+  }
+
+  // Stream the response, collecting content + toolCalls + reasoning
+  let content = '';
+  let reasoning = '';
+  let toolCalls = null;
+  let streamedAny = false;
+
+  try {
+    for await (const chunk of streamCompletion(streamOpts)) {
+      streamedAny = true;
+      if (chunk.type === 'token') {
+        if (chunk.content) {
+          content += chunk.content;
+          // Broadcast token to clients in real-time
+          if (sessionId) {
+            try {
+              broadcastToken(sessionId, { type: 'token', text: chunk.content, source: 'agent:stream' });
+              // Also emit a dedicated agent:stream event (Phase 2.4 contract)
+              global.wsServer?.to(`session-${sessionId}`).emit('agent:stream', {
+                sessionId,
+                timestamp: new Date().toISOString(),
+                text: chunk.content
+              });
+            } catch { /* non-fatal */ }
+          }
+        }
+        if (chunk.toolCalls && chunk.toolCalls.length > 0) {
+          toolCalls = chunk.toolCalls;
+        }
+      } else if (chunk.type === 'reasoning') {
+        if (chunk.content) {
+          reasoning += chunk.content;
+          if (sessionId) {
+            try {
+              global.wsServer?.to(`session-${sessionId}`).emit('agent:reasoning', {
+                sessionId,
+                timestamp: new Date().toISOString(),
+                text: chunk.content
+              });
+            } catch { /* non-fatal */ }
+          }
+        }
+      }
+    }
+  } catch (streamErr) {
+    // If we already streamed something, return what we have with the error appended
+    if (streamedAny && (content || toolCalls)) {
+      logger.warn('STREAM_INTERRUPTED', { sessionId, error: streamErr.message, partialLen: content.length });
+      if (!content && !toolCalls) {
+        content = `[Stream interrupted: ${streamErr.message}]`;
+      }
+    } else {
+      // Nothing streamed — fall back to non-streaming completion
+      logger.warn('STREAM_FAILED_FALLBACK', { sessionId, error: streamErr.message });
+      const fallbackOpts = {
+        messages: streamOpts.messages,
+        temperature: streamOpts.temperature,
+        max_tokens: streamOpts.max_tokens,
+        echoEnabled: streamOpts.echoEnabled
+      };
+      if (supportsFC) {
+        fallbackOpts.tools = FUNCTION_TOOLS;
+        fallbackOpts.tool_choice = 'auto';
+      }
+      const result = await completion(fallbackOpts);
+      return {
+        content: result?.content || '',
+        tool_calls: result?.tool_calls || null,
+        reasoning: '',
+        model: result?.model
+      };
+    }
+  }
+
+  return {
+    content,
+    tool_calls: toolCalls,
+    reasoning,
+    model: streamOpts.model
+  };
+}
+
+/**
+ * Narrate an action — broadcast a narration event with an icon and description
+ * before each tool execution. Used to give the user real-time feedback on what
+ * the agent is doing.
+ */
+const NARRATION_ICONS = {
+  bash: '⚡',
+  write_file: '📝',
+  edit_file: '✏️',
+  read_file: '📖',
+  list_files: '📁',
+  search: '🔍',
+  web_search: '🌐',
+  web_fetch: '🌐',
+  browser_navigate: '🧭',
+  browser_screenshot: '📸',
+  browser_click: '🖱️',
+  browser_type: '⌨️',
+  browser_get_text: '📄',
+  browser_evaluate: '⚡',
+  computer_screenshot: '📸',
+  computer_navigate: '🧭',
+  computer_click: '🖱️',
+  computer_type: '⌨️',
+  computer_key: '⌨️',
+  computer_scroll: '📜',
+  computer_read: '📄',
+  computer_status: 'ℹ️',
+  memory_save: '🧠',
+  memory_get: '🧠',
+  memory_list: '🧠',
+  memory_delete: '🧠',
+  credential_save: '🔐',
+  credential_get: '🔐',
+  credential_list: '🔐',
+  credential_delete: '🔐',
+  knowledge_add: '📚',
+  knowledge_search: '📚',
+  knowledge_list: '📚',
+  graph_add_relationship: '🔗',
+  graph_find_relationships: '🔗',
+  graph_rag_search: '🔗',
+  read_upload: '📎',
+  task_complete: '✅'
+};
+
+const NARRATION_DESCRIPTIONS = {
+  bash: 'Running shell command',
+  write_file: 'Writing file',
+  edit_file: 'Editing file',
+  read_file: 'Reading file',
+  list_files: 'Listing files',
+  search: 'Searching files',
+  web_search: 'Searching the web',
+  web_fetch: 'Fetching web page',
+  browser_navigate: 'Navigating browser',
+  browser_screenshot: 'Taking screenshot',
+  browser_click: 'Clicking element',
+  browser_type: 'Typing text',
+  browser_get_text: 'Extracting page text',
+  browser_evaluate: 'Running JavaScript',
+  computer_screenshot: 'Taking screenshot',
+  computer_navigate: 'Navigating browser',
+  computer_click: 'Clicking at coordinates',
+  computer_type: 'Typing text',
+  computer_key: 'Pressing key',
+  computer_scroll: 'Scrolling page',
+  computer_read: 'Reading page text',
+  computer_status: 'Checking browser status',
+  memory_save: 'Saving to memory',
+  memory_get: 'Retrieving memory',
+  memory_list: 'Listing memories',
+  memory_delete: 'Deleting memory',
+  credential_save: 'Saving credentials',
+  credential_get: 'Retrieving credentials',
+  credential_list: 'Listing credentials',
+  credential_delete: 'Deleting credentials',
+  knowledge_add: 'Adding to knowledge base',
+  knowledge_search: 'Searching knowledge base',
+  knowledge_list: 'Listing knowledge base',
+  graph_add_relationship: 'Adding graph relationship',
+  graph_find_relationships: 'Finding graph relationships',
+  graph_rag_search: 'Running Graph RAG search',
+  read_upload: 'Reading uploaded file',
+  task_complete: 'Task complete'
+};
+
+function narrate(action, sessionId, args = {}) {
+  if (!sessionId) return;
+  try {
+    const icon = NARRATION_ICONS[action] || '🛠️';
+    const description = NARRATION_DESCRIPTIONS[action] || `Executing ${action}`;
+
+    // Build a short human-readable detail string
+    let detail = '';
+    if (action === 'bash' && args.command) {
+      detail = String(args.command).slice(0, 80);
+    } else if (args.path) {
+      detail = args.path;
+    } else if (args.url) {
+      detail = args.url;
+    } else if (args.query) {
+      detail = args.query;
+    } else if (args.key) {
+      detail = args.key;
+    } else if (args.filename) {
+      detail = args.filename;
     }
 
-    return await generateCompletion(reactMessages, {
-      temperature: options.temperature || 0.2,
-      maxTokens: options.maxTokens || MAX_ACTION_TOKENS
-      // No tools array — model uses text format
-    });
+    const payload = {
+      sessionId,
+      timestamp: new Date().toISOString(),
+      action,
+      icon,
+      description,
+      detail
+    };
+
+    if (global.wsServer) {
+      global.wsServer.to(`session-${sessionId}`).emit('agent:narration', payload);
+    }
+  } catch (e) {
+    // Non-fatal — narration is best-effort
+    logger.debug('Narration broadcast failed', { action, error: e.message });
+  }
+}
+
+/**
+ * Verify a tool result after execution.
+ * Returns { ok: boolean, message?: string } describing the verification.
+ * Failures are fed back to the LLM so it can retry or fix the issue.
+ *
+ * - write_file: verify the file exists and is non-empty
+ * - edit_file: verify the file still exists
+ * - bash: check if the result starts with "Error" (transient errors are caught elsewhere)
+ */
+async function verifyToolResult(toolName, result, toolParams = {}) {
+  try {
+    const fs = await import('fs');
+    const path = await import('path');
+    const SANDBOX = process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
+
+    if (toolName === 'write_file') {
+      const filePath = toolParams.path;
+      if (!filePath) return { ok: true };
+      const fullPath = path.resolve(SANDBOX, filePath);
+      if (!fullPath.startsWith(path.resolve(SANDBOX))) {
+        return { ok: true }; // outside sandbox — skip check
+      }
+      if (!fs.existsSync(fullPath)) {
+        return { ok: false, message: `Verification failed: file "${filePath}" does not exist after write_file.` };
+      }
+      const stat = fs.statSync(fullPath);
+      if (stat.size === 0 && toolParams.content && toolParams.content.length > 0) {
+        return { ok: false, message: `Verification failed: file "${filePath}" is empty after write_file.` };
+      }
+      return { ok: true };
+    }
+
+    if (toolName === 'edit_file') {
+      const filePath = toolParams.path;
+      if (!filePath) return { ok: true };
+      const fullPath = path.resolve(SANDBOX, filePath);
+      if (!fullPath.startsWith(path.resolve(SANDBOX))) {
+        return { ok: true };
+      }
+      if (!fs.existsSync(fullPath)) {
+        return { ok: false, message: `Verification failed: file "${filePath}" no longer exists after edit_file.` };
+      }
+      return { ok: true };
+    }
+
+    if (toolName === 'bash') {
+      if (typeof result === 'string' && result.startsWith('Error')) {
+        return { ok: false, message: `Verification: bash command returned an error. Result: ${result.slice(0, 200)}` };
+      }
+      return { ok: true };
+    }
+
+    // Other tools — no specific verification
+    return { ok: true };
+  } catch (e) {
+    // Verification itself failed — don't block the loop, just log
+    logger.debug('verifyToolResult exception', { tool: toolName, error: e.message });
+    return { ok: true };
   }
 }
 
@@ -1107,7 +1371,32 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
   }
 
   // Build system prompt with RAG context + pre-search context
-  const systemPrompt = await buildSystemPromptWithRAG(workspacePath, effectiveUserId, task) + preSearchContext;
+  let systemPrompt = await buildSystemPromptWithRAG(workspacePath, effectiveUserId, task) + preSearchContext;
+
+  // ===== PROACTIVE MEMORY INJECTION (Phase 4.4) =====
+  // Pull relevant memories from previous sessions and inject them as a system
+  // message so the agent has continuity across sessions.
+  try {
+    const memoryContext = await getRelevantMemories(task);
+    if (memoryContext) {
+      systemPrompt += '\n\n' + memoryContext;
+    }
+  } catch (e) {
+    logger.debug('Memory injection skipped', { error: e.message });
+  }
+
+  // ===== PERSONALITY ENGINE (Phase 4.3) =====
+  const personalityEngine = new PersonalityEngine();
+  let personalityAddon = '';
+  try {
+    personalityAddon = personalityEngine.getSystemPromptAddon(effectiveUserId);
+    if (personalityAddon) {
+      systemPrompt += '\n\n' + personalityAddon;
+    }
+  } catch (e) {
+    logger.debug('Personality engine skipped', { error: e.message });
+  }
+
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: task }
@@ -1132,13 +1421,12 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
     try {
       const condensedMessages = await condenseMessages(messages, { maxTokens: 4000, keepRecent: 6 });
 
-      // Disable Echo for real tasks
-      const prevEcho = process.env.ECHO_PROVIDER_ENABLED;
-      process.env.ECHO_PROVIDER_ENABLED = 'false';
-
+      // Disable Echo for real tasks via option (no process.env mutation)
       llmResult = await hybridLLMCall(condensedMessages, {
         temperature: 0.2,
-        maxTokens: MAX_ACTION_TOKENS
+        maxTokens: MAX_ACTION_TOKENS,
+        echoEnabled: false,
+        sessionId
       });
 
       // CRITICAL: Retry without tools if model returns empty response
@@ -1153,12 +1441,12 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
         }
         llmResult = await hybridLLMCall(reactMessages, {
           temperature: 0.2,
-          maxTokens: MAX_ACTION_TOKENS
+          maxTokens: MAX_ACTION_TOKENS,
+          echoEnabled: false,
+          sessionId
           // No tools — model uses ReAct text format
         });
       }
-
-      process.env.ECHO_PROVIDER_ENABLED = prevEcho;
     } catch (err) {
       logger.error('REACT_LLM_ERROR', { iteration, error: err.message });
       const currentModel = process.env.OPENAI_COMPATIBLE_MODEL || 'openrouter/auto';
@@ -1225,6 +1513,10 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
         logger.info('REACT_TOOL_CALL', { sessionId, iteration, tool: toolName, args: JSON.stringify(toolArgs).substring(0, 200) });
         broadcastProgress(sessionId, { phase: 'react', status: 'executing_tool', iteration, tool: toolName, args: toolArgs });
 
+        // ===== NARRATION (Phase 2.3) =====
+        // Broadcast a narration event with icon + description before each tool execution
+        narrate(toolName, sessionId, toolArgs);
+
         // ===== STAGE 6C: PERMISSION GUARD =====
         // Check permission before executing ANY tool
         let toolResult;
@@ -1280,6 +1572,19 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
           logger.error('Permission guard error', { tool: toolName, error: permErr.message });
           // Fail safe — don't execute if guard itself throws
           toolResult = `Permission check failed: ${permErr.message}. Tool not executed.`;
+        }
+
+        // ===== TOOL RESULT VERIFICATION (Phase 3.4) =====
+        // Verify the result is consistent. Feed failures back to the LLM.
+        try {
+          const verification = await verifyToolResult(toolName, toolResult, toolArgs);
+          if (!verification.ok && verification.message) {
+            logger.warn('TOOL_VERIFICATION_FAILED', { sessionId, tool: toolName, message: verification.message });
+            // Append verification failure to the result so the LLM can self-correct
+            toolResult = toolResult + '\n\n[VERIFICATION WARNING]: ' + verification.message;
+          }
+        } catch (verifyErr) {
+          logger.debug('verifyToolResult threw', { tool: toolName, error: verifyErr.message });
         }
 
         broadcastProgress(sessionId, { phase: 'react', status: 'tool_result', iteration, tool: toolName, result: toolResult.substring(0, 500) });
@@ -1346,6 +1651,9 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
         logger.info('REACT_TOOL_CALL', { sessionId, iteration, tool: tc.name, args: JSON.stringify(tc.args).substring(0, 200) });
         broadcastProgress(sessionId, { phase: 'react', status: 'executing_tool', iteration, tool: tc.name, args: tc.args });
 
+        // ===== NARRATION (Phase 2.3) =====
+        narrate(tc.name, sessionId, tc.args);
+
         // Permission guard check for XML path too
         let toolResult;
         try {
@@ -1376,6 +1684,17 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
           }
         } catch (permErr) {
           toolResult = `Permission check failed: ${permErr.message}. Tool not executed.`;
+        }
+
+        // ===== TOOL RESULT VERIFICATION (Phase 3.4) — XML path =====
+        try {
+          const verification = await verifyToolResult(tc.name, toolResult, tc.args);
+          if (!verification.ok && verification.message) {
+            logger.warn('TOOL_VERIFICATION_FAILED', { sessionId, tool: tc.name, message: verification.message });
+            toolResult = toolResult + '\n\n[VERIFICATION WARNING]: ' + verification.message;
+          }
+        } catch (verifyErr) {
+          logger.debug('verifyToolResult threw', { tool: tc.name, error: verifyErr.message });
         }
 
         broadcastProgress(sessionId, { phase: 'react', status: 'tool_result', iteration, tool: tc.name, result: toolResult.substring(0, 500) });
@@ -1435,6 +1754,15 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
 
   if (!isDone && !finalSummary) {
     finalSummary = 'Reached max iterations (' + MAX_ITERATIONS + '). Files modified: ' + (Array.from(filesModified).join(', ') || 'none');
+  }
+
+  // ===== PERSONALITY LEARNING (Phase 4.3) =====
+  // Learn from the user's message + agent's final response to refine
+  // communication style preferences for future interactions.
+  try {
+    personalityEngine.learnFromInteraction(effectiveUserId, task, finalSummary);
+  } catch (e) {
+    logger.debug('Personality learning skipped', { error: e.message });
   }
 
   broadcastProgress(sessionId, { phase: 'react', status: 'complete', iteration, summary: finalSummary, filesModified: Array.from(filesModified) });

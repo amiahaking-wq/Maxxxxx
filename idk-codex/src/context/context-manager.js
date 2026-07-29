@@ -3,7 +3,7 @@
  *
  * For very large codebases (or very long conversation histories) we cannot
  * dump everything into the prompt. This module provides:
- *   - Token estimation (character-based, 4 chars ≈ 1 token)
+ *   - Token estimation using gpt-tokenizer (real BPE), with chars/3.5 fallback
  *   - Message truncation that keeps the most recent context
  *   - Helpers to reserve output tokens and keep a system message
  *   - Integration with the workspace indexer for retrieval-style context
@@ -17,16 +17,86 @@ import logger from '../utils/logger.js';
 
 const DEFAULT_CONTEXT_WINDOW = 128000;
 const DEFAULT_OUTPUT_RESERVE = 4096;
-const CHARS_PER_TOKEN = 4;
+const CHARS_PER_TOKEN = 4; // Used only for slicing/display fallbacks
+
+// Lazily-loaded gpt-tokenizer encoder (ESM import)
+let _encode = null;
+let _encodeLoadAttempted = false;
 
 /**
- * Estimate token count of a string
+ * Lazily import gpt-tokenizer's `encode` function. Returns null if the
+ * package is unavailable so callers can fall back to a heuristic.
+ */
+async function getEncoder() {
+  if (_encodeLoadAttempted) return _encode;
+  _encodeLoadAttempted = true;
+  try {
+    const mod = await import('gpt-tokenizer');
+    // The package exports `encode` as a named export
+    if (mod && typeof mod.encode === 'function') {
+      _encode = mod.encode;
+      return _encode;
+    }
+    // Some versions default-export an object with encode
+    if (mod && mod.default && typeof mod.default.encode === 'function') {
+      _encode = mod.default.encode;
+      return _encode;
+    }
+  } catch (e) {
+    logger.debug('gpt-tokenizer not available, falling back to chars/3.5', { error: e.message });
+  }
+  return null;
+}
+
+// Pre-warm the encoder on module load (best-effort, non-blocking).
+// Once loaded, sync calls to estimateTokens() can use it.
+getEncoder();
+
+/**
+ * Estimate token count of a string (synchronous).
+ *
+ * Uses gpt-tokenizer's BPE encoder if it has been loaded; otherwise falls
+ * back to chars / 3.5 (slightly more accurate than chars/4 for English).
+ *
  * @param {string} text
  * @returns {number}
  */
 export function estimateTokens(text) {
   if (!text) return 0;
-  return Math.ceil(String(text).length / CHARS_PER_TOKEN);
+  const str = typeof text === 'string' ? text : JSON.stringify(text);
+
+  if (_encode) {
+    try {
+      return _encode(str).length;
+    } catch {
+      // Fall through to heuristic
+    }
+  }
+
+  // Heuristic fallback: ~3.5 chars per token (slightly better than 4)
+  return Math.ceil(str.length / 3.5);
+}
+
+/**
+ * Async token counter using gpt-tokenizer's real BPE encoder.
+ * Guarantees the encoder is loaded before counting. Falls back to chars/3.5
+ * if encoding fails or the package is unavailable.
+ *
+ * @param {string} text
+ * @returns {Promise<number>}
+ */
+export async function estimateTokensAsync(text) {
+  if (!text) return 0;
+  const str = typeof text === 'string' ? text : JSON.stringify(text);
+  const encode = await getEncoder();
+  if (encode) {
+    try {
+      return encode(str).length;
+    } catch (e) {
+      logger.debug('gpt-tokenizer encode failed, using chars/3.5', { error: e.message });
+    }
+  }
+  return Math.ceil(str.length / 3.5);
 }
 
 /**

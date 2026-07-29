@@ -18,7 +18,7 @@
 
 import { getDatabase } from '../database/db.js';
 import { knowledgeStore } from '../rag/knowledge-store.js';
-import { generateCompletion } from '../groq/client.js';
+import { completion } from '../llm/adapter.js';
 import logger from '../utils/logger.js';
 
 // ============================================================================
@@ -118,14 +118,12 @@ RULES:
     // 4. Generate response
     let reply;
     try {
-      // Disable Echo for CS responses
-      const prevEcho = process.env.ECHO_PROVIDER_ENABLED;
-      process.env.ECHO_PROVIDER_ENABLED = 'false';
-      const result = await generateCompletion(messages, {
+      const result = await completion({
+        messages,
         temperature: 0.7,
-        maxTokens: 500
+        max_tokens: 500,
+        echoEnabled: false
       });
-      process.env.ECHO_PROVIDER_ENABLED = prevEcho;
       reply = result?.content || "I'm sorry, I couldn't process your message. Please try again.";
     } catch (err) {
       logger.error('CS agent LLM call failed', { error: err.message });

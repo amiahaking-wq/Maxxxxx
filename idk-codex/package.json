@@ -1,10 +1,12 @@
 {
   "name": "max-agent",
-  "version": "2.0.0",
-  "description": "MAX - Multi-Agent eXecutor System: Autonomous CI/CD Developer Agent with 5-phase self-healing loop",
+  "version": "3.0.0",
+  "description": "MAX — Professional autonomous AI agent: a multi-provider LLM coding agent with streaming, semantic memory, personality learning, computer use, and a CLI.",
   "main": "server.js",
   "type": "module",
   "bin": {
+    "max": "./bin/max.js",
+    "max-config": "./bin/max-config.js",
     "max-cli": "./max-cli.js"
   },
   "scripts": {
@@ -16,7 +18,8 @@
     "frontend:start": "cd max-frontend && npm run start",
     "dev:all": "concurrently \"npm run dev\" \"npm run frontend:dev\"",
     "init-db": "node src/database/init-db.js",
-    "db:reset": "node scripts/reset-db.js"
+    "db:reset": "node scripts/reset-db.js",
+    "postinstall": "chmod +x bin/max.js bin/max-config.js || true"
   },
   "keywords": [
     "telegram",
@@ -25,7 +28,11 @@
     "autonomous",
     "ai-agent",
     "groq",
-    "github"
+    "github",
+    "openrouter",
+    "ollama",
+    "anthropic",
+    "cli"
   ],
   "author": "",
   "license": "MIT",
@@ -49,7 +56,9 @@
     "csv-parse": "^5.5.6",
     "dotenv": "^16.4.5",
     "express": "^5.2.1",
+    "express-rate-limit": "^7.4.0",
     "fs-safe": "^1.2.0",
+    "gpt-tokenizer": "^3.0.0",
     "groq-sdk": "^0.7.0",
     "jsonwebtoken": "^9.0.3",
     "multer": "^1.4.5-lts.1",
@@ -63,7 +72,8 @@
     "socket.io-client": "^4.8.3",
     "telegraf": "^4.16.3",
     "winston": "^3.15.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "zod": "^3.23.8"
   },
   "engines": {
     "node": ">=22.0.0"

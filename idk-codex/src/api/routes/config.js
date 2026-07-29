@@ -6,7 +6,7 @@
 import express from 'express';
 import logger from '../../utils/logger.js';
 import { getDatabase } from '../../database/db.js';
-import { getModelOptions, getModelById, isValidModel } from '../../llm/model-registry.js';
+import { getModelOptions, getAvailableModels, getModelById, isValidModel } from '../../llm/model-registry.js';
 import { setProvider, setModel } from '../../llm/adapter.js';
 import phoneBridge from '../../interfaces/phone-bridge.js';
 
@@ -311,7 +311,7 @@ router.get('/models', async (req, res) => {
       path: '/api/config/models'
     });
 
-    const options = getModelOptions();
+    const options = getAvailableModels();
 
     res.json({
       models: options.map(m => ({

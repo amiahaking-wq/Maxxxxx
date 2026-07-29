@@ -248,8 +248,8 @@ export class PermissionGuard {
         // If explicitly set to 0, revoked. Otherwise allowed.
         return row ? row.is_allowed === 1 : true;
       } catch (e) {
-        // DB not ready — allow defaults
-        return true;
+        logger.error('Permission check failed', { error: e.message });
+        return false;  // DB error = DENY everything
       }
     }
     // Explicit-grant permissions require a row with is_allowed=1

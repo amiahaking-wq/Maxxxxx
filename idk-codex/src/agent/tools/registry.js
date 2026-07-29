@@ -22,16 +22,127 @@
 
 import { execSync } from 'child_process';
 import fs from 'fs';
+import fsp from 'fs/promises';
 import path from 'path';
 import logger from '../../utils/logger.js';
 import { backupFile, validateAndRevert } from '../guardrails.js';
 import { browserTools } from './browser-tool.js';
 import { memoryTools } from './memory-tool.js';
 import { computerUseTools } from './computer-use.js';
+import { cameraTools } from './camera-tool.js';
+import { projectTools } from './project-tool.js';
+import { exportTools } from './export-tool.js';
 
 const SANDBOX = process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
 const MAX_OUTPUT_CHARS = 8000; // Truncate tool output to keep context manageable
 const BASH_TIMEOUT_MS = 30000; // 30 second timeout for bash commands
+
+// ============================================================================
+// SSRF GUARD (Phase 3.2) — block private/localhost/metadata URLs in web_fetch
+// ============================================================================
+
+/**
+ * Check a URL against the SSRF blocklist.
+ *
+ * Blocks:
+ *   - localhost, 127.0.0.1, 0.0.0.0, ::1 (loopback)
+ *   - 169.254.169.254 (AWS / Azure / GCP metadata endpoint)
+ *   - metadata.google.internal (GCP metadata)
+ *   - 100.64.0.0/10 (CGNAT — used by some metadata services)
+ *   - Private IP ranges: 10.x.x.x, 192.168.x.x, 172.16-31.x.x
+ *
+ * Returns a string error message if blocked, or null if allowed.
+ */
+function checkUrlBlocklist(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return null;
+
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return `Invalid URL: ${rawUrl}`;
+  }
+
+  const hostname = (parsed.hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+
+  // Exact hostname blocklist
+  const blockedHosts = [
+    'localhost',
+    '127.0.0.1',
+    '0.0.0.0',
+    '::1',
+    'ip6-localhost',
+    'ip6-loopback',
+    '169.254.169.254',     // AWS / Azure / DigitalOcean metadata
+    'metadata.google.internal', // GCP metadata
+    'metadata',            // short form
+    'fd00.0.0.0.0.0.0.1',  // IPv6 ULA loopback variant
+    'fe80::1'              // IPv6 link-local
+  ];
+  if (blockedHosts.includes(hostname)) {
+    return `URL blocked: "${hostname}" is on the SSRF blocklist (localhost/metadata).`;
+  }
+
+  // Block hostnames that end with .internal or .local (often metadata services)
+  if (hostname.endsWith('.internal') || hostname.endsWith('.local')) {
+    // Allow loopback variants on .local? No — block by default for safety.
+    return `URL blocked: "${hostname}" resolves to an internal/local hostname.`;
+  }
+
+  // Check IPv4 ranges (and IPv4-mapped hostnames)
+  const ipv4Match = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4Match) {
+    const [_, aStr, bStr] = ipv4Match;
+    const a = parseInt(aStr, 10);
+    const b = parseInt(bStr, 10);
+
+    // 10.0.0.0/8 — private
+    if (a === 10) {
+      return `URL blocked: ${hostname} is in a private IP range (10.0.0.0/8).`;
+    }
+    // 192.168.0.0/16 — private
+    if (a === 192 && b === 168) {
+      return `URL blocked: ${hostname} is in a private IP range (192.168.0.0/16).`;
+    }
+    // 172.16.0.0/12 — private (172.16.x.x through 172.31.x.x)
+    if (a === 172 && b >= 16 && b <= 31) {
+      return `URL blocked: ${hostname} is in a private IP range (172.16.0.0/12).`;
+    }
+    // 127.0.0.0/8 — loopback
+    if (a === 127) {
+      return `URL blocked: ${hostname} is a loopback address.`;
+    }
+    // 0.0.0.0/8 — "this network"
+    if (a === 0) {
+      return `URL blocked: ${hostname} is in the 0.0.0.0/8 range.`;
+    }
+    // 169.254.0.0/16 — link-local (includes AWS metadata 169.254.169.254)
+    if (a === 169 && b === 254) {
+      return `URL blocked: ${hostname} is in a link-local range (169.254.0.0/16, includes cloud metadata).`;
+    }
+    // 100.64.0.0/10 — CGNAT (sometimes used for metadata)
+    if (a === 100 && b >= 64 && b <= 127) {
+      return `URL blocked: ${hostname} is in the CGNAT range (100.64.0.0/10).`;
+    }
+  }
+
+  // IPv6 checks
+  if (hostname.includes(':')) {
+    const lower = hostname.toLowerCase();
+    if (lower === '::1' || lower.startsWith('fc') || lower.startsWith('fd')) {
+      return `URL blocked: ${hostname} is an IPv6 loopback or ULA address.`;
+    }
+    if (lower.startsWith('fe80:') || lower.startsWith('fe90:') ||
+        lower.startsWith('fea0:') || lower.startsWith('feb0:')) {
+      return `URL blocked: ${hostname} is an IPv6 link-local address.`;
+    }
+  }
+
+  return null;
+}
+
+// Expose for testing / reuse
+export { checkUrlBlocklist };
 
 // ============================================================================
 // TOOL DEFINITIONS
@@ -104,11 +215,14 @@ export const TOOLS = {
       }
 
       try {
-        if (!fs.existsSync(fullPath)) {
+        // Phase 3.8 — use fs/promises for async I/O
+        try {
+          await fsp.access(fullPath);
+        } catch {
           return `Error: file not found: ${filePath}`;
         }
 
-        const content = fs.readFileSync(fullPath, 'utf-8');
+        const content = await fsp.readFile(fullPath, 'utf-8');
         const lines = content.split('\n');
 
         const start = Math.max(0, offset - 1);
@@ -162,16 +276,17 @@ export const TOOLS = {
       }
 
       try {
-        // Create parent directories
+        // Phase 3.8 — use fs/promises for async I/O
         const dir = path.dirname(fullPath);
-        fs.mkdirSync(dir, { recursive: true });
+        await fsp.mkdir(dir, { recursive: true });
 
         // Backup existing file before overwriting (for guardrail revert)
-        if (fs.existsSync(fullPath)) {
-          backupFile(filePath);
-        }
+        try {
+          await fsp.access(fullPath);
+          backupFile(filePath); // guardrails.js still uses sync internally — keep for now
+        } catch { /* file does not exist — no backup needed */ }
 
-        fs.writeFileSync(fullPath, content, 'utf-8');
+        await fsp.writeFile(fullPath, content, 'utf-8');
         const size = Buffer.byteLength(content, 'utf-8');
         logger.info('TOOL:write_file', { path: filePath, size });
 
@@ -220,11 +335,13 @@ export const TOOLS = {
       }
 
       try {
-        if (!fs.existsSync(fullPath)) {
+        // Phase 3.8 — use fs/promises for async I/O
+        let content;
+        try {
+          content = await fsp.readFile(fullPath, 'utf-8');
+        } catch {
           return `Error: file not found: ${filePath}`;
         }
-
-        const content = fs.readFileSync(fullPath, 'utf-8');
 
         // Check if old_text exists
         if (!content.includes(oldText)) {
@@ -256,7 +373,7 @@ export const TOOLS = {
         // Backup before writing (for guardrail revert)
         backupFile(filePath);
 
-        fs.writeFileSync(fullPath, newContent, 'utf-8');
+        await fsp.writeFile(fullPath, newContent, 'utf-8');
 
         logger.info('TOOL:edit_file', { path: filePath });
 
@@ -356,33 +473,59 @@ export const TOOLS = {
       }
 
       try {
-        let command;
+        const { spawn } = await import('child_process');
+        let stdout = '';
+
         if (query.startsWith('pattern:')) {
-          // Glob pattern — use find
+          // Glob pattern — use find with spawn (no shell injection)
           const pattern = query.replace('pattern:', '');
-          command = `find "${fullPath}" -name "${pattern}" -not -path '*/node_modules/*' -not -path '*/.git/*' | head -${maxResults}`;
+          const child = spawn('find', [
+            fullPath, '-name', pattern,
+            '-not', '-path', '*/node_modules/*',
+            '-not', '-path', '*/.git/*'
+          ], { timeout: 10000 });
+
+          child.stdout.on('data', (data) => { stdout += data.toString(); });
+          child.stderr.on('data', () => {}); // discard stderr
+
+          await new Promise((resolve, reject) => {
+            child.on('close', resolve);
+            child.on('error', reject);
+          });
         } else {
-          // Text search — use grep -rn
-          command = `grep -rn --include='*' --exclude-dir=node_modules --exclude-dir=.git "${query.replace(/"/g, '\\"')}" "${fullPath}" 2>/dev/null | head -${maxResults}`;
+          // Text search — use grep with spawn (no shell injection)
+          const child = spawn('grep', [
+            '-rn',
+            '--include=*',
+            '--exclude-dir=node_modules',
+            '--exclude-dir=.git',
+            '--exclude-dir=dist',
+            '--exclude-dir=build',
+            '--exclude-dir=.next',
+            query,
+            fullPath
+          ], { timeout: 10000 });
+
+          child.stdout.on('data', (data) => { stdout += data.toString(); });
+          child.stderr.on('data', () => {}); // discard stderr
+
+          await new Promise((resolve, reject) => {
+            child.on('close', resolve);
+            child.on('error', reject);
+          });
         }
 
-        const result = execSync(command, {
-          encoding: 'utf-8',
-          timeout: 10000,
-          stdio: ['pipe', 'pipe', 'pipe']
-        });
-
-        if (!result || result.trim() === '') {
+        if (!stdout || stdout.trim() === '') {
           return '(no matches found)';
         }
 
-        // Make paths relative to sandbox
+        // Make paths relative to sandbox + limit results
         const sandboxPath = path.resolve(SANDBOX);
-        const relativeResult = result.split('\n').map(line => {
-          return line.replace(sandboxPath + '/', '');
-        }).join('\n');
+        const lines = stdout.split('\n').filter(l => l.trim());
+        const relativeResult = lines.map(line => line.replace(sandboxPath + '/', '')).join('\n');
+        const limited = relativeResult.split('\n').slice(0, maxResults).join('\n');
 
-        return relativeResult.trim();
+        return limited.trim();
       } catch (err) {
         if (err.status === 1) {
           return '(no matches found)';
@@ -401,6 +544,15 @@ export const TOOLS = {
     execute: async (args) => {
       const url = args.url;
       if (!url) return 'Error: url is required';
+
+      // ===== URL SECURITY CHECK (Phase 3.2) =====
+      // Block localhost, link-local, private IP ranges, and cloud metadata
+      // endpoints to prevent SSRF attacks.
+      const blocklistError = checkUrlBlocklist(url);
+      if (blocklistError) {
+        logger.warn('web_fetch blocked by SSRF guard', { url, reason: blocklistError });
+        return `Error: ${blocklistError}`;
+      }
 
       try {
         const response = await fetch(url, {
@@ -489,6 +641,21 @@ for (const [name, tool] of Object.entries(memoryTools)) {
 
 // Merge computer use tools into TOOLS (Phase 11 — Computer Use)
 for (const [name, tool] of Object.entries(computerUseTools)) {
+  TOOLS[name] = tool;
+}
+
+// Merge camera tools into TOOLS (Phase 6.2 — Camera)
+for (const [name, tool] of Object.entries(cameraTools)) {
+  TOOLS[name] = tool;
+}
+
+// Merge project scaffolding tools into TOOLS (Phase 7.1 — Project Init)
+for (const [name, tool] of Object.entries(projectTools)) {
+  TOOLS[name] = tool;
+}
+
+// Merge export/deliverable tools into TOOLS (Phase 7.3 — Export)
+for (const [name, tool] of Object.entries(exportTools)) {
   TOOLS[name] = tool;
 }
 

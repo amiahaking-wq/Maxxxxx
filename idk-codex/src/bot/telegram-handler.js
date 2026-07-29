@@ -16,7 +16,7 @@
 import logger from '../utils/logger.js';
 import { getOrCreateSession, addMessage } from '../database/queries.js';
 import { executeReActLoop } from '../agent/react-loop-v2.js';
-import { generateCompletion } from '../groq/client.js';
+import { completion } from '../llm/adapter.js';
 import { getModelOptions, getModelById, getDefaultModel } from '../llm/model-registry.js';
 import { Markup } from 'telegraf';
 import { tgEditMessage, tgSendLong, tgReply, escapeHtml } from './tg-safe-send.js';
@@ -413,76 +413,17 @@ The user's Telegram user ID is ${userId}. Be casual and friendly.`
 
     let response = null;
     try {
-      const prevEcho = process.env.ECHO_PROVIDER_ENABLED;
-      process.env.ECHO_PROVIDER_ENABLED = 'false';
-
-      // Try streaming from OpenRouter directly
-      const baseURL = process.env.OPENAI_COMPATIBLE_BASE_URL || 'https://openrouter.ai/api/v1';
-      const apiKey = process.env.OPENAI_COMPATIBLE_API_KEY;
-      const model = process.env.OPENAI_COMPATIBLE_MODEL || 'openrouter/auto';
-
-      if (apiKey) {
-        const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` };
-        if (baseURL.includes('openrouter.ai')) {
-          headers['HTTP-Referer'] = 'https://maxxxxx-production.up.railway.app';
-          headers['X-Title'] = 'MAX Agent';
-        }
-
-        const llmResp = await fetch(`${baseURL}/chat/completions`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ model, messages, temperature: 0.7, max_tokens: 1000, stream: true })
-        });
-
-        if (llmResp.ok) {
-          const reader = llmResp.body.getReader();
-          const decoder = new TextDecoder();
-          let buf = '';
-          let fullText = '';
-
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buf += decoder.decode(value, { stream: true });
-            let sep;
-            while ((sep = buf.indexOf('\n\n')) >= 0) {
-              const evt = buf.slice(0, sep);
-              buf = buf.slice(sep + 2);
-              for (const line of evt.split('\n')) {
-                if (!line.startsWith('data: ')) continue;
-                const payload = line.slice(6).trim();
-                if (payload === '[DONE]') continue;
-                try {
-                  const chunk = JSON.parse(payload);
-                  const delta = chunk.choices?.[0]?.delta;
-                  if (delta?.content) {
-                    fullText += delta.content;
-                    await updateMessage(fullText);
-                  }
-                } catch (e) {}
-              }
-            }
-          }
-          response = fullText;
-        } else {
-          throw new Error(`HTTP ${llmResp.status}`);
-        }
-      } else {
-        throw new Error('No API key');
-      }
-
-      process.env.ECHO_PROVIDER_ENABLED = prevEcho;
+      // Use the adapter's completion() — no direct fetch, no process.env mutation
+      const result = await completion({
+        messages,
+        temperature: 0.7,
+        max_tokens: 4000,
+        echoEnabled: false
+      });
+      response = result?.content || null;
     } catch (llmErr) {
-      logger.warn('LLM chat streaming failed, trying non-streaming', { error: llmErr.message });
-      process.env.ECHO_PROVIDER_ENABLED = 'true';
-
-      // Fallback: non-streaming
-      try {
-        const result = await generateCompletion(messages, { temperature: 0.7, maxTokens: 1000 });
-        response = result?.content || null;
-      } catch (e) {
-        response = null;
-      }
+      logger.warn('LLM chat failed', { error: llmErr.message });
+      response = null;
     }
 
     clearInterval(typingInterval);
@@ -1230,7 +1171,8 @@ async function handleRulesCommand(ctx, userId) {
  */
 async function handleShareCommand(ctx, userId) {
   const sessionId = 'tg_' + userId + '_' + Date.now();
-  const shareUrl = 'https://maxxxxx-production.up.railway.app/?session=' + sessionId;
+  const frontendBase = process.env.FRONTEND_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '');
+  const shareUrl = frontendBase ? `${frontendBase}/?session=${sessionId}` : `/?session=${sessionId}`;
   await ctx.reply('🔗 Share this link to collaborate in real-time:\n' + shareUrl);
 }
 
@@ -1254,7 +1196,7 @@ async function handleCsSetupCommand(ctx, userId, text) {
       'Working hours: Mon-Sat 8am-6pm\n' +
       'Telegram notify ID: ' + userId + '\n\n' +
       'After setup, other bots can forward customer messages to:\n' +
-      'POST https://maxxxxx-production.up.railway.app/api/cs/message\n\n' +
+      `POST ${(process.env.FRONTEND_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '<your-max-domain>'))}/api/cs/message\n\n` +
       'Use /cs_status to check your setup, /cs_disable to turn off.'
     );
     return;
@@ -1491,7 +1433,7 @@ async function handleLinkCommand(ctx, telegramUserId, telegramUsername, code) {
       await ctx.reply(
         '🔗 **Link Your Telegram to MAX Website**\n\n' +
         'To link your Telegram account to your website account:\n\n' +
-        '1. Log in to https://maxxxxx-production.up.railway.app\n' +
+        `1. Log in to ${(process.env.FRONTEND_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : 'the MAX website'))}\n` +
         '2. Go to Settings → Profile\n' +
         '3. Click "Link Telegram"\n' +
         '4. Copy the 6-character code\n' +

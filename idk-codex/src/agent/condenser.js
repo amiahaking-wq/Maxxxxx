@@ -14,7 +14,7 @@
  *   7. Truncate very long tool results to last 500 chars
  */
 
-import { generateCompletion } from '../groq/client.js';
+import { completion } from '../llm/adapter.js';
 import { estimateTokens } from '../context/context-manager.js';
 import logger from '../utils/logger.js';
 
@@ -179,13 +179,13 @@ Be concise but don't lose important details. Maximum 500 words.
 Conversation to summarize:
 ${conversationText.substring(0, 10000)}`;
 
-  const result = await generateCompletion([
-    { role: 'system', content: 'You are a conversation summarizer. Be concise and preserve key information.' },
-    { role: 'user', content: prompt }
-  ], {
+  const result = await completion({
+    messages: [
+      { role: 'system', content: 'You are a conversation summarizer. Be concise and preserve key information.' },
+      { role: 'user', content: prompt }
+    ],
     temperature: 0.2,
-    maxTokens: 800,
-    budgetManager
+    max_tokens: 800
   });
 
   return result?.content || 'Previous conversation was condensed.';

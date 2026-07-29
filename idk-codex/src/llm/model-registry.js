@@ -205,7 +205,8 @@ const BASE_MODEL_OPTIONS = [
     bestFor: ['offline', 'demo', 'testing'],
     description: 'Deterministic offline fallback — no API key needed. Generates plausible files for demo purposes.',
     contextWindow: 32000,
-    maxOutputTokens: 4096
+    maxOutputTokens: 4096,
+    hidden: true
   }
 ];
 
@@ -257,6 +258,13 @@ export function getModelOptions() {
   }
 
   return options;
+}
+
+/**
+ * Get available models (filters out hidden models like Echo)
+ */
+export function getAvailableModels() {
+  return getModelOptions().filter(m => !m.hidden);
 }
 
 /**

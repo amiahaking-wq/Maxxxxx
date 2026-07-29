@@ -143,6 +143,30 @@ export function initWebSocket(io) {
       // Terminal resize is not implemented for the bash-spawn backend
     });
 
+    // ===== CAMERA CAPTURE RESPONSE (Phase 6.2 — Camera) =====
+    // When the frontend captures a photo after an `agent:request_camera`
+    // event, it emits `camera:image` with the base64 data URL. The
+    // camera-tool.js module maintains a map of pending capture requests
+    // and resolves them when this event arrives.
+    socket.on('camera:image', (data) => {
+      try {
+        const sessionId = data?.sessionId;
+        const image = data?.image;
+        if (!sessionId || !image) return;
+
+        // Defer to the camera-tool module (loaded lazily to avoid a circular import)
+        import('../agent/tools/camera-tool.js').then(({ resolvePendingCapture }) => {
+          if (typeof resolvePendingCapture === 'function') {
+            resolvePendingCapture(sessionId, image);
+          }
+        }).catch((e) => {
+          logger.debug('camera-tool load failed', { error: e.message });
+        });
+      } catch (e) {
+        logger.debug('camera:image handler error', { error: e.message });
+      }
+    });
+
     // Handle disconnection
     socket.on('disconnect', (reason) => {
       logger.info('WebSocket client disconnected', {

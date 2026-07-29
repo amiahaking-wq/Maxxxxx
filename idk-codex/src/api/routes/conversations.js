@@ -24,6 +24,7 @@ import {
 import { executeReActLoop } from '../../agent/react-loop-v2.js';
 import { broadcastMessage, broadcastToken } from '../websocket.js';
 import { rateLimiter, trackUsage } from '../../middleware/rate-limiter.js';
+import { chatSchema, validateBody } from '../middleware/validation.js';
 import logger from '../../utils/logger.js';
 
 const router = express.Router();
@@ -44,18 +45,95 @@ const USER_ID = 'web_user'; // fallback when no auth
 logger.info('Conversation storage', { supabase: isSupabaseConfigured() ? 'ENABLED (persistent)' : 'DISABLED (SQLite ephemeral)' });
 
 // ============================================================================
-// LIST CONVERSATIONS
+// LIST CONVERSATIONS — merged from SQLite + Supabase (Phase 3.5)
 // ============================================================================
 router.get('/', async (req, res) => {
   try {
     const userId = req.user.id;
-    const conversations = await listConversations(userId);
-    res.json({ success: true, conversations, storage: isSupabaseConfigured() ? 'supabase' : 'sqlite' });
+
+    // ===== Phase 3.5: Query BOTH SQLite and Supabase, dedupe by ID =====
+    // The Supabase helper returns early on success, which can hide
+    // conversations that exist only in SQLite (e.g. when Supabase was
+    // temporarily unreachable and SQLite was used as a fallback).
+    // We query both directly and merge them, keeping the newest by updated_at.
+
+    const merged = new Map();
+
+    // 1) SQLite
+    try {
+      const sqliteConvos = await listConversationsFromSQLite(userId);
+      for (const c of sqliteConvos) {
+        merged.set(c.id, c);
+      }
+    } catch (sqliteErr) {
+      logger.warn('SQLite conversation list failed', { error: sqliteErr.message });
+    }
+
+    // 2) Supabase (only if configured)
+    if (isSupabaseConfigured()) {
+      try {
+        const supabaseConvos = await listConversations(userId, 50);
+        for (const c of supabaseConvos) {
+          const existing = merged.get(c.id);
+          if (!existing) {
+            merged.set(c.id, c);
+          } else {
+            // Keep the newest by updated_at
+            const existingTs = new Date(existing.updatedAt || existing.updated_at || 0).getTime();
+            const newTs = new Date(c.updatedAt || c.updated_at || 0).getTime();
+            if (newTs > existingTs) {
+              merged.set(c.id, c);
+            }
+          }
+        }
+      } catch (supaErr) {
+        logger.warn('Supabase conversation list failed', { error: supaErr.message });
+      }
+    }
+
+    // Sort merged list by updatedAt DESC
+    const conversations = Array.from(merged.values()).sort((a, b) => {
+      const aTs = new Date(a.updatedAt || a.updated_at || 0).getTime();
+      const bTs = new Date(b.updatedAt || b.updated_at || 0).getTime();
+      return bTs - aTs;
+    });
+
+    res.json({
+      success: true,
+      conversations,
+      storage: isSupabaseConfigured() ? 'merged' : 'sqlite'
+    });
   } catch (err) {
     logger.error('Failed to list conversations', { error: err.message });
     res.status(500).json({ error: 'Failed to list conversations' });
   }
 });
+
+/**
+ * Query SQLite conversations directly (Phase 3.5).
+ * Bypasses the Supabase helper so we always get the SQLite rows too.
+ */
+async function listConversationsFromSQLite(userId, limit = 50) {
+  try {
+    const { getDatabase } = await import('../../database/db.js');
+    const db = getDatabase();
+    const rows = db.prepare(`
+      SELECT c.id, c.title, c.platform, c.created_at, c.updated_at,
+        (SELECT content FROM conversation_messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1) as last_message,
+        (SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = c.id) as message_count
+      FROM conversations c WHERE c.user_id = ? ORDER BY c.updated_at DESC LIMIT ?
+    `).all(String(userId), limit);
+
+    return rows.map(c => ({
+      id: c.id, title: c.title, platform: c.platform,
+      createdAt: c.created_at, updatedAt: c.updated_at,
+      preview: c.last_message?.substring(0, 100) || '',
+      messageCount: c.message_count || 0
+    }));
+  } catch (e) {
+    return [];
+  }
+}
 
 // ============================================================================
 // CREATE CONVERSATION
@@ -139,7 +217,7 @@ router.patch('/:id', async (req, res) => {
 // ============================================================================
 // SEND MESSAGE (triggers ReAct agent loop)
 // ============================================================================
-router.post('/:id/messages', rateLimiter, async (req, res) => {
+router.post('/:id/messages', rateLimiter, validateBody(chatSchema), async (req, res) => {
   try {
     const conversationId = req.params.id;
     const userId = req.user.id;
@@ -162,6 +240,12 @@ router.post('/:id/messages', rateLimiter, async (req, res) => {
     if (files && Array.isArray(files) && files.length > 0) {
       const fileList = files.map(f => `- ${f.filename || f.name} (${f.size || 'unknown'} bytes)`).join('\n');
       enhancedMessage = `${message}\n\n[Attached files — use read_upload to read them:]\n${fileList}`;
+    }
+
+    // Phase 6.1 — if images are attached, also mention them so the agent
+    // knows to use read_upload or computer_screenshot to inspect them.
+    if (images && Array.isArray(images) && images.length > 0) {
+      enhancedMessage += `\n\n[Attached images — use read_upload to inspect them: ${images.length} image(s)]`;
     }
 
     // Save the user's message
@@ -192,7 +276,7 @@ router.post('/:id/messages', rateLimiter, async (req, res) => {
       // Generate a chat response in the background
       setImmediate(async () => {
         try {
-          const { generateCompletion } = await import('../../groq/client.js');
+          const { completion } = await import('../../llm/adapter.js');
 
           // Build conversation context from recent messages
           const recentMessages = (conv.messages || []).slice(-6).map(m => ({
@@ -232,8 +316,7 @@ router.post('/:id/messages', rateLimiter, async (req, res) => {
             { role: 'user', content: userMessageContent }
           ];
 
-          // Disable Echo for chat
-          process.env.ECHO_PROVIDER_ENABLED = 'false';
+          // Disable Echo for chat via option (no process.env mutation)
 
           let result;
           if (wantsWebAccess) {
@@ -252,11 +335,13 @@ router.post('/:id/messages', rateLimiter, async (req, res) => {
             }];
 
             try {
-              result = await generateCompletion(messages, {
+              result = await completion({
+                messages,
                 temperature: 0.7,
-                maxTokens: 800,
+                max_tokens: 800,
                 tools: webFetchTool,
-                tool_choice: 'auto'
+                tool_choice: 'auto',
+                echoEnabled: false
               });
 
               // If the LLM called web_fetch, execute it and feed result back
@@ -277,7 +362,7 @@ router.post('/:id/messages', rateLimiter, async (req, res) => {
                           { role: 'assistant', content: responseText, tool_calls: result.tool_calls },
                           { role: 'tool', tool_call_id: tc.id || 'web_fetch', content: String(fetchResult).substring(0, 4000) }
                         ];
-                        const followUp = await generateCompletion(followUpMessages, { temperature: 0.7, maxTokens: 800 });
+                        const followUp = await completion({ messages: followUpMessages, temperature: 0.7, max_tokens: 800, echoEnabled: false });
                         responseText = followUp?.content || responseText;
                       } catch (fetchErr) {
                         responseText += '\n\n(Web fetch failed: ' + fetchErr.message + ')';
@@ -290,21 +375,18 @@ router.post('/:id/messages', rateLimiter, async (req, res) => {
             } catch (toolErr) {
               // Tool-calling failed — fall back to plain generation
               logger.warn('Chat with tools failed, falling back', { error: toolErr.message });
-              result = await generateCompletion(messages, { temperature: 0.7, maxTokens: 800 });
+              result = await completion({ messages, temperature: 0.7, max_tokens: 800, echoEnabled: false });
             }
           } else {
             // Plain chat — no tools needed
-            result = await generateCompletion(messages, { temperature: 0.7, maxTokens: 800 });
+            result = await completion({ messages, temperature: 0.7, max_tokens: 800, echoEnabled: false });
           }
-
-          // Restore Echo for the ReAct agent loop
-          process.env.ECHO_PROVIDER_ENABLED = 'true';
 
           // Retry once if model returns empty (openrouter/auto sometimes does this)
           if (!result || (!result.content && !result.tool_calls)) {
             logger.warn('Chat empty response, retrying without tools');
             try {
-              result = await generateCompletion(messages, { temperature: 0.7, maxTokens: 800 });
+              result = await completion({ messages, temperature: 0.7, max_tokens: 800, echoEnabled: false });
             } catch (retryErr) {
               // Still empty — throw with model name
             }
@@ -325,7 +407,6 @@ router.post('/:id/messages', rateLimiter, async (req, res) => {
           });
         } catch (err) {
           logger.error('Chat response failed', { error: err.message });
-          process.env.ECHO_PROVIDER_ENABLED = 'true';
           const currentModel = process.env.OPENAI_COMPATIBLE_MODEL || 'openrouter/auto';
           const fallback = `⚠️ The selected model (${currentModel}) could not respond.\n\nError: ${err.message}\n\nTry selecting a different model from the dropdown.`;
           await addConversationMessage(conversationId, 'assistant', fallback);

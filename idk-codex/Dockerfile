@@ -80,6 +80,7 @@ COPY sql ./sql
 
 COPY server.js ./
 COPY package.json ./
+COPY bin ./bin
 
 # NOTE: Frontend is deployed as a SEPARATE Railway service (Next.js).
 # Do NOT copy app-dist here — backend runs in API-only mode and returns

@@ -331,15 +331,52 @@ export class WebGateway {
     // Initialize WebSocket
     initWebSocket(this.io);
 
+    // ===== VISION SUPPORT (Phase 6.1) =====
+    // Helper that builds a vision-capable user message when images are
+    // attached to a prompt. Used by /api/conversations/:id/messages and
+    // the global agentExecutor below so the agent can SEE uploaded images.
+    global.buildVisionMessage = function (prompt, images = []) {
+      if (!images || images.length === 0) {
+        return prompt; // plain text — no vision needed
+      }
+      const content = [{ type: 'text', text: prompt || '' }];
+      for (const img of images) {
+        if (!img) continue;
+        // Accept data URLs, http(s) URLs, or raw base64 strings
+        const url = typeof img === 'string'
+          ? (img.startsWith('data:') || img.startsWith('http') ? img : `data:image/jpeg;base64,${img}`)
+          : (img.url || (img.data ? `data:${img.mimeType || 'image/jpeg'};base64,${img.data}` : ''));
+        if (url) {
+          content.push({ type: 'image_url', image_url: { url, detail: 'high' } });
+        }
+      }
+      return content; // array form — OpenAI vision format
+    };
+
     // Make agent executor available globally for API
-    global.agentExecutor = async (sessionId, task) => {
+    global.agentExecutor = async (sessionId, task, options = {}) => {
       logger.info('Executing agent task via API', { sessionId, task: task.substring(0, 50) });
 
       // Add user message to database
       await addMessage(sessionId, 'user', task);
 
+      // Phase 6.1 — if images are attached, build a vision message and
+      // inject it into the task so the agent loop sees the image.
+      let effectiveTask = task;
+      if (options.images && options.images.length > 0) {
+        // The ReAct loop expects a string prompt; embed the image URLs as
+        // markdown image tags so the LLM can fetch them via read_upload.
+        // The vision-capable chat path already builds a proper vision
+        // message via global.buildVisionMessage; this is the agent path
+        // fallback.
+        const imageList = options.images
+          .map((img, i) => `[Image ${i + 1}: ${typeof img === 'string' ? img.slice(0, 50) + '...' : 'attached'}]`)
+          .join('\n');
+        effectiveTask = `${task}\n\n[User attached ${options.images.length} image(s). Use read_upload to inspect them.]\n${imageList}`;
+      }
+
       // Execute agent loop
-      const results = await executeAgentLoop(task, sessionId, null, 'web_user');
+      const results = await executeAgentLoop(effectiveTask, sessionId, null, 'web_user');
 
       return results;
     };

@@ -5,6 +5,8 @@
 import { Router } from 'express';
 import fs from 'fs';
 import path from 'path';
+import rateLimit from 'express-rate-limit';
+import { z } from 'zod';
 import sessionsRouter from './sessions.js';
 import messagesRouter from './messages.js';
 import agentRouter from './agent.js';
@@ -29,7 +31,74 @@ import suggestionsRouter from './suggestions.js';
 import sandboxRouter from './sandbox.js';
 import scheduledRouter from './scheduled.js';
 
+// Re-export validation utilities (Phase 3.9) so callers can import them
+// from a single entry point.
+export { chatSchema, validateBody } from '../middleware/validation.js';
+
 const router = Router();
+
+// ============================================================================
+// RATE LIMITERS (Phase 3.3)
+// ============================================================================
+
+/**
+ * General API limiter — 100 requests per 15 min per IP.
+ * Applied to lower-risk routes (sandbox, teams, scheduled).
+ */
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: 'Too many requests from this IP, please try again after 15 minutes.'
+  }
+});
+
+/**
+ * Chat limiter — 10 requests per minute per IP.
+ * Applied to conversation/message POST routes (LLM calls are expensive).
+ */
+const chatLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: 'Too many chat requests. Please slow down (max 10 per minute).'
+  }
+});
+
+// Expose limiters so other code can reuse them
+router.apiLimiter = apiLimiter;
+router.chatLimiter = chatLimiter;
+
+// ============================================================================
+// INPUT VALIDATION (Phase 3.9 — zod schemas)
+// ============================================================================
+const chatSchema = z.object({
+  message: z.string().min(1).max(50000),
+  files: z.array(z.object({})).optional(),
+  images: z.array(z.string()).optional(),
+  runAgent: z.boolean().optional(),
+  model: z.string().optional()
+});
+
+function validateBody(schema) {
+  return (req, res, next) => {
+    try {
+      req.body = schema.parse(req.body);
+      next();
+    } catch (e) {
+      res.status(400).json({ error: 'Invalid request body', details: e.errors || e.message });
+    }
+  };
+}
+
+router.validateBody = validateBody;
+router.chatSchema = chatSchema;
 
 // Health check
 router.get('/health', (req, res) => {
@@ -65,7 +134,8 @@ router.use('/files', filesRouter);
 router.use('/max', maxRouter);
 router.use('/config', configRouter);
 router.use('/repos', reposRouter);
-router.use('/conversations', conversationsRouter);
+// Apply chatLimiter to all conversation POST routes (Phase 3.3)
+router.use('/conversations', chatLimiter, conversationsRouter);
 router.use('/connectors', connectorsRouter);
 router.use('/upload', uploadRouter);
 router.use('/permissions', permissionsRouter);
@@ -75,11 +145,13 @@ router.use('/vault', vaultRouter);
 router.use('/knowledge', knowledgeRouter);
 router.use('/usage', usageRouter);
 router.use('/billing', billingRouter);
-router.use('/teams', teamsRouter);
+// Apply apiLimiter (100 req / 15 min) to teams routes (Phase 3.3)
+router.use('/teams', apiLimiter, teamsRouter);
 router.use('/memory-long-term', memoryLongTermRouter);  // adds /summarize/:id and /long-term
 router.use('/suggestions', suggestionsRouter);
-router.use('/sandbox', sandboxRouter);
-router.use('/scheduled', scheduledRouter);
+// Apply apiLimiter to sandbox + scheduled (Phase 3.3)
+router.use('/sandbox', apiLimiter, sandboxRouter);
+router.use('/scheduled', apiLimiter, scheduledRouter);
 router.use('/', extrasRouter);  // memory + user profile routes
 router.use('/files/download', uploadRouter);
 
