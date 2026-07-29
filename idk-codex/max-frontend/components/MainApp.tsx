@@ -83,13 +83,26 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
 
   const activeConversation = conversations.find(c => c.id === activeId);
 
-  // Connect socket with auth
+  // Connect socket with auth — connects directly to backend
   useEffect(() => {
-    const socket = io(API_BASE || window.location.origin, {
+    // Always use the backend URL for Socket.IO (NOT the frontend proxy — WebSockets can't be proxied)
+    const socketUrl = API_BASE || 'https://maxxxxx-production.up.railway.app';
+    console.log('[MAX] Connecting Socket.IO to:', socketUrl);
+    const socket = io(socketUrl, {
       auth: { token },
-      transports: ['websocket', 'polling']
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: 10,
+      reconnectionDelay: 2000
     });
     socketRef.current = socket;
+
+    socket.on('connect', () => {
+      console.log('[MAX] Socket.IO connected:', socket.id);
+    });
+    socket.on('connect_error', (err: any) => {
+      console.error('[MAX] Socket.IO connection error:', err.message);
+    });
 
     socket.on('token', (data: any) => {
       if (data.type === 'start') { setStreamingContent(''); setReasoningContent(''); setIsRunning(true); setToolCalls([]); }
