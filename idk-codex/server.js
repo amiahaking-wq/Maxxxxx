@@ -29,6 +29,15 @@ async function main() {
     } catch (e) {
       logger.warn('Watchdog not started', { error: e.message });
     }
+
+    // Start task scheduler (Phase 5 — node-cron scheduled tasks)
+    try {
+      const { taskScheduler } = await import('./src/scheduler/task-scheduler.js');
+      taskScheduler.start();
+      logger.info('Task scheduler started (Phase 5)');
+    } catch (e) {
+      logger.warn('Task scheduler not started', { error: e.message });
+    }
   } catch (error) {
     logger.error('Failed to start application', {
       error: error.message,
