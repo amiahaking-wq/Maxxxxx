@@ -81,8 +81,9 @@ COPY sql ./sql
 COPY server.js ./
 COPY package.json ./
 
-# Copy pre-built frontend
-COPY app-dist ./dist
+# NOTE: Frontend is deployed as a SEPARATE Railway service (Next.js).
+# Do NOT copy app-dist here — backend runs in API-only mode and returns
+# JSON { service: 'MAX API', status: 'running' } for non-API routes.
 
 # Init database
 RUN node src/database/init-db.js

@@ -298,9 +298,33 @@ export class WebGateway {
       });
     } else {
       logger.info('Frontend dist not found — running as API-only service');
-      // API-only: return JSON for non-API routes
+      // API-only: return a clear "this is an API" response for non-API routes
       this.app.get('/', (req, res) => {
-        res.json({ service: 'MAX API', status: 'running', docs: '/api/health' });
+        res.json({
+          service: 'MAX API',
+          status: 'running',
+          message: 'This is the MAX backend API. The frontend is deployed separately.',
+          docs: '/api/health',
+          endpoints: {
+            auth: '/api/auth/*',
+            conversations: '/api/conversations/*',
+            vault: '/api/vault/*',
+            knowledge: '/api/knowledge/*',
+            sandbox: '/api/sandbox/*',
+            usage: '/api/usage/*',
+            scheduled: '/api/scheduled/*',
+            teams: '/api/teams/*',
+            health: '/api/health'
+          }
+        });
+      });
+      // For all other non-API, non-socket.io routes — return 403 (not a website)
+      this.app.get(/^(?!\/socket\.io\/|\/api\/).*$/, (req, res) => {
+        res.status(403).json({
+          error: 'Authorization not allowed',
+          message: 'This is an API-only service. Frontend routes are not served here.',
+          hint: 'Visit the frontend URL (separate Railway service) to use the MAX UI.'
+        });
       });
     }
 
