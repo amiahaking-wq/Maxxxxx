@@ -76,6 +76,12 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<any>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const activeIdRef = useRef<string | null>(null);  // Always has latest activeId for socket handlers
+
+  // Keep the ref in sync with state
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
 
   const activeConversation = conversations.find(c => c.id === activeId);
   const messages = activeConversation?.messages || [];
@@ -126,7 +132,7 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
 
     // Final message — this is what completes the response
     socket.on('message', (data: any) => {
-      console.log('[MAX] Received message event:', data.type, data.conversationId);
+      console.log('[MAX] Received message event:', data.type, 'convId:', data.conversationId, 'activeIdRef:', activeIdRef.current);
       if (data.role === 'assistant') {
         if (!data.content || data.content.trim().length === 0) return;
         
@@ -138,18 +144,33 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
           filesModified: data.filesModified
         };
         
-        // Use data.conversationId if available, otherwise use activeId
-        const targetId = data.conversationId || activeId;
-        setConversations(prev => prev.map(c =>
-          c.id === targetId ? { ...c, messages: [...c.messages, msg], updatedAt: new Date() } : c
-        ));
+        // Use ref for the latest activeId (avoids stale closure bug)
+        const targetId = data.conversationId || activeIdRef.current;
+        console.log('[MAX] Adding assistant message to conversation:', targetId);
+        setConversations(prev => {
+          // If conversation doesn't exist in state, add it
+          const exists = prev.find(c => c.id === targetId);
+          if (!exists) {
+            console.log('[MAX] Conversation not in state, creating it');
+            return [...prev, {
+              id: targetId || 'unknown',
+              title: 'Chat',
+              messages: [msg],
+              createdAt: new Date(),
+              updatedAt: new Date()
+            }];
+          }
+          return prev.map(c =>
+            c.id === targetId ? { ...c, messages: [...c.messages, msg], updatedAt: new Date() } : c
+          );
+        });
         setStreamingContent('');
         setIsRunning(false);
       }
     });
 
     socket.on('file_created', (data: any) => {
-      const targetId = data.sessionId || activeId;
+      const targetId = data.sessionId || activeIdRef.current;
       setConversations(prev => prev.map(c => {
         if (c.id !== targetId) return c;
         const msgs = [...c.messages];
@@ -359,11 +380,53 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
       const data = await res.json();
       console.log('[MAX] Message sent:', data);
       
-      // If it's a chat message (not a task), the response comes via Socket.IO
-      // If the backend didn't start the agent, we need to handle it
-      if (data.intent === 'chat' && !data.agentStarted) {
-        // Chat response comes async via Socket.IO 'message' event
-        // isRunning stays true until the message event arrives
+      // POLLING FALLBACK: If Socket.IO fails to deliver the response,
+      // poll the backend after 15 seconds and load the response manually.
+      // This ensures the user ALWAYS sees a response, even if Socket.IO breaks.
+      if (data.intent === 'chat' || data.agentStarted) {
+        const pollConvId = currentId;
+        const messageCountBefore = conversations.find(c => c.id === pollConvId)?.messages.length || 0;
+        
+        setTimeout(async () => {
+          // Check if we already got the response via Socket.IO
+          // (isRunning would be false if we did)
+          if (!isRunning) return;
+          
+          console.log('[MAX] Socket.IO timeout — polling backend for response');
+          try {
+            const pollRes = await fetch(apiUrl(`/api/conversations/${pollConvId}`), {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+            if (!pollRes.ok) return;
+            const pollData = await pollRes.json();
+            if (pollData.success && pollData.conversation) {
+              const allMsgs = pollData.conversation.messages || [];
+              // Only add messages we don't already have
+              if (allMsgs.length > messageCountBefore) {
+                const newMsgs = allMsgs.slice(messageCountBefore);
+                console.log('[MAX] Polling found', newMsgs.length, 'new message(s)');
+                setConversations(prev => prev.map(c => {
+                  if (c.id !== pollConvId) return c;
+                  const existingIds = new Set(c.messages.map(m => m.id));
+                  const toAdd = newMsgs
+                    .filter((m: any) => !existingIds.has(m.id))
+                    .map((m: any) => ({
+                      id: m.id || Date.now().toString(),
+                      role: m.role,
+                      content: m.content,
+                      timestamp: new Date(m.createdAt || m.created_at || Date.now()),
+                      filesModified: m.metadata?.filesModified
+                    }));
+                  return toAdd.length > 0 ? { ...c, messages: [...c.messages, ...toAdd] } : c;
+                }));
+                setStreamingContent('');
+                setIsRunning(false);
+              }
+            }
+          } catch (e) {
+            console.error('[MAX] Polling failed:', e);
+          }
+        }, 15000);  // 15 second fallback
       }
     } catch (err) {
       console.error('[MAX] Send failed:', err);
