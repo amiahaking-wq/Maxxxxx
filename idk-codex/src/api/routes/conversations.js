@@ -23,6 +23,7 @@ import {
 } from '../../database/conversations-supabase.js';
 import { executeReActLoop } from '../../agent/react-loop-v2.js';
 import { broadcastMessage, broadcastToken } from '../websocket.js';
+import { rateLimiter, trackUsage } from '../../middleware/rate-limiter.js';
 import logger from '../../utils/logger.js';
 
 const router = express.Router();
@@ -138,7 +139,7 @@ router.patch('/:id', async (req, res) => {
 // ============================================================================
 // SEND MESSAGE (triggers ReAct agent loop)
 // ============================================================================
-router.post('/:id/messages', async (req, res) => {
+router.post('/:id/messages', rateLimiter, async (req, res) => {
   try {
     const conversationId = req.params.id;
     const userId = req.user.id;
