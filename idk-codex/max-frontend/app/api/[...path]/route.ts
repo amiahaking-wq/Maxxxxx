@@ -3,55 +3,13 @@ import { NextRequest, NextResponse } from 'next/server';
 // ═══════════════════════════════════════════════════════════════
 // CATCH-ALL API PROXY
 // ═══════════════════════════════════════════════════════════════
-// Every request to /api/* on the Next.js frontend is proxied to the
-// Express backend. This works WITHOUT NEXT_PUBLIC_API_URL being set
-// at build time — the backend URL is determined at RUNTIME.
-//
-// Priority:
-//   1. NEXT_PUBLIC_API_URL env var (if set at build time)
-//   2. BACKEND_URL env var (if set at runtime)
-//   3. Hardcoded fallback: https://maxxxxx-production.up.railway.app
+// Proxies all /api/* requests to the Express backend.
+// Backend URL is hardcoded so it works WITHOUT any env vars.
 // ═══════════════════════════════════════════════════════════════
 
-const BACKEND_URL =
-  process.env.NEXT_PUBLIC_API_URL ||
-  process.env.BACKEND_URL ||
-  'https://maxxxxx-production.up.railway.app';
+const BACKEND_URL = 'https://maxxxxx-production.up.railway.app';
 
-export async function GET(
-  req: NextRequest,
-  { params }: { params: { path: string[] } }
-) {
-  return proxyRequest(req, params);
-}
-
-export async function POST(
-  req: NextRequest,
-  { params }: { params: { path: string[] } }
-) {
-  return proxyRequest(req, params);
-}
-
-export async function PUT(
-  req: NextRequest,
-  { params }: { params: { path: string[] } }
-) {
-  return proxyRequest(req, params);
-}
-
-export async function PATCH(
-  req: NextRequest,
-  { params }: { params: { path: string[] } }
-) {
-  return proxyRequest(req, params);
-}
-
-export async function DELETE(
-  req: NextRequest,
-  { params }: { params: { path: string[] } }
-) {
-  return proxyRequest(req, params);
-}
+export const dynamic = 'force-dynamic';
 
 async function proxyRequest(
   req: NextRequest,
@@ -60,18 +18,22 @@ async function proxyRequest(
   const path = params.path.join('/');
   const url = `${BACKEND_URL}/api/${path}${req.nextUrl.search}`;
 
-  // Forward headers
-  const headers = new Headers();
-  req.headers.forEach((value, key) => {
-    // Skip host header — let fetch set it
-    if (key.toLowerCase() !== 'host') {
-      headers.set(key, value);
-    }
-  });
+  // Build clean headers — only forward essential ones
+  const headers: Record<string, string> = {
+    'Content-Type': req.headers.get('content-type') || 'application/json',
+  };
 
-  // Get body for POST/PUT/PATCH
-  let body: BodyInit | null = null;
-  if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+  // Forward Authorization header
+  const auth = req.headers.get('authorization');
+  if (auth) headers['Authorization'] = auth;
+
+  // Forward other useful headers
+  const accept = req.headers.get('accept');
+  if (accept) headers['Accept'] = accept;
+
+  // Get body
+  let body: string | null = null;
+  if (req.method !== 'GET' && req.method !== 'DELETE') {
     body = await req.text();
   }
 
@@ -82,23 +44,52 @@ async function proxyRequest(
       body,
     });
 
-    // Forward response headers
-    const responseHeaders = new Headers();
-    response.headers.forEach((value, key) => {
-      responseHeaders.set(key, value);
-    });
-
     const responseBody = await response.text();
+    const contentType = response.headers.get('content-type') || 'application/json';
 
     return new NextResponse(responseBody, {
       status: response.status,
       statusText: response.statusText,
-      headers: responseHeaders,
+      headers: {
+        'Content-Type': contentType,
+        'Access-Control-Allow-Origin': '*',
+      },
     });
   } catch (error: any) {
     return NextResponse.json(
-      { error: 'Backend proxy failed', details: error.message, backendUrl: BACKEND_URL },
+      { error: 'Backend proxy failed', details: error.message, url },
       { status: 502 }
     );
   }
+}
+
+export async function GET(req: NextRequest, ctx: { params: { path: string[] } }) {
+  return proxyRequest(req, ctx.params);
+}
+
+export async function POST(req: NextRequest, ctx: { params: { path: string[] } }) {
+  return proxyRequest(req, ctx.params);
+}
+
+export async function PUT(req: NextRequest, ctx: { params: { path: string[] } }) {
+  return proxyRequest(req, ctx.params);
+}
+
+export async function PATCH(req: NextRequest, ctx: { params: { path: string[] } }) {
+  return proxyRequest(req, ctx.params);
+}
+
+export async function DELETE(req: NextRequest, ctx: { params: { path: string[] } }) {
+  return proxyRequest(req, ctx.params);
+}
+
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    },
+  });
 }
