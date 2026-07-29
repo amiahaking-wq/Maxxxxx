@@ -1,0 +1,22 @@
+# ═══════════════════════════════════════════════════════════════
+# MAX Frontend (Next.js) — Railway deployment config
+# ═══════════════════════════════════════════════════════════════
+# Deploy as a separate Railway service from the idk-codex/max-frontend/ directory.
+# ═══════════════════════════════════════════════════════════════
+
+[build]
+builder = "nixpacks"
+watchPatterns = ["max-frontend/**"]
+
+[deploy]
+startCommand = "cd max-frontend && npm run start"
+healthcheckPath = "/"
+healthcheckTimeout = 60
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5
+
+# Environment variables to set in Railway dashboard:
+#   - NEXT_PUBLIC_API_URL = https://maxxxxx-production.up.railway.app
+#   - NEXT_PUBLIC_SUPABASE_URL
+#   - NEXT_PUBLIC_SUPABASE_ANON_KEY
+#   - PORT = 3000

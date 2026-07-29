@@ -1,19 +1,30 @@
+# ═══════════════════════════════════════════════════════════════
+# MAX Backend — Railway deployment config
+# ═══════════════════════════════════════════════════════════════
+# Backend: Express + Node.js (port 8080)
+# Frontend: Next.js 14 (separate Railway service, port 3000)
+# ═══════════════════════════════════════════════════════════════
+
 [build]
-builder = "DOCKERFILE"
-dockerfilePath = "Dockerfile"
+builder = "nixpacks"
 
 [deploy]
 startCommand = "node server.js"
-restartPolicyType = "ON_FAILURE"
-restartPolicyMaxRetries = 3
-numReplicas = 1
+healthcheckPath = "/api/health"
+healthcheckTimeout = 60
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5
 
-[[services]]
-name = "telegram-agent"
-
-[services.healthcheck]
-path = "/api/health"
-initialDelaySeconds = 30
-periodSeconds = 30
-timeoutSeconds = 10
-failureThreshold = 3
+# Environment variables that should be set in Railway dashboard:
+#   - OPENAI_COMPATIBLE_API_KEY (OpenRouter)
+#   - OPENAI_COMPATIBLE_BASE_URL = https://openrouter.ai/api/v1
+#   - OPENAI_COMPATIBLE_MODEL = openrouter/auto
+#   - SUPABASE_URL
+#   - SUPABASE_KEY (service_role)
+#   - SUPABASE_ANON_KEY
+#   - TELEGRAM_BOT_TOKEN
+#   - UPSTASH_REDIS_REST_URL
+#   - UPSTASH_REDIS_REST_TOKEN
+#   - MAX_VAULT_KEY (openssl rand -hex 32)
+#   - GROQ_API_KEY (for Whisper voice transcription)
+#   - PORT = 8080

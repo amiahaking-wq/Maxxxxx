@@ -38,6 +38,25 @@ async function main() {
     } catch (e) {
       logger.warn('Task scheduler not started', { error: e.message });
     }
+
+    // Phase 10 — serve Next.js static files in production (if available)
+    // The Next.js frontend runs as a separate Railway service, but if
+    // max-frontend/.next exists, serve it from the backend too (single-service mode).
+    if (process.env.NODE_ENV === 'production') {
+      try {
+        const fs = await import('fs');
+        const path = await import('path');
+        const nextDir = path.join(process.cwd(), 'max-frontend', '.next');
+        const nextStatic = path.join(nextDir, 'static');
+        if (fs.existsSync(nextDir)) {
+          const { default: express } = await import('express');
+          // Will be wired into the gateway later — for now just log availability
+          logger.info('Next.js build detected — single-service mode available', { nextDir });
+        }
+      } catch (e) {
+        logger.debug('Next.js static serving not configured', { error: e.message });
+      }
+    }
   } catch (error) {
     logger.error('Failed to start application', {
       error: error.message,
