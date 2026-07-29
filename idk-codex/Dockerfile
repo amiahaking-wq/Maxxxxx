@@ -67,6 +67,8 @@ COPY src/groq ./src/groq
 COPY src/interfaces ./src/interfaces
 COPY src/llm ./src/llm
 COPY src/memory ./src/memory
+COPY src/middleware ./src/middleware
+COPY src/scheduler ./src/scheduler
 COPY src/security ./src/security
 COPY src/skills ./src/skills
 COPY src/ui ./src/ui
