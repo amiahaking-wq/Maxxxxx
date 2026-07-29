@@ -27,6 +27,7 @@ import logger from '../../utils/logger.js';
 import { backupFile, validateAndRevert } from '../guardrails.js';
 import { browserTools } from './browser-tool.js';
 import { memoryTools } from './memory-tool.js';
+import { computerUseTools } from './computer-use.js';
 
 const SANDBOX = process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
 const MAX_OUTPUT_CHARS = 8000; // Truncate tool output to keep context manageable
@@ -485,6 +486,103 @@ for (const [name, tool] of Object.entries(browserTools)) {
 for (const [name, tool] of Object.entries(memoryTools)) {
   TOOLS[name] = tool;
 }
+
+// Merge computer use tools into TOOLS (Phase 11 — Computer Use)
+for (const [name, tool] of Object.entries(computerUseTools)) {
+  TOOLS[name] = tool;
+}
+
+// ============================================================================
+// GRAPH RAG TOOLS (Phase 12 — Graph RAG)
+// ============================================================================
+
+TOOLS.graph_add_relationship = {
+  name: 'graph_add_relationship',
+  description: 'Add a relationship to the knowledge graph. Use this to record explicit connections between entities (people, projects, documents, concepts). Example: "Sara KNOWS John", "John WORKS_AT Acme". This is for RELATIONSHIPS, not for semantic similarity (use knowledge_add for that).',
+  params: {
+    from_name: 'string (required) — name of the source entity (e.g. "Sara")',
+    from_type: 'string (optional) — entity type: Person, Project, Document, Concept, Event, Organization (default: Concept)',
+    to_name: 'string (required) — name of the target entity (e.g. "John")',
+    to_type: 'string (optional) — entity type (default: Concept)',
+    edge_type: 'string (optional) — relationship type: KNOWS, WORKS_WITH, WORKS_AT, CREATED, DEPENDS_ON, MENTIONS, PART_OF, RELATED_TO (default: RELATED_TO)',
+    properties: 'string (optional) — JSON string with extra metadata (e.g. {"since":"2023","strength":0.9})'
+  },
+  execute: async (args, ctx = {}) => {
+    try {
+      const { addRelationship } = await import('../../rag/graph-rag.js');
+      const userId = ctx.userId || 'default-user';
+      if (!args.from_name || !args.to_name) return 'Error: from_name and to_name are required';
+
+      let properties = {};
+      if (args.properties) {
+        try { properties = JSON.parse(args.properties); } catch { properties = {}; }
+      }
+
+      return await addRelationship(userId, {
+        fromName: args.from_name,
+        fromType: args.from_type || 'Concept',
+        toName: args.to_name,
+        toType: args.to_type || 'Concept',
+        edgeType: args.edge_type || 'RELATED_TO',
+        properties
+      });
+    } catch (e) {
+      return `Error adding relationship: ${e.message}`;
+    }
+  }
+};
+
+TOOLS.graph_find_relationships = {
+  name: 'graph_find_relationships',
+  description: 'Find all relationships for an entity (multi-hop graph traversal). Use this to discover who/what is connected to a person, project, or concept. Example: "find relationships for Sara" → returns Sara KNOWS John, John WORKS_AT Acme (multi-hop).',
+  params: {
+    node_name: 'string (required) — entity name to search for (partial match)',
+    max_depth: 'number (optional) — how many hops to follow (default 3, max 5)'
+  },
+  execute: async (args, ctx = {}) => {
+    try {
+      const { findRelationships } = await import('../../rag/graph-rag.js');
+      const userId = ctx.userId || 'default-user';
+      if (!args.node_name) return 'Error: node_name is required';
+
+      const results = await findRelationships(userId, args.node_name, parseInt(args.max_depth || '3', 10));
+      if (!results || results.length === 0) {
+        return `No relationships found for "${args.node_name}". Use graph_add_relationship to add some.`;
+      }
+
+      let output = `Found ${results.length} relationship(s) for "${args.node_name}":\n\n`;
+      results.forEach((r, i) => {
+        output += `${i + 1}. ${r.entity_name} (${r.entity_type}) --${r.relationship}--> ${r.connected_to} (${r.connected_type})`;
+        if (r.depth > 1) output += ` [${r.depth} hops away]`;
+        output += '\n';
+      });
+      return output;
+    } catch (e) {
+      return `Error finding relationships: ${e.message}`;
+    }
+  }
+};
+
+TOOLS.graph_rag_search = {
+  name: 'graph_rag_search',
+  description: 'Graph RAG search — combines vector search (semantic similarity) with graph traversal (explicit relationships). Use this for complex questions that need both "what is similar" and "what is connected". Example: "tell me about the team working on Project X" — finds docs about Project X (vector) AND who is connected to it (graph).',
+  params: {
+    query: 'string (required) — what to search for'
+  },
+  execute: async (args, ctx = {}) => {
+    try {
+      const { graphRagSearch, formatGraphRagContext } = await import('../../rag/graph-rag.js');
+      const userId = ctx.userId || 'default-user';
+      if (!args.query) return 'Error: query is required';
+
+      const results = await graphRagSearch(userId, args.query, 5);
+      const context = formatGraphRagContext(results);
+      return context || results.summary || 'No results found.';
+    } catch (e) {
+      return `Graph RAG search failed: ${e.message}`;
+    }
+  }
+};
 
 // ============================================================================
 // WEB SEARCH HELPERS — Google News RSS + DuckDuckGo, with auto-retry

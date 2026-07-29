@@ -355,6 +355,150 @@ const FUNCTION_TOOLS = [
         required: ['filename']
       }
     }
+  },
+  // ===== COMPUTER USE TOOLS (Phase 11) =====
+  {
+    type: 'function',
+    function: {
+      name: 'computer_screenshot',
+      description: 'Take a screenshot of the current browser page. Returns a base64 PNG image. Use this to SEE what is on screen before clicking or typing. Viewport is 1280x720.',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'computer_navigate',
+      description: 'Navigate the browser to a URL. Use this before taking screenshots.',
+      parameters: {
+        type: 'object',
+        properties: { url: { type: 'string', description: 'URL to navigate to' } },
+        required: ['url']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'computer_click',
+      description: 'Click at specific screen coordinates (x, y). Use after taking a screenshot and identifying where to click. Viewport is 1280x720, coordinates in pixels from top-left.',
+      parameters: {
+        type: 'object',
+        properties: {
+          x: { type: 'number', description: 'X coordinate (0-1280)' },
+          y: { type: 'number', description: 'Y coordinate (0-720)' },
+          button: { type: 'string', description: '"left" (default), "right", "middle"' }
+        },
+        required: ['x', 'y']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'computer_type',
+      description: 'Type text at the current cursor position. Optionally click at (x, y) first to focus a specific input.',
+      parameters: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'Text to type' },
+          x: { type: 'number', description: 'Click here first to focus (optional)' },
+          y: { type: 'number', description: 'Click here first to focus (optional)' },
+          clear_first: { type: 'boolean', description: 'Clear field before typing (default true)' }
+        },
+        required: ['text']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'computer_key',
+      description: 'Press a keyboard key (Enter, Tab, Escape, Control+a, etc.)',
+      parameters: {
+        type: 'object',
+        properties: { key: { type: 'string', description: 'Key to press (e.g. "Enter", "Tab", "Escape")' } },
+        required: ['key']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'computer_scroll',
+      description: 'Scroll the page up, down, left, or right.',
+      parameters: {
+        type: 'object',
+        properties: {
+          direction: { type: 'string', description: '"up", "down", "left", or "right"' },
+          amount: { type: 'number', description: 'Pixels to scroll (default 300)' }
+        },
+        required: ['direction']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'computer_read',
+      description: 'Extract all visible text from the current page (faster than screenshot).',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'computer_status',
+      description: 'Get the current browser page URL + title.',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  // ===== GRAPH RAG TOOLS (Phase 12) =====
+  {
+    type: 'function',
+    function: {
+      name: 'graph_add_relationship',
+      description: 'Add a relationship to the knowledge graph. Use for explicit connections: "Sara KNOWS John", "John WORKS_AT Acme". For semantic similarity use knowledge_add instead.',
+      parameters: {
+        type: 'object',
+        properties: {
+          from_name: { type: 'string', description: 'Source entity name (e.g. "Sara")' },
+          from_type: { type: 'string', description: 'Person, Project, Document, Concept, Event, Organization (default: Concept)' },
+          to_name: { type: 'string', description: 'Target entity name (e.g. "John")' },
+          to_type: { type: 'string', description: 'Entity type (default: Concept)' },
+          edge_type: { type: 'string', description: 'KNOWS, WORKS_WITH, WORKS_AT, CREATED, DEPENDS_ON, MENTIONS, PART_OF, RELATED_TO (default: RELATED_TO)' },
+          properties: { type: 'string', description: 'JSON metadata (e.g. {"since":"2023"})' }
+        },
+        required: ['from_name', 'to_name']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'graph_find_relationships',
+      description: 'Find all relationships for an entity (multi-hop). Example: "find relationships for Sara" → Sara KNOWS John, John WORKS_AT Acme.',
+      parameters: {
+        type: 'object',
+        properties: {
+          node_name: { type: 'string', description: 'Entity name to search for (partial match)' },
+          max_depth: { type: 'number', description: 'Hops to follow (default 3, max 5)' }
+        },
+        required: ['node_name']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'graph_rag_search',
+      description: 'Graph RAG search — combines vector (semantic similarity) + graph (explicit relationships). Use for complex questions needing both "what is similar" and "what is connected".',
+      parameters: {
+        type: 'object',
+        properties: { query: { type: 'string', description: 'What to search for' } },
+        required: ['query']
+      }
+    }
   }
 ];
 
@@ -380,8 +524,10 @@ WHEN TO USE WHICH TOOL (smart tool selection — like Claude Code / Cursor):
 - web_fetch → Fetch a specific URL. Use after web_search to get full articles.
 - read_upload → Read a file the user attached to their message. Use this when they mention uploading something.
 - browser_* → For websites needing JavaScript or interaction.
+- computer_* → Computer Use: take screenshots, click at coordinates, type text, scroll. Use this for complex web interactions where CSS selectors don't work. Workflow: computer_navigate → computer_screenshot → analyze → computer_click/computer_type → computer_screenshot to verify.
 - memory_save / memory_get → Remember facts about the user across sessions.
-- knowledge_add / knowledge_search → Save and search business knowledge.
+- knowledge_add / knowledge_search → Save and search business knowledge (vector/semantic search).
+- graph_add_relationship / graph_find_relationships / graph_rag_search → Knowledge graph for explicit relationships (who knows whom, what depends on what). Graph RAG combines vector + graph for superior retrieval.
 - credential_save / credential_get → Store and retrieve passwords (encrypted). NEVER print passwords.
 
 CRITICAL RULES (HARD CONSTRAINTS — VIOLATION = FAILURE):

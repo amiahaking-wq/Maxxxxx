@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { X, User, Bot, Shield, Brain, BookOpen, Clock, BarChart3, Info, Save, Trash2, Plus, Check, ExternalLink, Eye, EyeOff, Calendar, Play, Pause } from 'lucide-react';
+import { X, User, Bot, Shield, Brain, BookOpen, Clock, BarChart3, Info, Save, Trash2, Plus, Check, ExternalLink, Eye, EyeOff, Calendar, Play, Pause, Users } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
@@ -11,6 +11,7 @@ const TABS = [
   { id: 'memory', label: 'Memory', icon: Brain },
   { id: 'knowledge', label: 'Knowledge', icon: BookOpen },
   { id: 'scheduled', label: 'Scheduled', icon: Clock },
+  { id: 'teams', label: 'Teams', icon: Users },
   { id: 'analytics', label: 'Analytics', icon: BarChart3 },
   { id: 'about', label: 'About', icon: Info },
 ];
@@ -51,6 +52,11 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
   const [newDoc, setNewDoc] = useState({ title: '', content: '', type: 'document' });
   const [scheduledTasks, setScheduledTasks] = useState<any[]>([]);
   const [newTask, setNewTask] = useState({ name: '', prompt: '', schedule: '0 9 * * *' });
+  const [teams, setTeams] = useState<any[]>([]);
+  const [newTeam, setNewTeam] = useState({ name: '', description: '' });
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
+  const [inviteResult, setInviteResult] = useState('');
   const [analytics, setAnalytics] = useState<any>(null);
   const [vaultServices, setVaultServices] = useState<any>({});
   const [savedCreds, setSavedCreds] = useState<any[]>([]);
@@ -65,7 +71,7 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
   async function loadAll() {
     await Promise.all([
       loadProfile(), loadPermissions(), loadMemories(), loadKnowledge(),
-      loadScheduled(), loadAnalytics(), loadVaultServices(), loadSavedCreds()
+      loadScheduled(), loadTeams(), loadAnalytics(), loadVaultServices(), loadSavedCreds()
     ]);
   }
 
@@ -103,6 +109,57 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
     try {
       const r = await fetch('/api/scheduled', { headers: { Authorization: `Bearer ${token}` } });
       if (r.ok) { const d = await r.json(); setScheduledTasks(d.tasks || []); }
+    } catch {}
+  }
+  async function loadTeams() {
+    try {
+      const r = await fetch('/api/teams', { headers: { Authorization: `Bearer ${token}` } });
+      if (r.ok) { const d = await r.json(); setTeams(d.teams || []); }
+    } catch {}
+  }
+  async function createTeam() {
+    if (!newTeam.name) return;
+    try {
+      const r = await fetch('/api/teams', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(newTeam)
+      });
+      if (r.ok) { setNewTeam({ name: '', description: '' }); loadTeams(); }
+    } catch {}
+  }
+  async function inviteMember(teamId: string) {
+    if (!inviteEmail) return;
+    try {
+      const r = await fetch(`/api/teams/${teamId}/invite`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ email: inviteEmail })
+      });
+      const d = await r.json();
+      if (r.ok) {
+        setInviteResult(`Invite link: ${window.location.origin}/?join=${d.code}`);
+        setInviteEmail('');
+      } else {
+        setInviteResult(`Error: ${d.error}`);
+      }
+    } catch (e: any) { setInviteResult(`Error: ${e.message}`); }
+  }
+  async function acceptInvite(teamId: string) {
+    if (!inviteCode) return;
+    try {
+      const r = await fetch(`/api/teams/${teamId}/accept`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ code: inviteCode })
+      });
+      if (r.ok) { setInviteCode(''); loadTeams(); setInviteResult('Joined team!'); }
+    } catch {}
+  }
+  async function leaveTeam(teamId: string, userId: string) {
+    if (!confirm('Leave this team?')) return;
+    try {
+      await fetch(`/api/teams/${teamId}/members/${userId}`, {
+        method: 'DELETE', headers: { Authorization: `Bearer ${token}` }
+      });
+      loadTeams();
     } catch {}
   }
   async function loadAnalytics() {
@@ -458,6 +515,89 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
             </div>
           )}
 
+          {tab === 'teams' && (
+            <div className="space-y-3">
+              <div className="text-xs text-[#666]">
+                Teams ({teams.length}). Create a team to share conversations + knowledge with members.
+              </div>
+
+              {/* Create new team */}
+              <div className="p-3 bg-[#212121] border border-[#2a2a2a] rounded-lg space-y-2">
+                <div className="text-xs text-[#999]">Create New Team</div>
+                <input value={newTeam.name} onChange={e => setNewTeam({ ...newTeam, name: e.target.value })}
+                  placeholder="Team name (e.g. Dev Team)" className="w-full px-2.5 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg text-xs text-white" />
+                <input value={newTeam.description} onChange={e => setNewTeam({ ...newTeam, description: e.target.value })}
+                  placeholder="Description (optional)" className="w-full px-2.5 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg text-xs text-white" />
+                <button onClick={createTeam} disabled={!newTeam.name}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-[#FF6B35] hover:bg-[#e05a24] disabled:opacity-30 text-white rounded-lg text-xs">
+                  <Plus size={12} /> Create Team
+                </button>
+              </div>
+
+              {/* Accept invite */}
+              <div className="p-3 bg-[#212121] border border-[#2a2a2a] rounded-lg space-y-2">
+                <div className="text-xs text-[#999]">Join Team with Invite Code</div>
+                <div className="flex gap-2">
+                  <input value={inviteCode} onChange={e => setInviteCode(e.target.value)}
+                    placeholder="Paste invite code" className="flex-1 px-2.5 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg text-xs text-white font-mono" />
+                  <button onClick={() => teams.length > 0 && acceptInvite(teams[0].id)}
+                    disabled={!inviteCode || teams.length === 0}
+                    className="px-3 py-1.5 bg-[#FF6B35] hover:bg-[#e05a24] disabled:opacity-30 text-white rounded-lg text-xs">
+                    Join
+                  </button>
+                </div>
+                {teams.length === 0 && <p className="text-[10px] text-[#555]">Create a team first, then accept invites.</p>}
+              </div>
+
+              {/* Invite result */}
+              {inviteResult && (
+                <div className="p-2 bg-[#212121] border border-[#2a2a2a] rounded-lg text-xs text-[#FF6B35] break-all">
+                  {inviteResult}
+                </div>
+              )}
+
+              {/* List teams */}
+              {teams.length === 0 ? (
+                <div className="text-center py-8 text-[#555] text-sm">No teams yet</div>
+              ) : (
+                <div className="space-y-2">
+                  {teams.map((team, i) => (
+                    <div key={i} className="p-3 bg-[#212121] border border-[#2a2a2a] rounded-lg">
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="flex items-center gap-2">
+                          <Users size={14} className="text-[#FF6B35]" />
+                          <span className="text-sm text-white font-medium">{team.name}</span>
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                            team.role === 'owner' ? 'bg-[#FF6B35]/20 text-[#FF6B35]' : 'bg-[#2a2a2a] text-[#888]'
+                          }`}>{team.role || 'member'}</span>
+                        </div>
+                        {team.role !== 'owner' && (
+                          <button onClick={() => leaveTeam(team.id, user.id)}
+                            className="text-xs text-red-400 hover:underline">Leave</button>
+                        )}
+                      </div>
+                      {team.description && <p className="text-[10px] text-[#666] mb-2">{team.description}</p>}
+
+                      {/* Invite member (owner only) */}
+                      {team.role === 'owner' && (
+                        <div className="flex gap-2 mt-2">
+                          <input value={inviteEmail} onChange={e => setInviteEmail(e.target.value)}
+                            placeholder="Email to invite" type="email"
+                            className="flex-1 px-2 py-1 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-xs text-white" />
+                          <button onClick={() => inviteMember(team.id)}
+                            disabled={!inviteEmail}
+                            className="px-2 py-1 bg-[#FF6B35] hover:bg-[#e05a24] disabled:opacity-30 text-white rounded text-xs">
+                            Invite
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           {tab === 'analytics' && (
             <div className="space-y-4">
               {analytics ? (
@@ -497,7 +637,7 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
           {tab === 'about' && (
             <div className="space-y-4">
               <div>
-                <div className="text-sm text-[#ccc] font-medium">MAX AI Agent v3.0</div>
+                <div className="text-sm text-[#ccc] font-medium">MAX AI Agent v4.0</div>
                 <div className="text-xs text-[#666] mt-1">Production-grade autonomous agent platform. Next.js frontend + Express backend.</div>
               </div>
               <a href="https://github.com/amiahaking-wq/Maxxxxx" target="_blank" rel="noreferrer"
@@ -514,6 +654,9 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
                 <div>• Scheduled tasks with node-cron</div>
                 <div>• Voice input (Web Speech API)</div>
                 <div>• PWA installable with offline shell</div>
+                <div>• Computer Use: screenshots + vision + click/type (Phase 11)</div>
+                <div>• Graph RAG: Apache AGE + pgvector hybrid search (Phase 12)</div>
+                <div>• Multiplayer rooms: create teams, invite members (Phase 13)</div>
               </div>
             </div>
           )}

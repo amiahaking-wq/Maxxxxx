@@ -57,6 +57,22 @@ router.get('/tiers', (req, res) => {
   });
 });
 
+// Root handler — returns info so /api/billing doesn't 404
+router.get('/', (req, res) => {
+  res.json({
+    success: true,
+    service: 'MAX Billing',
+    description: 'Subscription tiers + Stripe webhook receiver',
+    endpoints: {
+      tiers: 'GET /api/billing/tiers',
+      subscription: 'GET /api/billing/subscription',
+      subscribe: 'POST /api/billing/subscribe',
+      cancel: 'POST /api/billing/cancel',
+      webhook: 'POST /api/billing/webhook'
+    }
+  });
+});
+
 router.get('/subscription', (req, res) => {
   try {
     const userId = req.user.id;

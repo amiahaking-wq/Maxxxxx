@@ -27,6 +27,7 @@ import teamsRouter from './teams.js';
 import memoryLongTermRouter from './memory-long-term.js';
 import suggestionsRouter from './suggestions.js';
 import sandboxRouter from './sandbox.js';
+import scheduledRouter from './scheduled.js';
 
 const router = Router();
 
@@ -78,6 +79,7 @@ router.use('/teams', teamsRouter);
 router.use('/memory-long-term', memoryLongTermRouter);  // adds /summarize/:id and /long-term
 router.use('/suggestions', suggestionsRouter);
 router.use('/sandbox', sandboxRouter);
+router.use('/scheduled', scheduledRouter);
 router.use('/', extrasRouter);  // memory + user profile routes
 router.use('/files/download', uploadRouter);
 

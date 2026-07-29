@@ -79,11 +79,21 @@ export function executeSandboxed(code, language = 'javascript', options = {}) {
     case 'shell':
       filename = 'code.sh';
       fs.writeFileSync(path.join(execDir, filename), code);
+      // Use bash if available, otherwise sh (Alpine only has sh by default)
       command = 'bash';
       args = [filename];
       break;
     default:
       return { error: `Unsupported language: ${language}`, exitCode: -1 };
+  }
+
+  // Check if the command exists — fall back to sh for bash if missing
+  if (command === 'bash') {
+    try {
+      execSync('which bash', { stdio: 'ignore' });
+    } catch {
+      command = 'sh';
+    }
   }
 
   return new Promise((resolve) => {
@@ -182,6 +192,20 @@ router.get('/languages', (req, res) => {
       { id: 'python', name: 'Python', extension: '.py', runner: 'python3' },
       { id: 'bash', name: 'Bash', extension: '.sh', runner: 'bash' }
     ]
+  });
+});
+
+// Root handler — returns info so /api/sandbox doesn't 404
+router.get('/', (req, res) => {
+  res.json({
+    success: true,
+    service: 'MAX Sandbox',
+    description: 'Code execution with resource limits',
+    endpoints: {
+      execute: 'POST /api/sandbox/execute',
+      languages: 'GET /api/sandbox/languages'
+    },
+    supportedLanguages: ['javascript', 'python', 'bash']
   });
 });
 
