@@ -1204,27 +1204,42 @@ function parseLLMResponse(llmResult) {
   const actionMatch = llmContent.match(/ACTION:\s*(\w+)\s*\n?/i);
   if (actionMatch) {
     const toolName = actionMatch[1].trim();
-    // Find INPUT: and extract everything after it (try to parse as JSON)
-    const inputMatch = llmContent.match(/INPUT:\s*([\s\S]*?)(?:\n\n|\nTHOUGHT:|$)/i);
+    // Find INPUT: and extract the JSON object by matching braces
+    // This handles multi-line JSON with newlines inside (e.g. HTML content)
+    const inputStart = llmContent.indexOf('INPUT:');
     let args = {};
-    if (inputMatch) {
-      const inputStr = inputMatch[1].trim();
-      try {
-        // Try JSON parse
-        args = JSON.parse(inputStr);
-      } catch {
-        // If JSON fails, try to extract key-value pairs
-        // Handles: path="test.txt", content="hello world"
-        const kvRegex = /(\w+)\s*[:=]\s*"((?:[^"\\]|\\.)*)"/g;
-        let m;
-        while ((m = kvRegex.exec(inputStr)) !== null) {
-          args[m[1]] = m[2];
+    if (inputStart !== -1) {
+      // Find the first { after INPUT:
+      const jsonStart = llmContent.indexOf('{', inputStart);
+      if (jsonStart !== -1) {
+        // Match braces to find the end of the JSON object
+        let depth = 0;
+        let inString = false;
+        let escape = false;
+        let jsonEnd = -1;
+        for (let i = jsonStart; i < llmContent.length; i++) {
+          const ch = llmContent[i];
+          if (escape) { escape = false; continue; }
+          if (ch === '\\' && inString) { escape = true; continue; }
+          if (ch === '"' && !escape) { inString = !inString; continue; }
+          if (inString) continue;
+          if (ch === '{') depth++;
+          else if (ch === '}') { depth--; if (depth === 0) { jsonEnd = i + 1; break; } }
         }
-        // Also try without quotes: path: test.txt
-        if (Object.keys(args).length === 0) {
-          const kvRegex2 = /(\w+)\s*[:=]\s*([^\n,]+)/g;
-          while ((m = kvRegex2.exec(inputStr)) !== null) {
-            args[m[1]] = m[2].trim();
+        if (jsonEnd !== -1) {
+          const inputStr = llmContent.substring(jsonStart, jsonEnd);
+          try {
+            args = JSON.parse(inputStr);
+          } catch {
+            // Fallback: try the old regex approach
+            const inputMatch = llmContent.match(/INPUT:\s*([\s\S]*?)(?:\n\n|\nTHOUGHT:|$)/i);
+            if (inputMatch) {
+              try { args = JSON.parse(inputMatch[1].trim()); } catch {
+                const kvRegex = /(\w+)\s*[:=]\s*"((?:[^"\\]|\\.)*)"/g;
+                let m;
+                while ((m = kvRegex.exec(inputMatch[1])) !== null) { args[m[1]] = m[2]; }
+              }
+            }
           }
         }
       }

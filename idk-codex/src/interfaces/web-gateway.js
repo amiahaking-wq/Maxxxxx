@@ -212,6 +212,9 @@ export class WebGateway {
    */
   createExpressApp() {
     this.app = express();
+
+    // Trust proxy — Railway sends X-Forwarded-For headers for rate limiting
+    this.app.set('trust proxy', 1);
     this.server = http.createServer(this.app);
 
     // Initialize phone WebSocket bridge (no-op if PHONE_SECRET is not set)

@@ -1,6 +1,13 @@
 'use client';
 import { useState, useEffect, useRef } from 'react';
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
+
+function apiUrl(path: string): string {
+  if (path.startsWith('http')) return path;
+  return `${API_BASE}${path}`;
+}
+
 interface TerminalProps {
   token: string;
   onClose: () => void;
@@ -37,7 +44,7 @@ export function Terminal({ token, onClose }: TerminalProps) {
     setHistoryIdx(-1);
 
     try {
-      const r = await fetch('/api/sandbox/execute', {
+      const r = await fetch(apiUrl('/api/sandbox/execute'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ code: cmd, language: 'bash', timeoutMs: 15000 })

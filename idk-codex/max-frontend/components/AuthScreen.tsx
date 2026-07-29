@@ -1,6 +1,13 @@
 'use client';
 import { useState } from 'react';
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
+
+function apiUrl(path: string): string {
+  if (path.startsWith('http')) return path;
+  return `${API_BASE}${path}`;
+}
+
 interface AuthScreenProps {
   onSuccess: (token: string, user: any) => void;
 }
@@ -21,9 +28,9 @@ export function AuthScreen({ onSuccess }: AuthScreenProps) {
     setSuccess('');
 
     try {
-      const endpoint = mode === 'signup' ? '/api/auth/signup'
-                     : mode === 'magic' ? '/api/auth/magic'
-                     : '/api/auth/login';
+      const endpoint = mode === 'signup' ? apiUrl('/api/auth/signup')
+                     : mode === 'magic' ? apiUrl('/api/auth/magic')
+                     : apiUrl('/api/auth/login');
 
       const body = mode === 'signup' ? { email, password, name }
                  : mode === 'magic' ? { email }

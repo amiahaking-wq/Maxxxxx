@@ -5,6 +5,11 @@ import { useTranslation } from 'react-i18next';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 
+function apiUrl(path: string): string {
+  if (path.startsWith('http')) return path;
+  return `${API_BASE}${path}`;
+}
+
 const TABS = [
   { id: 'profile', label: 'Profile', icon: User },
   { id: 'agent', label: 'Agent', icon: Bot },
@@ -77,13 +82,13 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
 
   async function loadProfile() {
     try {
-      const r = await fetch('/api/user/profile', { headers: { Authorization: `Bearer ${token}` } });
+      const r = await fetch(apiUrl('/api/user/profile'), { headers: { Authorization: `Bearer ${token}` } });
       if (r.ok) { const d = await r.json(); if (d.profile) setProfile(p => ({ ...p, ...d.profile })); }
     } catch {}
   }
   async function loadPermissions() {
     try {
-      const r = await fetch('/api/permissions', { headers: { Authorization: `Bearer ${token}` } });
+      const r = await fetch(apiUrl('/api/permissions'), { headers: { Authorization: `Bearer ${token}` } });
       if (r.ok) {
         const d = await r.json();
         const perms: Record<string, boolean> = {};
@@ -95,32 +100,32 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
   }
   async function loadMemories() {
     try {
-      const r = await fetch('/api/memory', { headers: { Authorization: `Bearer ${token}` } });
+      const r = await fetch(apiUrl('/api/memory'), { headers: { Authorization: `Bearer ${token}` } });
       if (r.ok) { const d = await r.json(); setMemories(d.memories || []); }
     } catch {}
   }
   async function loadKnowledge() {
     try {
-      const r = await fetch('/api/knowledge', { headers: { Authorization: `Bearer ${token}` } });
+      const r = await fetch(apiUrl('/api/knowledge'), { headers: { Authorization: `Bearer ${token}` } });
       if (r.ok) { const d = await r.json(); setKnowledgeDocs(d.docs || []); }
     } catch {}
   }
   async function loadScheduled() {
     try {
-      const r = await fetch('/api/scheduled', { headers: { Authorization: `Bearer ${token}` } });
+      const r = await fetch(apiUrl('/api/scheduled'), { headers: { Authorization: `Bearer ${token}` } });
       if (r.ok) { const d = await r.json(); setScheduledTasks(d.tasks || []); }
     } catch {}
   }
   async function loadTeams() {
     try {
-      const r = await fetch('/api/teams', { headers: { Authorization: `Bearer ${token}` } });
+      const r = await fetch(apiUrl('/api/teams'), { headers: { Authorization: `Bearer ${token}` } });
       if (r.ok) { const d = await r.json(); setTeams(d.teams || []); }
     } catch {}
   }
   async function createTeam() {
     if (!newTeam.name) return;
     try {
-      const r = await fetch('/api/teams', {
+      const r = await fetch(apiUrl('/api/teams'), {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(newTeam)
       });
@@ -130,7 +135,7 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
   async function inviteMember(teamId: string) {
     if (!inviteEmail) return;
     try {
-      const r = await fetch(`/api/teams/${teamId}/invite`, {
+      const r = await fetch(apiUrl(`/api/teams/${teamId}/invite`), {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ email: inviteEmail })
       });
@@ -146,7 +151,7 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
   async function acceptInvite(teamId: string) {
     if (!inviteCode) return;
     try {
-      const r = await fetch(`/api/teams/${teamId}/accept`, {
+      const r = await fetch(apiUrl(`/api/teams/${teamId}/accept`), {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ code: inviteCode })
       });
@@ -156,7 +161,7 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
   async function leaveTeam(teamId: string, userId: string) {
     if (!confirm('Leave this team?')) return;
     try {
-      await fetch(`/api/teams/${teamId}/members/${userId}`, {
+      await fetch(apiUrl(`/api/teams/${teamId}/members/${userId}`), {
         method: 'DELETE', headers: { Authorization: `Bearer ${token}` }
       });
       loadTeams();
@@ -164,19 +169,19 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
   }
   async function loadAnalytics() {
     try {
-      const r = await fetch('/api/usage', { headers: { Authorization: `Bearer ${token}` } });
+      const r = await fetch(apiUrl('/api/usage'), { headers: { Authorization: `Bearer ${token}` } });
       if (r.ok) { const d = await r.json(); setAnalytics(d); }
     } catch {}
   }
   async function loadVaultServices() {
     try {
-      const r = await fetch('/api/vault/services', { headers: { Authorization: `Bearer ${token}` } });
+      const r = await fetch(apiUrl('/api/vault/services'), { headers: { Authorization: `Bearer ${token}` } });
       if (r.ok) { const d = await r.json(); setVaultServices(d.services || {}); }
     } catch {}
   }
   async function loadSavedCreds() {
     try {
-      const r = await fetch('/api/vault', { headers: { Authorization: `Bearer ${token}` } });
+      const r = await fetch(apiUrl('/api/vault'), { headers: { Authorization: `Bearer ${token}` } });
       if (r.ok) { const d = await r.json(); setSavedCreds(d.credentials || []); }
     } catch {}
   }
@@ -184,7 +189,7 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
   async function saveProfile() {
     setSaving(true);
     try {
-      await fetch('/api/user/profile', {
+      await fetch(apiUrl('/api/user/profile'), {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(profile)
       });
@@ -195,7 +200,7 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
     const newValue = !permissions[id];
     setPermissions(p => ({ ...p, [id]: newValue }));
     try {
-      await fetch(`/api/permissions/${newValue ? 'grant' : 'revoke'}`, {
+      await fetch(apiUrl(`/api/permissions/${newValue ? 'grant' : 'revoke'}`), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId: user.id, permission: id })
       });
@@ -205,7 +210,7 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
   async function saveMemory() {
     if (!newMemory.key || !newMemory.value) return;
     try {
-      await fetch('/api/memory', {
+      await fetch(apiUrl('/api/memory'), {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(newMemory)
       });
@@ -215,7 +220,7 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
   }
   async function deleteMemory(key: string) {
     try {
-      await fetch(`/api/memory/${key}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+      await fetch(apiUrl(`/api/memory/${key}`), { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
       loadMemories();
     } catch {}
   }
@@ -223,7 +228,7 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
   async function saveKnowledge() {
     if (!newDoc.title || !newDoc.content) return;
     try {
-      await fetch('/api/knowledge', {
+      await fetch(apiUrl('/api/knowledge'), {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(newDoc)
       });
@@ -233,7 +238,7 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
   }
   async function deleteKnowledge(id: string) {
     try {
-      await fetch(`/api/knowledge/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+      await fetch(apiUrl(`/api/knowledge/${id}`), { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
       loadKnowledge();
     } catch {}
   }
@@ -241,7 +246,7 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
   async function saveTask() {
     if (!newTask.name || !newTask.prompt) return;
     try {
-      await fetch('/api/scheduled', {
+      await fetch(apiUrl('/api/scheduled'), {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(newTask)
       });
@@ -251,7 +256,7 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
   }
   async function toggleTask(id: string, active: boolean) {
     try {
-      await fetch(`/api/scheduled/${id}`, {
+      await fetch(apiUrl(`/api/scheduled/${id}`), {
         method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ active: !active })
       });
@@ -260,14 +265,14 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
   }
   async function deleteTask(id: string) {
     try {
-      await fetch(`/api/scheduled/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+      await fetch(apiUrl(`/api/scheduled/${id}`), { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
       loadScheduled();
     } catch {}
   }
 
   async function saveCreds(serviceName: string) {
     try {
-      await fetch('/api/vault', {
+      await fetch(apiUrl('/api/vault'), {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ service_name: serviceName, ...credFields })
       });
@@ -279,7 +284,7 @@ export function SettingsPanel({ token, user, onClose, models, currentModel, onMo
   async function deleteCreds(serviceName: string) {
     if (!confirm(`Delete credentials for ${serviceName}?`)) return;
     try {
-      await fetch(`/api/vault/${serviceName}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+      await fetch(apiUrl(`/api/vault/${serviceName}`), { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
       loadSavedCreds();
     } catch {}
   }

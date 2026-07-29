@@ -48,6 +48,12 @@ interface MainAppProps {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 
+// Helper: prefix relative API paths with the backend URL
+function apiUrl(path: string): string {
+  if (path.startsWith('http')) return path;
+  return `${API_BASE}${path}`;
+}
+
 export function MainApp({ token, user, onLogout }: MainAppProps) {
   const { t, i18n } = useTranslation('common');
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -202,7 +208,7 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
 
   async function fetchConversations() {
     try {
-      const res = await fetch('/api/conversations', { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(apiUrl('/api/conversations'), { headers: { Authorization: `Bearer ${token}` } });
       const data = await res.json();
       if (data.conversations) {
         const convs = data.conversations.map((s: any) => ({
@@ -219,7 +225,7 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
 
   async function fetchModels() {
     try {
-      const res = await fetch('/api/config/models', { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(apiUrl('/api/config/models'), { headers: { Authorization: `Bearer ${token}` } });
       const data = await res.json();
       if (data.models) {
         setModels(data.models);
@@ -236,7 +242,7 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
 
   async function loadConversation(id: string) {
     try {
-      const res = await fetch(`/api/conversations/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(apiUrl(`/api/conversations/${id}`), { headers: { Authorization: `Bearer ${token}` } });
       const data = await res.json();
       if (data.success && data.conversation) {
         setConversations(prev => prev.map(c =>
@@ -263,7 +269,7 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
     setToolCalls([]);
     setSidebarOpen(false);
     // Create on backend
-    fetch('/api/conversations', {
+    fetch(apiUrl('/api/conversations'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ platform: 'web', title: 'New Conversation' })
@@ -320,7 +326,7 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
     setToolCalls([]);
 
     try {
-      await fetch(`/api/conversations/${currentId}/messages`, {
+      await fetch(apiUrl(`/api/conversations/${currentId}/messages`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ message: taskInput, files: uploadedFiles })
@@ -377,7 +383,7 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
           reader.onerror = reject;
           reader.readAsDataURL(file);
         });
-        const res = await fetch('/api/upload', {
+        const res = await fetch(apiUrl('/api/upload'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({ filename: file.name, mimeType: file.type, data: base64 })
@@ -409,7 +415,7 @@ export function MainApp({ token, user, onLogout }: MainAppProps) {
     setCurrentModel(modelId);
     localStorage.setItem('max_model', modelId);
     try {
-      await fetch('/api/config/model', {
+      await fetch(apiUrl('/api/config/model'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ model: modelId })
