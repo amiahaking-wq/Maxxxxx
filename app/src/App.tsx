@@ -381,6 +381,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [thinkingContent, setThinkingContent] = useState('');
   const [liveTokens, setLiveTokens] = useState('');
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
 
   // UI state
   const [searchQuery, setSearchQuery] = useState('');
@@ -630,7 +631,6 @@ export default function App() {
             createdAt: data.timestamp || new Date().toISOString(),
             images: data.images,
             model: (data as any).model,
-            provider: (data as any).provider,
           },
         ];
       });
@@ -726,6 +726,24 @@ export default function App() {
       el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
     }
   }, [messages, isLoading, agentRun]);
+
+  // Keyboard detection for PWA — adjusts layout when keyboard opens
+  useEffect(() => {
+    const handleResize = () => {
+      if (window.visualViewport) {
+        const heightDiff = window.innerHeight - window.visualViewport.height;
+        setKeyboardHeight(heightDiff > 100 ? heightDiff : 0);
+      }
+    };
+
+    window.visualViewport?.addEventListener('resize', handleResize);
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.visualViewport?.removeEventListener('resize', handleResize);
+      window.removeEventListener('resize', handleResize);
+    };
+  }, []);
 
   // Auto-resize textarea (cap at ~5 lines)
   useEffect(() => {
@@ -1140,7 +1158,7 @@ export default function App() {
   // ------------------------------------------------------------------------
 
   return (
-    <div className="app-container flex h-[100dvh] w-full overflow-hidden bg-[#0a0a0f] font-sans text-[#f1f5f9]">
+    <div className="h-[100dvh] w-screen flex flex-col bg-slate-950 text-white overflow-hidden">
       <style>{GLOBAL_STYLES}</style>
 
       {/* Mobile sidebar overlay */}
@@ -1381,7 +1399,7 @@ export default function App() {
       {/* ============================================================ */}
       <div className="flex min-w-0 flex-1 flex-col">
         {/* Header */}
-        <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-[#1f1f2e] bg-[#0f0f1a]/80 px-3 backdrop-blur-md md:px-4">
+        <header className="safe-area-top safe-area-x flex h-14 shrink-0 items-center justify-between gap-2 border-b border-[#1f1f2e] bg-[#0f0f1a]/80 px-3 backdrop-blur-md md:px-4 z-40">
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <button
               onClick={() => setSidebarOpen(true)}
@@ -1518,7 +1536,10 @@ export default function App() {
         {/* Messages */}
         <main
           ref={scrollContainerRef}
-          className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
+          className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden no-scrollbar"
+          style={{
+            paddingBottom: keyboardHeight > 0 ? `${keyboardHeight + 80}px` : 'env(safe-area-inset-bottom)'
+          }}
         >
           <div className="mx-auto w-full max-w-3xl px-3 py-4 md:px-6 md:py-6">
             {showEmptyState ? (
@@ -1578,7 +1599,12 @@ export default function App() {
         />
 
         {/* Input bar */}
-        <footer className="relative shrink-0 border-t border-[#1f1f2e] bg-[#0f0f1a] px-3 py-2.5 md:px-4 md:py-3">
+        <footer
+          className="safe-area-x relative shrink-0 border-t border-[#1f1f2e] bg-[#0f0f1a]/95 backdrop-blur-sm px-3 py-2.5 md:px-4 md:py-3 z-50"
+          style={{
+            paddingBottom: keyboardHeight > 0 ? '12px' : 'max(12px, env(safe-area-inset-bottom))'
+          }}
+        >
           <div className="mx-auto w-full max-w-3xl">
             {/* Pending image preview / uploading state */}
             {(pendingImage || uploadingImage) && (
@@ -1893,10 +1919,17 @@ function MessageBubble({ message }: { message: ConversationMessage }) {
         )}
         {/* Show which model generated this response */}
         {!isUser && (message as any).model && (
-          <div className="text-[10px] text-slate-500 mt-1 flex items-center gap-1">
-            <span>via {(message as any).provider}</span>
-            <span>•</span>
-            <span>{(message as any).model}</span>
+          <div className="flex items-center gap-1.5 mt-1.5 mb-1">
+            <div className={`w-1.5 h-1.5 rounded-full ${
+              (message as any).model.provider === 'openai-compatible' ? 'bg-green-400' :
+              (message as any).model.provider === 'groq' ? 'bg-purple-400' :
+              (message as any).model.provider === 'gemini' ? 'bg-blue-400' :
+              (message as any).model.provider === 'phone' ? 'bg-orange-400' :
+              'bg-slate-400'
+            }`} />
+            <span className="text-[10px] text-slate-500 font-medium">
+              {(message as any).model.displayName || (message as any).model.model}
+            </span>
           </div>
         )}
       </div>

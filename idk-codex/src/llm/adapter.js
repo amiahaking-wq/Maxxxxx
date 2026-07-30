@@ -498,37 +498,35 @@ class LLMAdapter {
     // DISABLED auto-fallback by default — if the user selected a specific model,
     // respect that choice. If it fails, return the error instead of silently
     // switching to a different provider. The user gets told what happened.
-    const autoFallback = process.env.LLM_AUTO_FALLBACK === 'true'; // Must be explicitly enabled
+    const autoFallback = process.env.LLM_AUTO_FALLBACK === 'true';
 
     // Filter out Echo provider unless echoEnabled is true
-    // This prevents Echo from being used as a fallback for real tasks/chat
     const availableProviders = this.providers.filter(p => {
-      if (p.name === 'echo') {
-        return echoEnabled;
-      }
+      if (p.name === 'echo') return echoEnabled;
       return true;
     });
 
-    const maxAttempts = autoFallback ? availableProviders.length : 1;
+    const userSelectedProviderName = this.currentProvider?.name;
+    const errors = [];
 
-    // Start fallback from the currently selected provider
-    const currentProviderIndex = availableProviders.findIndex(p => p.name === this.currentProvider?.name);
+    // Only try the user's selected provider (+ echo as last resort if enabled)
+    const providersToTry = autoFallback
+      ? availableProviders
+      : availableProviders.filter(p => p.name === userSelectedProviderName || (echoEnabled && p.name === 'echo'));
+
+    const maxAttempts = providersToTry.length;
+    const currentProviderIndex = providersToTry.findIndex(p => p.name === userSelectedProviderName);
     const startIndex = currentProviderIndex >= 0 ? currentProviderIndex : 0;
 
     let lastError = null;
     const attemptedProviders = [];
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const providerIndex = (startIndex + attempt) % availableProviders.length;
-      const provider = availableProviders[providerIndex] || this.currentProvider;
+      const providerIndex = (startIndex + attempt) % providersToTry.length;
+      const provider = providersToTry[providerIndex] || this.currentProvider;
       attemptedProviders.push(provider.name);
 
-      // The model we'll actually send to this provider:
-      // - If this is the user-selected provider, use the resolved model name.
-      // - If we've fallen back to a different provider, use its default model.
       const providerModel = provider === this.currentProvider ? optionsCopy.model : provider.defaultModel;
-
-      // Apply context budget per-provider so each fallback attempt is sized correctly
       const attemptOptions = this.applyContextBudget(optionsCopy, provider, providerModel);
 
       try {
@@ -537,30 +535,35 @@ class LLMAdapter {
           model: providerModel,
           attempt: attempt + 1,
           maxAttempts,
-          contextWindow: attemptOptions._contextWindow,
-          maxOutputTokens: attemptOptions._maxOutputTokens,
-          messageCount: attemptOptions.messages?.length || 0
         });
 
         const result = await provider.createCompletion(attemptOptions);
         this.currentProvider = provider;
         this.currentModel = result.model || providerModel;
 
+        // Tag the result with which model actually responded
+        result._meta = {
+          provider: provider.name,
+          model: providerModel || 'unknown',
+          requestedModel: userSelectedProviderName
+        };
+
         return result;
       } catch (error) {
         lastError = error;
+        errors.push({ provider: provider.name, error: error.message });
         logger.warn('Provider completion failed', {
           provider: provider.name,
           error: error.message,
           attempt: attempt + 1
         });
 
-        if (attempt < maxAttempts - 1) {
-          const nextIndex = (startIndex + attempt + 1) % availableProviders.length;
-          logger.info('Falling back to next provider', {
-            from: provider.name,
-            to: availableProviders[nextIndex]?.name
-          });
+        // If this was the user's selected provider, STOP and tell them
+        if (provider.name === userSelectedProviderName && !autoFallback) {
+          throw new Error(
+            `Your selected model (${provider.name}) failed: ${error.message}. ` +
+            `Please switch to a different model in the dropdown above.`
+          );
         }
       }
     }
@@ -571,7 +574,8 @@ class LLMAdapter {
     });
 
     throw new Error(
-      `All LLM providers failed. Attempted: ${attemptedProviders.join(', ')}. Last error: ${lastError?.message}`
+      `All providers failed. Errors:\n${errors.map(e => `- ${e.provider}: ${e.error}`).join('\n')}\n\n` +
+      `Please check your API keys or select a different model.`
     );
   }
 

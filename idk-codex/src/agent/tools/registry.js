@@ -895,6 +895,37 @@ async function performWebSearch(query) {
     logger.warn('Google News fallback failed', { error: e.message });
   }
 
+  // ===== STRATEGY 4: DuckDuckGo HTML (most reliable fallback) =====
+  try {
+    const ddgHtmlUrl = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(searchQuery);
+    const ddgHtmlResponse = await fetch(ddgHtmlUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+    if (ddgHtmlResponse.ok) {
+      const html = await ddgHtmlResponse.text();
+      const results = [];
+      const resultBlocks = html.match(/<a rel="nofollow" class="result__a" href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g) || [];
+      for (let i = 0; i < Math.min(resultBlocks.length, 8); i++) {
+        const block = resultBlocks[i];
+        const urlMatch = block.match(/href="([^"]+)"/);
+        const titleMatch = block.match(/>([^<]+)</);
+        if (urlMatch && titleMatch) {
+          results.push({
+            title: titleMatch[1].replace(/&amp;/g, '&').replace(/&quot;/g, '"').trim(),
+            url: urlMatch[1].replace(/&amp;/g, '&'),
+            snippet: '',
+            source: 'DuckDuckGo'
+          });
+        }
+      }
+      if (results.length > 0) return results;
+    }
+  } catch (e) {
+    logger.warn('DuckDuckGo HTML fallback failed', { error: e.message });
+  }
+
   return [];
 }
 

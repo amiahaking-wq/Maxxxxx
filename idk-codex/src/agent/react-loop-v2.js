@@ -607,7 +607,15 @@ EFFICIENCY RULES:
 - Don't read the same file twice in one session — remember what you read.
 - Don't write the same file twice in one session unless fixing an error.
 - If a tool returns a long output, scan it for the relevant part — don't re-fetch.
-- When doing multi-step tasks, batch related operations (e.g. create all files first, then test).`;
+- When doing multi-step tasks, batch related operations (e.g. create all files first, then test).
+
+CRITICAL RULES (BANNED PHRASES):
+1. NEVER say "I'm sorry", "I cannot", "I apologize", or "I'm unable to". Instead, USE A TOOL to solve the problem.
+2. If asked to check a website, your FIRST action MUST be browser_navigate or web_fetch.
+3. If asked to search, your FIRST action MUST be web_search.
+4. If a tool fails, try a DIFFERENT tool — do not give up.
+5. Only use task_complete when you have actually done the work.
+6. You are an autonomous agent — act like one. Don't ask permission, just execute.`;
 }
 
 /**
@@ -1828,8 +1836,44 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
       continue;
     }
 
-    // ===== PATH 4: No tools, no code — conversational response =====
-    finalSummary = llmContent.trim();
+    // ===== PATH 4: No tools, no code — check if task needs tools, then respond =====
+    // If the task clearly needs web/file tools but the agent didn't use them,
+    // force a tool call instead of letting it output a text "I can't" response
+    if (!llmToolCalls || llmToolCalls.length === 0) {
+      const needsWeb = /news|website|check|look up|search|find|browse|url|github|issues|latest|current/i.test(task);
+      const needsFile = /write|create|build|make|code|file|script|deploy|implement/i.test(task);
+
+      if (needsWeb && !llmContent.includes('web_search') && !llmContent.includes('web_fetch') && !llmContent.includes('browser_navigate')) {
+        logger.info('FORCING_WEB_TOOL', { sessionId, iteration, task: task.substring(0, 80) });
+        // Inject a web_search tool call
+        const forcedToolCalls = [{ id: `forced_${Date.now()}`, name: 'web_search', args: { query: task.substring(0, 200) } }];
+        // Re-process as if the LLM called the tool
+        for (const tc of forcedToolCalls) {
+          const toolName = tc.name;
+          const toolArgs = tc.args;
+          logger.info('REACT_FORCED_TOOL_CALL', { sessionId, iteration, tool: toolName });
+
+          const toolResult = await executeToolWithRetry(toolName, toolArgs, { userId: effectiveUserId, sessionId });
+          toolResults.push(toolResult);
+
+          broadcastProgress(sessionId, { phase: 'react', status: 'tool_result', iteration, tool: toolName, result: toolResult.substring(0, 500) });
+
+          if (wasNativeFunctionCall && modelSupportsFunctionCalling()) {
+            messages.push({ role: 'tool', tool_call_id: tc.id, content: toolResult });
+          } else {
+            messages.push({ role: 'user', content: `OBSERVATION: Tool "${toolName}" returned:\n${String(toolResult).slice(0, 3000)}\n\nContinue with the next step.` });
+          }
+        }
+        continue;  // Go to next iteration — the LLM will see the search results
+      }
+
+      if (needsFile && !llmContent.includes('write_file') && !llmContent.includes('edit_file')) {
+        // Don't force file creation — the LLM might be asking a question about code
+        // Just continue the loop so it has another chance
+      }
+    }
+
+    finalSummary = stripInternalReasoning(llmContent.trim());
     isDone = true;
     logger.info('REACT_NO_TOOLS_DONE', { sessionId, iteration, len: finalSummary.length });
     break;

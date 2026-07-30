@@ -29,6 +29,23 @@ import logger from '../../utils/logger.js';
 
 const router = express.Router();
 
+// Helper: get human-readable model display name
+function getModelDisplayName(modelId) {
+  if (!modelId) return 'Unknown';
+  const lower = modelId.toLowerCase();
+  if (lower.includes('gpt-4o')) return 'GPT-4o';
+  if (lower.includes('gpt-3.5')) return 'GPT-3.5';
+  if (lower.includes('claude')) return 'Claude';
+  if (lower.includes('llama')) return 'Llama';
+  if (lower.includes('gemini')) return 'Gemini';
+  if (lower.includes('qwen')) return 'Qwen';
+  if (lower.includes('deepseek')) return 'DeepSeek';
+  if (lower.includes('mistral')) return 'Mistral';
+  if (lower === 'openrouter/auto') return 'OpenRouter Auto';
+  if (lower.includes('auto')) return 'Auto';
+  return modelId.split('/').pop() || modelId;
+}
+
 // Apply optionalAuth to all conversation routes — extracts user from JWT if present
 router.use(optionalAuth);
 
@@ -384,17 +401,34 @@ router.post('/:id/messages', rateLimiter, validateBody(chatSchema), async (req, 
 
           // Retry once if model returns empty (openrouter/auto sometimes does this)
           if (!result || (!result.content && !result.tool_calls)) {
-            logger.warn('Chat empty response, retrying without tools');
+            logger.warn('Chat empty response from model, retrying');
             try {
               result = await completion({ messages, temperature: 0.7, max_tokens: 800, echoEnabled: false });
             } catch (retryErr) {
-              // Still empty — throw with model name
+              // Still empty — show helpful error instead of crashing
             }
           }
 
           if (!result || (!result.content && !result.tool_calls)) {
-            const currentModel = process.env.OPENAI_COMPATIBLE_MODEL || 'openrouter/auto';
-            throw new Error(`Model ${currentModel} returned empty response. Try a different model.`);
+            // Return a helpful error instead of crashing
+            const { getCurrentProvider } = await import('../../llm/adapter.js');
+            const provider = getCurrentProvider();
+            const modelMeta = {
+              provider: provider?.name || 'system',
+              model: provider?.model || 'error',
+              displayName: 'Error'
+            };
+            const errorResponse = 'The selected model returned an empty response. This usually means:\n\n1. The model is overloaded or rate-limited\n2. The model doesn\'t support the current request type\n3. Your API key has expired\n\nPlease try:\n- Switching to a different model in the dropdown above\n- Waiting a moment and trying again\n- Checking your API key in settings';
+
+            await addConversationMessage(conversationId, 'assistant', errorResponse);
+            broadcastMessage(conversationId, {
+              role: 'assistant',
+              content: errorResponse,
+              conversationId,
+              model: modelMeta,
+              isError: true
+            });
+            return;
           }
 
           const response = result.content || 'Sorry, I could not generate a response.';
@@ -403,13 +437,18 @@ router.post('/:id/messages', rateLimiter, validateBody(chatSchema), async (req, 
           const { getCurrentProvider } = await import('../../llm/adapter.js');
           const provider = getCurrentProvider();
 
+          const modelMeta = {
+            provider: provider?.name || 'unknown',
+            model: provider?.model || result._meta?.model || 'unknown',
+            displayName: getModelDisplayName(provider?.model || result._meta?.model || 'unknown')
+          };
+
           await addConversationMessage(conversationId, 'assistant', response);
           broadcastMessage(conversationId, {
             role: 'assistant',
             content: response,
             conversationId,
-            model: provider?.model || 'unknown',
-            provider: provider?.name || 'unknown',
+            model: modelMeta,
             usage: result.usage || {}
           });
         } catch (err) {
