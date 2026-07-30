@@ -32,6 +32,19 @@ const MAX_ACTION_TOKENS = parseInt(process.env.MAX_ACTION_TOKENS || '4000', 10);
 // HELPER: Strip internal reasoning from user-visible content
 // ============================================================================
 
+function getModelDisplayName(modelId) {
+  if (!modelId) return 'Unknown';
+  if (modelId.includes('gpt-4o')) return 'GPT-4o';
+  if (modelId.includes('claude')) return 'Claude';
+  if (modelId.includes('llama-3.3')) return 'Llama 3.3 70B';
+  if (modelId.includes('llama')) return 'Llama';
+  if (modelId.includes('gemini')) return 'Gemini';
+  if (modelId.includes('qwen')) return 'Qwen';
+  if (modelId.includes('deepseek')) return 'DeepSeek';
+  if (modelId === 'openrouter/auto') return 'OpenRouter Auto';
+  return modelId.split('/').pop() || modelId;
+}
+
 function stripInternalReasoning(content) {
   if (!content) return content;
 
@@ -1488,31 +1501,97 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
     try {
       const condensedMessages = await condenseMessages(messages, { maxTokens: 4000, keepRecent: 6 });
 
-      // Disable Echo for real tasks via option (no process.env mutation)
-      llmResult = await hybridLLMCall(condensedMessages, {
-        temperature: 0.2,
-        maxTokens: MAX_ACTION_TOKENS,
-        echoEnabled: false,
-        sessionId
-      });
+      // ===== STREAMING: Use streamCompletion for real-time token display =====
+      let fullContent = '';
+      let reasoningContent = '';
+      let collectedToolCalls = [];
+      let actualProvider = 'unknown';
+      let actualModel = 'unknown';
+
+      try {
+        for await (const chunk of streamCompletion({
+          messages: condensedMessages,
+          tools: modelSupportsFunctionCalling() ? FUNCTION_TOOLS : undefined,
+          tool_choice: modelSupportsFunctionCalling() ? 'auto' : undefined,
+          temperature: 0.7,
+          max_tokens: MAX_ACTION_TOKENS,
+          model: options.model
+        })) {
+          actualProvider = chunk._provider || actualProvider;
+          actualModel = chunk._model || actualModel;
+
+          if (chunk.type === 'reasoning') {
+            reasoningContent += chunk.content;
+            // Broadcast reasoning to the thinking panel (internal only, not to user text)
+            if (global.wsServer) {
+              global.wsServer.to(`session-${sessionId}`).emit('agent:reasoning', {
+                sessionId, timestamp: new Date().toISOString(), content: chunk.content
+              });
+            }
+          } else if (chunk.type === 'token') {
+            fullContent += chunk.content;
+            // Broadcast streaming tokens to the frontend
+            if (global.wsServer) {
+              global.wsServer.to(`session-${sessionId}`).emit('agent:stream', {
+                sessionId, timestamp: new Date().toISOString(),
+                content: chunk.content,
+                _provider: actualProvider,
+                _model: actualModel
+              });
+            }
+          }
+          if (chunk.toolCalls) collectedToolCalls = chunk.toolCalls;
+        }
+      } catch (streamErr) {
+        logger.warn('STREAM_INTERRUPTED', { sessionId, iteration, error: streamErr.message, partialLen: fullContent.length });
+        if (!fullContent && collectedToolCalls.length === 0) {
+          // Nothing streamed — fall back to non-streaming
+          logger.warn('STREAM_FAILED_FALLBACK', { sessionId, error: streamErr.message });
+          const fallbackResult = await completion({ messages: condensedMessages, temperature: 0.2, max_tokens: MAX_ACTION_TOKENS, echoEnabled: false });
+          fullContent = fallbackResult?.content || '';
+          if (fallbackResult?.tool_calls) collectedToolCalls = fallbackResult.tool_calls;
+          actualProvider = fallbackResult?._meta?.provider || 'unknown';
+          actualModel = fallbackResult?._meta?.model || 'unknown';
+        }
+      }
+
+      const llmResult = {
+        content: fullContent,
+        tool_calls: collectedToolCalls.length > 0 ? collectedToolCalls : null,
+        _meta: { provider: actualProvider, model: actualModel }
+      };
 
       // CRITICAL: Retry without tools if model returns empty response
-      // openrouter/auto sometimes returns empty when given function calling tools
       if (!llmResult?.content && !llmResult?.tool_calls) {
-        logger.warn('REACT_EMPTY_RESPONSE_RETRY', { sessionId, iteration, model: 'openrouter/auto' });
-        // Retry WITHOUT tools — some free models can't handle function calling
+        logger.warn('REACT_EMPTY_RESPONSE_RETRY', { sessionId, iteration, model: actualModel });
         const reactMessages = [...condensedMessages];
         if (reactMessages[0]?.role === 'system') {
           const workspacePath = process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
           reactMessages[0] = { role: 'system', content: buildReActSystemPrompt(workspacePath) + preSearchContext };
         }
-        llmResult = await hybridLLMCall(reactMessages, {
-          temperature: 0.2,
-          maxTokens: MAX_ACTION_TOKENS,
-          echoEnabled: false,
-          sessionId
-          // No tools — model uses ReAct text format
-        });
+
+        let retryContent = '';
+        let retryToolCalls = [];
+        try {
+          for await (const chunk of streamCompletion({
+            messages: reactMessages,
+            temperature: 0.7,
+            max_tokens: MAX_ACTION_TOKENS
+          })) {
+            actualProvider = chunk._provider || actualProvider;
+            actualModel = chunk._model || actualModel;
+            if (chunk.type === 'token') retryContent += chunk.content;
+            if (chunk.toolCalls) retryToolCalls = chunk.toolCalls;
+          }
+        } catch (retryErr) {
+          // Fall back to non-streaming
+          const fallbackResult = await completion({ messages: reactMessages, temperature: 0.2, max_tokens: MAX_ACTION_TOKENS, echoEnabled: false });
+          retryContent = fallbackResult?.content || '';
+          if (fallbackResult?.tool_calls) retryToolCalls = fallbackResult.tool_calls;
+        }
+        llmResult.content = retryContent;
+        llmResult.tool_calls = retryToolCalls.length > 0 ? retryToolCalls : null;
+        llmResult._meta = { provider: actualProvider, model: actualModel };
       }
     } catch (err) {
       logger.error('REACT_LLM_ERROR', { iteration, error: err.message });
@@ -1594,6 +1673,14 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
         logger.info('REACT_TOOL_CALL', { sessionId, iteration, tool: toolName, args: JSON.stringify(toolArgs).substring(0, 200) });
         broadcastProgress(sessionId, { phase: 'react', status: 'executing_tool', iteration, tool: toolName, args: toolArgs });
 
+        // Broadcast tool start event for frontend
+        if (global.wsServer) {
+          global.wsServer.to(`session-${sessionId}`).emit('agent:tool_start', {
+            sessionId, timestamp: new Date().toISOString(),
+            icon: '🔧', tool: toolName, message: `${toolName}...`
+          });
+        }
+
         // ===== NARRATION (Phase 2.3) =====
         // Broadcast a narration event with icon + description before each tool execution
         narrate(toolName, sessionId, toolArgs);
@@ -1669,6 +1756,14 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
         }
 
         broadcastProgress(sessionId, { phase: 'react', status: 'tool_result', iteration, tool: toolName, result: toolResult.substring(0, 500) });
+
+        // Broadcast tool end event for frontend
+        if (global.wsServer) {
+          global.wsServer.to(`session-${sessionId}`).emit('agent:tool_end', {
+            sessionId, timestamp: new Date().toISOString(),
+            tool: toolName, success: !String(toolResult).startsWith('Error')
+          });
+        }
 
         // Track result for error checking (BUG 5: block premature task_complete)
         toolResults.push(toolResult);
@@ -1921,6 +2016,15 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
   }
 
   broadcastMessage(sessionId, { role: 'assistant', content: finalSummary, type: 'task_complete', filesModified: Array.from(filesModified) });
+
+  // Broadcast agent:response with model metadata for frontend badge
+  if (global.wsServer) {
+    global.wsServer.to(`session-${sessionId}`).emit('agent:response', {
+      sessionId, timestamp: new Date().toISOString(),
+      content: finalSummary,
+      model: { provider: actualProvider || 'unknown', model: actualModel || 'unknown', displayName: getModelDisplayName(actualModel) }
+    });
+  }
 
   if (isSupabaseConfigured() && filesModified.size > 0) {
     for (const filePath of filesModified) {

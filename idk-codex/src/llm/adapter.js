@@ -1020,76 +1020,159 @@ async function* streamOllama(provider, options) {
  * @param {Object} options - same as completion(), plus optional `signal` for AbortSignal
  * @yields {{ type: 'token'|'reasoning', content: string, toolCalls: Array|null }}
  */
-export async function* streamCompletion(options) {
-  if (!adapter.initialized) {
-    adapter.initialize();
-  }
+export async function* streamCompletion(options = {}) {
+  const { messages, tools, tool_choice, temperature, max_tokens, model } = options;
 
-  const opts = { ...options };
-  const echoEnabled = opts.echoEnabled !== false;
-
-  // Resolve model if provided
-  if (opts.model) {
-    const resolved = adapter.resolveModelAndProvider(opts.model);
+  let resolvedModel = model;
+  if (resolvedModel) {
+    const resolved = adapter.resolveModelAndProvider(resolvedModel);
     adapter.currentProvider = resolved.provider;
     adapter.currentModel = resolved.model;
-    opts.model = resolved.model;
+    resolvedModel = resolved.model;
   } else {
-    opts.model = adapter.currentModel || adapter.currentProvider?.defaultModel;
+    resolvedModel = adapter.currentModel || adapter.currentProvider?.defaultModel || 'openrouter/auto';
   }
 
-  const providers = getStreamingProviderOrder().filter(p => {
-    if (p.name === 'echo') return echoEnabled;
-    return true;
-  });
+  const opts = { messages, tools, tool_choice, temperature, max_tokens, model: resolvedModel };
 
-  if (providers.length === 0) {
-    yield { type: 'token', content: '[No LLM providers available for streaming]', toolCalls: null };
-    return;
-  }
+  const providers = [
+    { name: 'openai-compatible', fn: streamOpenRouter },
+    { name: 'groq', fn: streamGroq },
+    { name: 'gemini', fn: streamGemini },
+    { name: 'ollama', fn: streamOllamaDirect },
+  ];
 
-  let lastError = null;
   for (const provider of providers) {
-    // Skip providers we can't stream from (echo, phone, gemini without streaming support)
-    if (provider.name === 'echo' || provider.name === 'phone' || provider.name === 'gemini') {
-      continue;
-    }
-
     try {
-      const providerModel = provider === adapter.currentProvider
-        ? opts.model
-        : provider.defaultModel;
-      const attemptOpts = { ...opts, model: providerModel };
-
-      if (provider.name === 'ollama') {
-        yield* streamOllama(provider, attemptOpts);
-      } else if (provider.name === 'anthropic') {
-        yield* streamAnthropic(provider, attemptOpts);
-      } else if (provider.name === 'openai-compatible' || provider.name === 'openai' || provider.name === 'groq') {
-        yield* streamOpenAICompatible(provider, attemptOpts);
-      } else {
-        // Unknown provider — skip
-        continue;
+      const stream = await provider.fn(opts);
+      for await (const chunk of stream) {
+        yield { ...chunk, _provider: provider.name, _model: opts.model };
       }
-
-      // If we got here, streaming succeeded — return (the generator above completes when done)
       return;
     } catch (err) {
-      lastError = err;
-      logger.warn('Streaming provider failed, trying next', {
-        provider: provider.name,
-        error: err.message
-      });
-      // Continue to next provider
+      logger.warn(`Stream failed for ${provider.name}`, { error: err.message });
+      continue;
     }
   }
 
-  // All providers failed — yield an error token so the client sees something
-  yield {
-    type: 'token',
-    content: `[Streaming failed: ${lastError?.message || 'unknown error'}]`,
-    toolCalls: null
-  };
+  yield { type: 'token', content: 'All providers failed. Check your API keys.', _provider: 'error', _model: 'none' };
+}
+
+async function* streamOpenRouter(options) {
+  const apiKey = process.env.OPENROUTER_API_KEY || process.env.OPENAI_COMPATIBLE_API_KEY;
+  if (!apiKey) throw new Error('No OpenRouter API key');
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': process.env.FRONTEND_URL || 'https://maxxxxx-production.up.railway.app',
+      'X-Title': 'MAX Agent'
+    },
+    body: JSON.stringify({ ...options, model: options.model || 'openrouter/auto', stream: true })
+  });
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value);
+    const lines = chunk.split('\n').filter(l => l.trim());
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        const data = line.slice(6);
+        if (data === '[DONE]') return;
+        try {
+          const parsed = JSON.parse(data);
+          const delta = parsed.choices?.[0]?.delta;
+          if (delta?.content || delta?.reasoning_content) {
+            yield { type: delta.reasoning_content ? 'reasoning' : 'token', content: delta.content || '', reasoning: delta.reasoning_content || '', toolCalls: delta.tool_calls || null };
+          }
+        } catch (e) {}
+      }
+    }
+  }
+}
+
+async function* streamGroq(options) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error('No Groq API key');
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...options, model: options.model || 'llama-3.3-70b-versatile', stream: true })
+  });
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value);
+    const lines = chunk.split('\n').filter(l => l.trim());
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        const data = line.slice(6);
+        if (data === '[DONE]') return;
+        try {
+          const parsed = JSON.parse(data);
+          const delta = parsed.choices?.[0]?.delta;
+          if (delta?.content) yield { type: 'token', content: delta.content, toolCalls: delta.tool_calls || null };
+        } catch (e) {}
+      }
+    }
+  }
+}
+
+async function* streamGemini(options) {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_GEMINI_API_KEY;
+  if (!apiKey) throw new Error('No Gemini API key');
+  const model = options.model || 'gemini-1.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: options.messages.map(m => ({ role: m.role, parts: [{ text: m.content }] })) })
+  });
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value);
+    const lines = chunk.split('\n').filter(l => l.trim());
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try {
+          const parsed = JSON.parse(line.slice(6));
+          const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) yield { type: 'token', content: text };
+        } catch (e) {}
+      }
+    }
+  }
+}
+
+async function* streamOllamaDirect(options) {
+  const baseURL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
+  const response = await fetch(`${baseURL}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: options.model || 'llama3.2', messages: options.messages, stream: true })
+  });
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value);
+    const lines = chunk.split('\n').filter(l => l.trim());
+    for (const line of lines) {
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed.message?.content) yield { type: 'token', content: parsed.message.content };
+      } catch (e) {}
+    }
+  }
 }
 
 /**

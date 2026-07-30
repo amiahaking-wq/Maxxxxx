@@ -382,6 +382,10 @@ export default function App() {
   const [thinkingContent, setThinkingContent] = useState('');
   const [liveTokens, setLiveTokens] = useState('');
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [streamingText, setStreamingText] = useState('');
+  const [reasoningText, setReasoningText] = useState('');
+  const [activeTools, setActiveTools] = useState<any[]>([]);
+  const [currentModel, setCurrentModel] = useState<any>(null);
 
   // UI state
   const [searchQuery, setSearchQuery] = useState('');
@@ -544,16 +548,38 @@ export default function App() {
     });
 
     // Streaming events — live token + thinking display
-    s.on('agent:stream', (data: { text?: string }) => {
+    s.on('agent:stream', (data: any) => {
+      if (data.content) setStreamingText(prev => prev + data.content);
       if (data.text) setLiveTokens(prev => prev + data.text);
+      if (data._provider && data._model) setCurrentModel({ provider: data._provider, model: data._model });
     });
 
-    s.on('agent:reasoning', (data: { text?: string }) => {
+    s.on('agent:reasoning', (data: any) => {
+      if (data.content) setReasoningText(prev => prev + data.content);
       if (data.text) setThinkingContent(prev => prev + data.text);
     });
 
+    s.on('agent:tool_start', (data: any) => {
+      setActiveTools(prev => [...prev, { ...data, id: Date.now() + Math.random(), status: 'running' }]);
+    });
+
+    s.on('agent:tool_end', (data: any) => {
+      setActiveTools(prev => prev.map(t =>
+        t.tool === data.tool && t.status === 'running'
+          ? { ...t, status: data.success ? 'done' : 'error' }
+          : t
+      ));
+    });
+
+    s.on('agent:response', (data: any) => {
+      setStreamingText('');
+      setReasoningText('');
+      setActiveTools([]);
+      if (data.model) setCurrentModel(data.model);
+    });
+
     s.on('token', (data: { type?: string; text?: string }) => {
-      if (data.type === 'start') { setLiveTokens(''); setThinkingContent(''); }
+      if (data.type === 'start') { setLiveTokens(''); setThinkingContent(''); setStreamingText(''); setReasoningText(''); }
       else if (data.type === 'token' && data.text) setLiveTokens(prev => prev + data.text);
       else if (data.type === 'done') { setThinkingContent(''); }
     });
@@ -1552,6 +1578,43 @@ export default function App() {
                 {messages.map((msg) => (
                   <MessageBubble key={msg.id} message={msg} />
                 ))}
+
+                {/* Live streaming response — shows while agent is working */}
+                {isLoading && (
+                  <div className="mb-4">
+                    {reasoningText && (
+                      <div className="mb-3 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3">
+                        <div className="flex items-center gap-2 text-xs font-medium text-amber-400 mb-1">
+                          <span className="animate-pulse">💭</span>
+                          <span>Thinking</span>
+                        </div>
+                        <div className="text-xs text-amber-300/60 font-mono whitespace-pre-wrap">{reasoningText}</div>
+                      </div>
+                    )}
+
+                    {activeTools.map((tool) => (
+                      <div key={tool.id} className="flex items-center gap-2 px-3 py-2 rounded-lg border border-blue-500/30 bg-blue-500/10 text-blue-400 text-xs mb-2">
+                        <span className="text-base">{tool.icon}</span>
+                        <span className="font-medium flex-1">{tool.message}</span>
+                        <span className="animate-spin">⟳</span>
+                      </div>
+                    ))}
+
+                    {streamingText && (
+                      <div className="bg-slate-800/50 rounded-2xl rounded-tl-sm px-4 py-3 max-w-[85%]">
+                        <div className="text-sm text-slate-200 whitespace-pre-wrap">
+                          {streamingText}<span className="animate-pulse">▊</span>
+                        </div>
+                        {currentModel && (
+                          <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[10px] font-medium mt-1.5 bg-slate-500/20 text-slate-400 border-slate-500/30">
+                            <span className={`w-1.5 h-1.5 rounded-full ${currentModel.provider === 'openai-compatible' ? 'bg-green-400' : currentModel.provider === 'groq' ? 'bg-purple-400' : currentModel.provider === 'gemini' ? 'bg-blue-400' : 'bg-orange-400'}`} />
+                            <span>{currentModel.model}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Thinking block — shows when model is reasoning */}
                 {thinkingContent && (
