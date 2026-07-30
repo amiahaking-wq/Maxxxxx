@@ -92,6 +92,8 @@ interface ProviderStatus {
 interface AppConfig {
   providers: ProviderStatus[];
   model: string;
+  name?: string;
+  tagline?: string;
   telegramConnected?: boolean;
   phoneConnected?: boolean;
 }
@@ -125,6 +127,11 @@ interface ConversationMessage {
   metadata?: MessageMetadata | null;
   createdAt: string;
   images?: MessageImage[];
+  reasoning?: string;
+  reasoningDone?: boolean;
+  provider?: string;
+  model?: string;
+  isStreaming?: boolean;
 }
 
 interface ConversationDetail extends ConversationSummary {
@@ -385,7 +392,7 @@ export default function App() {
   const [streamingText, setStreamingText] = useState('');
   const [reasoningText, setReasoningText] = useState('');
   const [activeTools, setActiveTools] = useState<any[]>([]);
-  const [currentModel, setCurrentModel] = useState<any>(null);
+  const [activeModel, setActiveModel] = useState<any>(null);
 
   // UI state
   const [searchQuery, setSearchQuery] = useState('');
@@ -547,18 +554,111 @@ export default function App() {
       setConnectionStatus('reconnecting');
     });
 
-    // Streaming events — live token + thinking display
-    s.on('agent:stream', (data: any) => {
-      if (data.content) setStreamingText(prev => prev + data.content);
-      if (data.text) setLiveTokens(prev => prev + data.text);
-      if (data._provider && data._model) setCurrentModel({ provider: data._provider, model: data._model });
+    // Streaming: token arrives → append to last assistant message
+    s.on('token', (data: any) => {
+      if (data.type === 'start') {
+        // Create a placeholder assistant message for streaming
+        setMessages(prev => {
+          const last = prev[prev.length - 1];
+          if (last && last.role === 'assistant' && last.isStreaming) return prev;
+          return [...prev, {
+            id: `assistant-stream-${Date.now()}`,
+            role: 'assistant' as const,
+            content: '',
+            reasoning: '',
+            reasoningDone: false,
+            isStreaming: true,
+            createdAt: new Date().toISOString(),
+          }];
+        });
+        setStreamingText('');
+        setReasoningText('');
+        setActiveTools([]);
+      } else if (data.type === 'done') {
+        // Mark last assistant message as done streaming
+        setMessages(prev => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (last && last.role === 'assistant' && last.isStreaming) {
+            updated[updated.length - 1] = { ...last, isStreaming: false, reasoningDone: true };
+          }
+          return updated;
+        });
+        setStreamingText('');
+        setReasoningText('');
+        setActiveTools([]);
+      } else if (data.token || data.content) {
+        // Streaming token — append to last assistant message AND streamingText
+        const tokenText = data.token || data.content;
+        setStreamingText(prev => prev + tokenText);
+        setMessages(prev => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (last && last.role === 'assistant' && last.isStreaming) {
+            updated[updated.length - 1] = {
+              ...last,
+              content: last.content + tokenText,
+              provider: data.provider || last.provider,
+              model: data.model || last.model,
+            };
+          }
+          return updated;
+        });
+        if (data.provider && data.model) {
+          setActiveModel({ provider: data.provider, model: data.model });
+        }
+      }
     });
 
-    s.on('agent:reasoning', (data: any) => {
-      if (data.content) setReasoningText(prev => prev + data.content);
-      if (data.text) setThinkingContent(prev => prev + data.text);
+    // Reasoning/thinking → update last assistant message's reasoning field
+    s.on('reasoning', (data: any) => {
+      if (data.reasoning) {
+        setReasoningText(data.reasoning);
+        setMessages(prev => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (last && last.role === 'assistant') {
+            updated[updated.length - 1] = {
+              ...last,
+              reasoning: data.reasoning,
+              reasoningDone: data.done || false,
+            };
+          }
+          return updated;
+        });
+      }
+      if (data.done) {
+        setReasoningText('');
+        setMessages(prev => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (last && last.role === 'assistant') {
+            updated[updated.length - 1] = { ...last, reasoningDone: true };
+          }
+          return updated;
+        });
+      }
     });
 
+    // Model badge → set provider + model on last assistant message
+    s.on('model_badge', (data: any) => {
+      setActiveModel({ provider: data.provider, model: data.model });
+      setMessages(prev => {
+        const updated = [...prev];
+        const last = updated[updated.length - 1];
+        if (last && last.role === 'assistant') {
+          updated[updated.length - 1] = {
+            ...last,
+            provider: data.provider,
+            model: data.model,
+            isStreaming: false,
+          };
+        }
+        return updated;
+      });
+    });
+
+    // Tool progress events
     s.on('agent:tool_start', (data: any) => {
       setActiveTools(prev => [...prev, { ...data, id: Date.now() + Math.random(), status: 'running' }]);
     });
@@ -569,24 +669,6 @@ export default function App() {
           ? { ...t, status: data.success ? 'done' : 'error' }
           : t
       ));
-    });
-
-    s.on('agent:response', (data: any) => {
-      setStreamingText('');
-      setReasoningText('');
-      setActiveTools([]);
-      if (data.model) setCurrentModel(data.model);
-    });
-
-    s.on('token', (data: { type?: string; text?: string }) => {
-      if (data.type === 'start') { setLiveTokens(''); setThinkingContent(''); setStreamingText(''); setReasoningText(''); }
-      else if (data.type === 'token' && data.text) setLiveTokens(prev => prev + data.text);
-      else if (data.type === 'done') { setThinkingContent(''); }
-    });
-
-    s.on('agent:done', () => {
-      setThinkingContent('');
-      setLiveTokens('');
     });
 
     s.on('progress', (data: ProgressPayload) => {
@@ -1572,6 +1654,7 @@ export default function App() {
               <EmptyState
                 onSuggestion={handleSuggestionClick}
                 loading={loadingConversation}
+                branding={branding}
               />
             ) : (
               <div className="space-y-4 md:space-y-5">
@@ -1605,10 +1688,10 @@ export default function App() {
                         <div className="text-sm text-slate-200 whitespace-pre-wrap">
                           {streamingText}<span className="animate-pulse">▊</span>
                         </div>
-                        {currentModel && (
+                        {activeModel && (
                           <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[10px] font-medium mt-1.5 bg-slate-500/20 text-slate-400 border-slate-500/30">
-                            <span className={`w-1.5 h-1.5 rounded-full ${currentModel.provider === 'openai-compatible' ? 'bg-green-400' : currentModel.provider === 'groq' ? 'bg-purple-400' : currentModel.provider === 'gemini' ? 'bg-blue-400' : 'bg-orange-400'}`} />
-                            <span>{currentModel.model}</span>
+                            <span className={`w-1.5 h-1.5 rounded-full ${activeModel.provider === 'openai-compatible' ? 'bg-green-400' : activeModel.provider === 'groq' ? 'bg-purple-400' : activeModel.provider === 'gemini' ? 'bg-blue-400' : 'bg-orange-400'}`} />
+                            <span>{activeModel.model}</span>
                           </div>
                         )}
                       </div>
@@ -1892,10 +1975,13 @@ export default function App() {
 function EmptyState({
   onSuggestion,
   loading,
+  branding,
 }: {
   onSuggestion: (s: string) => void;
   loading: boolean;
+  branding?: { name: string; tagline: string };
 }) {
+  const b = branding || { name: 'MAX', tagline: 'Your AI Agent' };
   if (loading) {
     return (
       <div className="flex h-full flex-col items-center justify-center py-20">
@@ -1911,7 +1997,7 @@ function EmptyState({
         <Bot size={32} className="text-white" />
       </div>
       <h2 className="mb-2 text-xl font-semibold text-white md:text-2xl">
-        {branding.name} — {branding.tagline}
+        {b.name} — {b.tagline}
       </h2>
       <p className="mb-8 max-w-md text-sm text-[#94a3b8]">
         MAX plans, writes, tests, and deploys code autonomously. Describe your task
@@ -1936,6 +2022,7 @@ function MessageBubble({ message }: { message: ConversationMessage }) {
   const isUser = message.role === 'user';
   const isError = message.content.startsWith('⚠️');
   const hasImages = Boolean(message.images && message.images.length > 0);
+  const msg = message as any; // Allow accessing reasoning, provider, model, isStreaming
 
   return (
     <div
@@ -1959,6 +2046,18 @@ function MessageBubble({ message }: { message: ConversationMessage }) {
               : 'rounded-bl-md border border-[#1f1f2e] bg-[#13131f] text-[#f1f5f9]',
         )}
       >
+        {/* Thinking box — collapsible, shows reasoning above content */}
+        {!isUser && msg.reasoning && (
+          <details className="mb-2 rounded-lg border border-amber-500/20 bg-amber-500/5 p-2" open={!msg.reasoningDone}>
+            <summary className="cursor-pointer font-medium text-amber-400 select-none text-xs">
+              {msg.reasoningDone ? '💭 Thinking (done)' : '💭 Thinking...'}
+            </summary>
+            <div className="mt-2 text-amber-200/70 whitespace-pre-wrap text-xs font-mono">
+              {msg.reasoning}
+            </div>
+          </details>
+        )}
+
         {hasImages && message.images && (
           <div
             className={cn(
@@ -1978,21 +2077,23 @@ function MessageBubble({ message }: { message: ConversationMessage }) {
           </div>
         )}
         {message.content && (
-          <p className="whitespace-pre-wrap break-words">{message.content}</p>
+          <p className="whitespace-pre-wrap break-words">
+            {message.content}
+            {msg.isStreaming && <span className="animate-pulse">▊</span>}
+          </p>
         )}
-        {/* Show which model generated this response */}
-        {!isUser && (message as any).model && (
-          <div className="flex items-center gap-1.5 mt-1.5 mb-1">
-            <div className={`w-1.5 h-1.5 rounded-full ${
-              (message as any).model.provider === 'openai-compatible' ? 'bg-green-400' :
-              (message as any).model.provider === 'groq' ? 'bg-purple-400' :
-              (message as any).model.provider === 'gemini' ? 'bg-blue-400' :
-              (message as any).model.provider === 'phone' ? 'bg-orange-400' :
+        {/* Model badge — shows which provider/model responded */}
+        {!isUser && msg.provider && (
+          <div className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-gray-700/50 px-2 py-0.5 text-[10px] text-gray-400">
+            <span className={`w-1.5 h-1.5 rounded-full ${
+              msg.provider === 'openai-compatible' ? 'bg-green-400' :
+              msg.provider === 'groq' ? 'bg-purple-400' :
+              msg.provider === 'gemini' ? 'bg-blue-400' :
+              msg.provider === 'phone' ? 'bg-orange-400' :
               'bg-slate-400'
             }`} />
-            <span className="text-[10px] text-slate-500 font-medium">
-              {(message as any).model.displayName || (message as any).model.model}
-            </span>
+            <span>{msg.provider}</span>
+            {msg.model && <><span>•</span><span>{msg.model}</span></>}
           </div>
         )}
       </div>

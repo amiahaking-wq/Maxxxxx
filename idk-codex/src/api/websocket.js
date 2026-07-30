@@ -374,6 +374,34 @@ export function broadcastToken(sessionId, payload) {
 }
 
 /**
+ * Broadcast reasoning/thinking content to the frontend.
+ * The frontend shows this in a collapsible "Thinking" box.
+ */
+export function broadcastReasoning(sessionId, data) {
+  if (!global.wsServer) return;
+  const room = `session-${sessionId}`;
+  global.wsServer.to(room).emit('reasoning', {
+    sessionId,
+    timestamp: new Date().toISOString(),
+    ...data
+  });
+}
+
+/**
+ * Broadcast which model/provider actually responded.
+ * The frontend shows this as a badge on the assistant message.
+ */
+export function broadcastModelBadge(sessionId, data) {
+  if (!global.wsServer) return;
+  const room = `session-${sessionId}`;
+  global.wsServer.to(room).emit('model_badge', {
+    sessionId,
+    timestamp: new Date().toISOString(),
+    ...data
+  });
+}
+
+/**
  * Broadcast a confirmation request (Stage 6C).
  * Emitted when the agent wants to perform a destructive/risky action.
  * The frontend shows a confirmation dialog. When the user responds,

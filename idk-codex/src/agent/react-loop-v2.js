@@ -15,7 +15,7 @@
 
 import { completion, getCurrentProvider, streamCompletion } from '../llm/adapter.js';
 import { executeTool, getToolDescriptions } from './tools/registry.js';
-import { broadcastProgress, broadcastMessage, broadcastConfirmation, broadcastFileCreated, broadcastToken } from '../api/websocket.js';
+import { broadcastProgress, broadcastMessage, broadcastConfirmation, broadcastFileCreated, broadcastToken, broadcastReasoning, broadcastModelBadge } from '../api/websocket.js';
 import { addConversationMessage, createConversation } from '../database/conversations-supabase.js';
 import { condenseMessages } from './condenser.js';
 import { uploadToSupabase, isSupabaseConfigured } from './supabase-storage.js';
@@ -1486,6 +1486,8 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
   let iteration = 0;
   let finalSummary = '';
   let isDone = false;
+  let actualProvider = 'unknown';  // Declared at function scope so catch/finally can access it
+  let actualModel = 'unknown';
 
   broadcastProgress(sessionId, { phase: 'react', status: 'running', iteration: 0, task });
   broadcastMessage(sessionId, { role: 'assistant', content: '', type: 'streaming_start' });
@@ -1505,8 +1507,6 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
       let fullContent = '';
       let reasoningContent = '';
       let collectedToolCalls = [];
-      let actualProvider = 'unknown';
-      let actualModel = 'unknown';
 
       try {
         for await (const chunk of streamCompletion({
@@ -1522,23 +1522,17 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
 
           if (chunk.type === 'reasoning') {
             reasoningContent += chunk.content;
-            // Broadcast reasoning to the thinking panel (internal only, not to user text)
-            if (global.wsServer) {
-              global.wsServer.to(`session-${sessionId}`).emit('agent:reasoning', {
-                sessionId, timestamp: new Date().toISOString(), content: chunk.content
-              });
-            }
+            // Broadcast reasoning to the thinking panel via dedicated function
+            broadcastReasoning(sessionId, { reasoning: reasoningContent, done: false });
           } else if (chunk.type === 'token') {
             fullContent += chunk.content;
-            // Broadcast streaming tokens to the frontend
-            if (global.wsServer) {
-              global.wsServer.to(`session-${sessionId}`).emit('agent:stream', {
-                sessionId, timestamp: new Date().toISOString(),
-                content: chunk.content,
-                _provider: actualProvider,
-                _model: actualModel
-              });
-            }
+            // Broadcast streaming tokens with provider/model info
+            broadcastToken(sessionId, {
+              token: chunk.content,
+              content: chunk.content,
+              provider: actualProvider,
+              model: actualModel
+            });
           }
           if (chunk.toolCalls) collectedToolCalls = chunk.toolCalls;
         }
@@ -1931,43 +1925,9 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
       continue;
     }
 
-    // ===== PATH 4: No tools, no code — check if task needs tools, then respond =====
-    // If the task clearly needs web/file tools but the agent didn't use them,
-    // force a tool call instead of letting it output a text "I can't" response
-    if (!llmToolCalls || llmToolCalls.length === 0) {
-      const needsWeb = /news|website|check|look up|search|find|browse|url|github|issues|latest|current/i.test(task);
-      const needsFile = /write|create|build|make|code|file|script|deploy|implement/i.test(task);
-
-      if (needsWeb && !llmContent.includes('web_search') && !llmContent.includes('web_fetch') && !llmContent.includes('browser_navigate')) {
-        logger.info('FORCING_WEB_TOOL', { sessionId, iteration, task: task.substring(0, 80) });
-        // Inject a web_search tool call
-        const forcedToolCalls = [{ id: `forced_${Date.now()}`, name: 'web_search', args: { query: task.substring(0, 200) } }];
-        // Re-process as if the LLM called the tool
-        for (const tc of forcedToolCalls) {
-          const toolName = tc.name;
-          const toolArgs = tc.args;
-          logger.info('REACT_FORCED_TOOL_CALL', { sessionId, iteration, tool: toolName });
-
-          const toolResult = await executeToolWithRetry(toolName, toolArgs, { userId: effectiveUserId, sessionId });
-          toolResults.push(toolResult);
-
-          broadcastProgress(sessionId, { phase: 'react', status: 'tool_result', iteration, tool: toolName, result: toolResult.substring(0, 500) });
-
-          if (wasNativeFunctionCall && modelSupportsFunctionCalling()) {
-            messages.push({ role: 'tool', tool_call_id: tc.id, content: toolResult });
-          } else {
-            messages.push({ role: 'user', content: `OBSERVATION: Tool "${toolName}" returned:\n${String(toolResult).slice(0, 3000)}\n\nContinue with the next step.` });
-          }
-        }
-        continue;  // Go to next iteration — the LLM will see the search results
-      }
-
-      if (needsFile && !llmContent.includes('write_file') && !llmContent.includes('edit_file')) {
-        // Don't force file creation — the LLM might be asking a question about code
-        // Just continue the loop so it has another chance
-      }
-    }
-
+    // ===== PATH 4: No tools, no code — this is the final answer =====
+    // The model decided not to call any tools. Return its text response as the answer.
+    // Do NOT force tool calls — let the model decide via tool_choice: 'auto'.
     finalSummary = stripInternalReasoning(llmContent.trim());
     isDone = true;
     logger.info('REACT_NO_TOOLS_DONE', { sessionId, iteration, len: finalSummary.length });
@@ -2017,14 +1977,9 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
 
   broadcastMessage(sessionId, { role: 'assistant', content: finalSummary, type: 'task_complete', filesModified: Array.from(filesModified) });
 
-  // Broadcast agent:response with model metadata for frontend badge
-  if (global.wsServer) {
-    global.wsServer.to(`session-${sessionId}`).emit('agent:response', {
-      sessionId, timestamp: new Date().toISOString(),
-      content: finalSummary,
-      model: { provider: actualProvider || 'unknown', model: actualModel || 'unknown', displayName: getModelDisplayName(actualModel) }
-    });
-  }
+  // Broadcast model badge + reasoning done for frontend
+  broadcastModelBadge(sessionId, { provider: actualProvider, model: actualModel });
+  broadcastReasoning(sessionId, { reasoning: '', done: true });
 
   if (isSupabaseConfigured() && filesModified.size > 0) {
     for (const filePath of filesModified) {
