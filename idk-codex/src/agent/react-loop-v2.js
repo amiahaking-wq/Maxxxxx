@@ -29,6 +29,32 @@ const MAX_ITERATIONS = parseInt(process.env.MAX_AGENT_ITERATIONS || '15', 10);
 const MAX_ACTION_TOKENS = parseInt(process.env.MAX_ACTION_TOKENS || '4000', 10);
 
 // ============================================================================
+// HELPER: Strip internal reasoning from user-visible content
+// ============================================================================
+
+function stripInternalReasoning(content) {
+  if (!content) return content;
+
+  // Remove THOUGHT blocks
+  content = content.replace(/THOUGHT:\s*[^\n]*\n?/gi, '');
+  content = content.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+
+  // Remove ACTION blocks (keep only the tool call)
+  content = content.replace(/ACTION:\s*[^\n]*\n?/gi, '');
+
+  // Remove OBSERVATION blocks
+  content = content.replace(/OBSERVATION:\s*[^\n]*\n?/gi, '');
+
+  // Remove INPUT blocks
+  content = content.replace(/INPUT:\s*\{[^\n]*\n?/gi, '');
+
+  // Clean up empty lines
+  content = content.replace(/\n{3,}/g, '\n\n').trim();
+
+  return content;
+}
+
+// ============================================================================
 // FUNCTION CALLING TOOL DEFINITIONS
 // ============================================================================
 
@@ -547,6 +573,17 @@ CRITICAL RULES (HARD CONSTRAINTS — VIOLATION = FAILURE):
 12. When creating files, give them descriptive names (not file_0.txt).
 13. After writing files, run them via bash to verify they work. If verification fails, FIX the file.
 
+TOOL USE ENFORCEMENT (CRITICAL):
+- You MUST use tools to complete tasks. Do NOT tell the user you cannot do something — instead, use the appropriate tool:
+  - Need to check a website? Use browser_navigate or web_fetch
+  - Need to read a file? Use read_file
+  - Need to search? Use search or web_search
+  - Need to write code? Use write_file
+- NEVER say "I cannot" or "I'm sorry" or "I don't have access to" — always try a tool FIRST.
+- If a tool fails, try a DIFFERENT tool or different parameters.
+- When the user asks you to check something online, your FIRST action must be browser_navigate or web_fetch. Do not think about it — just do it.
+- When the user asks you to check GitHub issues, use web_fetch on the issues URL immediately.
+
 ARTIFACT RULES (CRITICAL — THIS IS HOW YOU "SEND FILES"):
 - Every file you create with write_file is AUTOMATICALLY shown as a clickable preview card in the chat.
 - HTML files render live (the user can interact with them in the chat).
@@ -612,11 +649,15 @@ CRITICAL RULES (HARD CONSTRAINTS):
 - If a tool fails, read the error and try a different approach
 - NEVER say "I can't" — you have tools, USE THEM
 - NEVER say "I can't send files" — use write_file, the system shows it as a card automatically
+- NEVER say "I cannot" or "I'm sorry" or "I don't have access to" — always try a tool FIRST
 - NEVER paste code in your text response if you've already written it as a file
 - Keep THOUGHT brief (1-2 sentences)
 - When searching the web, ALWAYS cite sources with [1], [2] etc. and include URLs
 - If a web_search returns no useful results, try a DIFFERENT query (at least 2 attempts)
-- When the user uploads a file, use read_upload to actually READ it before responding`;
+- When the user uploads a file, use read_upload to actually READ it before responding
+- When the user asks you to check something online, your FIRST action must be web_fetch or browser_navigate
+- When the user asks you to check GitHub issues, use web_fetch on the issues URL immediately
+- Do NOT say "I cannot access" — just call the tool`;
 }
 
 /**
@@ -935,17 +976,10 @@ async function hybridLLMCall(messages, options = {}) {
           toolCalls = chunk.toolCalls;
         }
       } else if (chunk.type === 'reasoning') {
+        // Log reasoning internally but do NOT broadcast to the user
         if (chunk.content) {
           reasoning += chunk.content;
-          if (sessionId) {
-            try {
-              global.wsServer?.to(`session-${sessionId}`).emit('agent:reasoning', {
-                sessionId,
-                timestamp: new Date().toISOString(),
-                text: chunk.content
-              });
-            } catch { /* non-fatal */ }
-          }
+          logger.debug('Model reasoning', { content: chunk.content.substring(0, 200) });
         }
       }
     }
@@ -1427,6 +1461,7 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
   ];
 
   const filesModified = new Set();
+  const toolResults = [];  // Track tool results for error checking
   let iteration = 0;
   let finalSummary = '';
   let isDone = false;
@@ -1503,8 +1538,22 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
         const toolName = tc.name;
         const toolArgs = tc.args || {};
 
-        // Check for task_complete
+        // Check for task_complete — but DON'T allow it if recent tools had errors
         if (toolName === 'task_complete') {
+          // Check if recent tool results had errors
+          const recentResults = toolResults.slice(-2);
+          const hasRecentErrors = recentResults.some(r =>
+            typeof r === 'string' && (r.includes('Error') || r.includes('failed') || r.includes('reverted'))
+          );
+          if (hasRecentErrors) {
+            // Block task_complete — tell the agent to fix errors first
+            messages.push({
+              role: 'user',
+              content: 'You cannot complete the task yet — there were recent errors. Fix them first, then call task_complete.'
+            });
+            logger.warn('REACT_BLOCKED_COMPLETE', { sessionId, iteration, reason: 'recent errors in tool results' });
+            continue;
+          }
           finalSummary = toolArgs.summary || 'Task complete';
           isDone = true;
           logger.info('REACT_DONE', { sessionId, iteration, summary: finalSummary.substring(0, 100) });
@@ -1612,6 +1661,16 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
         }
 
         broadcastProgress(sessionId, { phase: 'react', status: 'tool_result', iteration, tool: toolName, result: toolResult.substring(0, 500) });
+
+        // Track result for error checking (BUG 5: block premature task_complete)
+        toolResults.push(toolResult);
+
+        // If the result indicates failure, feed error back and don't allow completion
+        if (typeof toolResult === 'string' && (toolResult.includes('Error:') || toolResult.includes('failed validation') || toolResult.includes('reverted'))) {
+          logger.warn('REACT_TOOL_FAILED', { sessionId, iteration, tool: toolName, error: toolResult.substring(0, 200) });
+          // The error is already in the tool result that gets pushed to messages
+          // The LLM will see it and should retry with corrected parameters
+        }
 
         // Vision: if result is a screenshot (base64 image), send as vision message
         if (toolResult.startsWith('data:image/')) {
@@ -1779,6 +1838,9 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
   if (!isDone && !finalSummary) {
     finalSummary = 'Reached max iterations (' + MAX_ITERATIONS + '). Files modified: ' + (Array.from(filesModified).join(', ') || 'none');
   }
+
+  // Strip internal reasoning markers from user-visible content
+  finalSummary = stripInternalReasoning(finalSummary);
 
   // ===== PERSONALITY LEARNING (Phase 4.3) =====
   // Learn from the user's message + agent's final response to refine

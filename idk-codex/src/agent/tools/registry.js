@@ -270,6 +270,27 @@ export const TOOLS = {
         .replace(/&#x27;/g, "'")
         .replace(/&#x2F;/g, '/');
 
+      // Sanitize JSON files — fix control characters that break JSON.parse
+      if (filePath.endsWith('.json')) {
+        try {
+          JSON.parse(content);
+        } catch (e) {
+          // Content has control characters or is broken JSON — try to fix
+          logger.warn('JSON validation failed, attempting sanitization', { path: filePath, error: e.message });
+          content = content
+            .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '') // Remove control chars
+            .replace(/\t/g, '  '); // Replace tabs with spaces
+          // Try again
+          try {
+            JSON.parse(content);
+            logger.info('JSON sanitized successfully', { path: filePath });
+          } catch (e2) {
+            logger.warn('JSON still invalid after sanitization', { path: filePath, error: e2.message });
+            // Don't block the write — the user can see the error
+          }
+        }
+      }
+
       const fullPath = path.resolve(SANDBOX, filePath);
       if (!fullPath.startsWith(path.resolve(SANDBOX))) {
         return 'Error: path is outside the sandbox workspace';
@@ -283,7 +304,7 @@ export const TOOLS = {
         // Backup existing file before overwriting (for guardrail revert)
         try {
           await fsp.access(fullPath);
-          backupFile(filePath); // guardrails.js still uses sync internally — keep for now
+          backupFile(filePath);
         } catch { /* file does not exist — no backup needed */ }
 
         await fsp.writeFile(fullPath, content, 'utf-8');
@@ -293,7 +314,7 @@ export const TOOLS = {
         // Guardrail: validate the file after writing
         const validation = validateAndRevert(filePath);
         if (!validation.valid && validation.reverted) {
-          return `Warning: ${validation.error}`;
+          return `Error: ${validation.error}. File was reverted to previous version.`;
         }
 
         return `Successfully wrote ${size} bytes to ${filePath}`;
