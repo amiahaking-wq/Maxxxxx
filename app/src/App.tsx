@@ -366,6 +366,7 @@ export default function App() {
     }
   });
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [branding, setBranding] = useState({ name: 'MAX', tagline: 'Your AI Agent' });
 
   // Conversations
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -378,6 +379,8 @@ export default function App() {
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [loadingConversation, setLoadingConversation] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [thinkingContent, setThinkingContent] = useState('');
+  const [liveTokens, setLiveTokens] = useState('');
 
   // UI state
   const [searchQuery, setSearchQuery] = useState('');
@@ -539,6 +542,26 @@ export default function App() {
       setConnectionStatus('reconnecting');
     });
 
+    // Streaming events — live token + thinking display
+    s.on('agent:stream', (data: { text?: string }) => {
+      if (data.text) setLiveTokens(prev => prev + data.text);
+    });
+
+    s.on('agent:reasoning', (data: { text?: string }) => {
+      if (data.text) setThinkingContent(prev => prev + data.text);
+    });
+
+    s.on('token', (data: { type?: string; text?: string }) => {
+      if (data.type === 'start') { setLiveTokens(''); setThinkingContent(''); }
+      else if (data.type === 'token' && data.text) setLiveTokens(prev => prev + data.text);
+      else if (data.type === 'done') { setThinkingContent(''); }
+    });
+
+    s.on('agent:done', () => {
+      setThinkingContent('');
+      setLiveTokens('');
+    });
+
     s.on('progress', (data: ProgressPayload) => {
       if (!data.sessionId) return;
       // When the task completes, push the summary as a regular assistant message
@@ -606,10 +629,14 @@ export default function App() {
             metadata: data.type ? { type: data.type } : null,
             createdAt: data.timestamp || new Date().toISOString(),
             images: data.images,
+            model: (data as any).model,
+            provider: (data as any).provider,
           },
         ];
       });
       setIsLoading(false);
+      setThinkingContent('');
+      setLiveTokens('');
     });
 
     s.on('terminal:output', (data: TerminalOutputPayload) => {
@@ -647,12 +674,14 @@ export default function App() {
       })
       .catch(() => setModels([]));
 
-    // Load config (providers + default model)
+    // Load config (providers + default model + branding)
     fetch(`${API_BASE}/api/config`)
       .then((r) => r.json())
       .then((data: AppConfig) => {
         setConfig(data);
         setSelectedModel((prev) => prev || data.model || '');
+        if (data.name) setBranding(prev => ({ ...prev, name: data.name as string }));
+        if (data.tagline) setBranding(prev => ({ ...prev, tagline: data.tagline as string }));
       })
       .catch(() => null);
 
@@ -1111,7 +1140,7 @@ export default function App() {
   // ------------------------------------------------------------------------
 
   return (
-    <div className="flex h-[100dvh] w-full overflow-hidden bg-[#0a0a0f] font-sans text-[#f1f5f9]">
+    <div className="app-container flex h-[100dvh] w-full overflow-hidden bg-[#0a0a0f] font-sans text-[#f1f5f9]">
       <style>{GLOBAL_STYLES}</style>
 
       {/* Mobile sidebar overlay */}
@@ -1140,8 +1169,8 @@ export default function App() {
               <Bot size={16} className="text-white" />
             </div>
             <div className="flex flex-col leading-tight">
-              <span className="text-sm font-semibold text-white">MAX 2.0</span>
-              <span className="text-[10px] text-[#64748b]">Autonomous Agent</span>
+              <span className="text-sm font-semibold text-white">{branding.name}</span>
+              <span className="text-[10px] text-[#64748b]">{branding.tagline}</span>
             </div>
           </div>
           <button
@@ -1502,6 +1531,33 @@ export default function App() {
                 {messages.map((msg) => (
                   <MessageBubble key={msg.id} message={msg} />
                 ))}
+
+                {/* Thinking block — shows when model is reasoning */}
+                {thinkingContent && (
+                  <div className="mb-2 rounded-lg bg-amber-500/10 border border-amber-500/20 p-3">
+                    <div className="flex items-center gap-2 text-xs text-amber-400 font-medium mb-1">
+                      <span className="animate-pulse">💭</span>
+                      <span>Thinking...</span>
+                    </div>
+                    <div className="text-xs text-amber-300/70 font-mono whitespace-pre-wrap">
+                      {thinkingContent}
+                    </div>
+                  </div>
+                )}
+
+                {/* Live tokens — shows streaming response before final message */}
+                {liveTokens && (
+                  <div className="flex gap-3">
+                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-purple-500">
+                      <Bot size={14} className="text-white" />
+                    </div>
+                    <div className="flex-1 text-sm text-slate-200 whitespace-pre-wrap">
+                      {liveTokens}
+                      <span className="animate-pulse">▊</span>
+                    </div>
+                  </div>
+                )}
+
                 {activeAgentRun && <ReActLoopCard run={activeAgentRun} />}
                 <div className="h-1" />
               </div>
@@ -1766,7 +1822,7 @@ function EmptyState({
         <Bot size={32} className="text-white" />
       </div>
       <h2 className="mb-2 text-xl font-semibold text-white md:text-2xl">
-        What do you want to build?
+        {branding.name} — {branding.tagline}
       </h2>
       <p className="mb-8 max-w-md text-sm text-[#94a3b8]">
         MAX plans, writes, tests, and deploys code autonomously. Describe your task
@@ -1834,6 +1890,14 @@ function MessageBubble({ message }: { message: ConversationMessage }) {
         )}
         {message.content && (
           <p className="whitespace-pre-wrap break-words">{message.content}</p>
+        )}
+        {/* Show which model generated this response */}
+        {!isUser && (message as any).model && (
+          <div className="text-[10px] text-slate-500 mt-1 flex items-center gap-1">
+            <span>via {(message as any).provider}</span>
+            <span>•</span>
+            <span>{(message as any).model}</span>
+          </div>
         )}
       </div>
       {isUser && (

@@ -7,7 +7,7 @@ import express from 'express';
 import logger from '../../utils/logger.js';
 import { getDatabase } from '../../database/db.js';
 import { getModelOptions, getAvailableModels, getModelById, isValidModel } from '../../llm/model-registry.js';
-import { setProvider, setModel } from '../../llm/adapter.js';
+import { setProvider, setModel, setUserModelPreference } from '../../llm/adapter.js';
 import phoneBridge from '../../interfaces/phone-bridge.js';
 
 const router = express.Router();
@@ -203,6 +203,13 @@ router.post('/model', async (req, res) => {
       }
     } catch (e) {
       logger.warn('Live model switch failed (preference still saved)', { error: e.message });
+    }
+
+    // Also save to user_model_preferences table (persists across restarts)
+    try {
+      setUserModelPreference(userId, validModel.provider, validModel.id);
+    } catch (e) {
+      logger.warn('Failed to save user model preference', { error: e.message });
     }
 
     logger.info('API', {

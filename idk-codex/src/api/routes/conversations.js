@@ -399,11 +399,18 @@ router.post('/:id/messages', rateLimiter, validateBody(chatSchema), async (req, 
 
           const response = result.content || 'Sorry, I could not generate a response.';
 
+          // Get model info for the response
+          const { getCurrentProvider } = await import('../../llm/adapter.js');
+          const provider = getCurrentProvider();
+
           await addConversationMessage(conversationId, 'assistant', response);
           broadcastMessage(conversationId, {
             role: 'assistant',
             content: response,
-            conversationId
+            conversationId,
+            model: provider?.model || 'unknown',
+            provider: provider?.name || 'unknown',
+            usage: result.usage || {}
           });
         } catch (err) {
           logger.error('Chat response failed', { error: err.message });

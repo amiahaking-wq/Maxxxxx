@@ -1310,6 +1310,15 @@ export async function executeReActLoop(task, sessionId, userId, options = {}) {
 
   logger.info('REACT_LOOP_START', { task: task.substring(0, 100), sessionId, userId: effectiveUserId });
 
+  // Log which model is actually being used
+  const provider = getCurrentProvider();
+  logger.info('AGENT_USING_MODEL', {
+    provider: provider?.name || 'unknown',
+    model: provider?.model || 'unknown',
+    userId: effectiveUserId,
+    sessionId
+  });
+
   // Sync vault credentials to env so connector tools can use them
   try { syncVaultToEnv(effectiveUserId); } catch (e) { /* non-fatal */ }
 

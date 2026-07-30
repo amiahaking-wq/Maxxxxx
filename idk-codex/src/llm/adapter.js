@@ -1103,6 +1103,51 @@ export function setModel(model) {
 }
 
 /**
+ * Save user's model preference to SQLite (persists across restarts)
+ */
+export function setUserModelPreference(userId, provider, model) {
+  try {
+    import('../database/db.js').then(({ getDatabase }) => {
+      const db = getDatabase();
+      db.prepare(`CREATE TABLE IF NOT EXISTS user_model_preferences (
+        user_id TEXT PRIMARY KEY,
+        provider TEXT,
+        model TEXT,
+        updated_at TEXT DEFAULT (datetime('now'))
+      )`).run();
+
+      db.prepare(`INSERT INTO user_model_preferences (user_id, provider, model, updated_at)
+        VALUES (?, ?, ?, datetime('now'))
+        ON CONFLICT(user_id) DO UPDATE SET
+        provider = excluded.provider,
+        model = excluded.model,
+        updated_at = datetime('now')
+      `).run(userId, provider, model);
+    });
+  } catch (e) {
+    logger.error('Failed to save model preference', { error: e.message });
+  }
+}
+
+/**
+ * Get user's model preference from SQLite (sync — must be called after db is loaded)
+ */
+export function getUserModelPreference(userId) {
+  try {
+    // Use sync require-style — this is a sync function
+    // In ESM, we can't use require, so we use a cached import
+    if (global._maxDb) {
+      const db = global._maxDb;
+      const row = db.prepare('SELECT model, provider FROM user_model_preferences WHERE user_id = ?').get(userId);
+      return row || null;
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
  * Get available providers
  */
 export function getAvailableProviders() {
