@@ -25,7 +25,10 @@ import { executeWithSOP, isSOPEnabled } from './sop-integration.js';
 import { CognitiveReflectionLoop } from './reflection/cognitive-loop.js';
 
 // V5: REACT Agent Loop (Tool System)
-import { executeReactAgentLoop } from './react-loop.js';
+// NOTE: The broken react-loop.js was deleted in Phase 0 of the Hermes Engine port.
+// The Hermes Harness (src/engine/harness.js) now powers this functionality via
+// src/agent/index.js -> processMessage(). The direct REACT mode opt-in below
+// is disabled; use processMessage() or the WebSocket `chat_message` event instead.
 
 const MAX_RETRY_COUNT = parseInt(process.env.MAX_RETRY_COUNT || '10', 10);
 
@@ -163,20 +166,12 @@ export async function executeAgentLoop(task, sessionId, progressCallback = null,
     };
   }
 
-  // V5: Try REACT agent loop if enabled
+  // V5: REACT agent loop — DISABLED.
+  // The broken react-loop.js was deleted in Phase 0 of the Hermes Engine port.
+  // To use the new Hermes Harness, send a WebSocket `chat_message` event or
+  // call processMessage() from src/agent/index.js directly.
   if (process.env.ENABLE_REACT_MODE === 'true') {
-    logger.info('REACT mode enabled, using tool-based agent loop');
-    const reactResult = await executeReactAgentLoop(task, sessionId, progressCallback, userId);
-
-    if (reactResult && reactResult.success) {
-      logger.info('REACT execution completed successfully');
-      return reactResult;
-    } else if (reactResult && !reactResult.success) {
-      logger.warn('REACT execution failed, falling back to standard loop', {
-        error: reactResult.error
-      });
-      // Fall through to standard loop
-    }
+    logger.warn('ENABLE_REACT_MODE=true but react-loop.js was removed in the Hermes Engine port. Use the Hermes Harness via WebSocket chat_message or processMessage() instead.');
   }
 
   // V3: Try SOP execution if enabled

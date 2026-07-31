@@ -6,6 +6,10 @@ import logger from '../utils/logger.js';
 import terminalManager from '../agent/tools/terminal-manager.js';
 import { validateToken } from '../auth/middleware.js';
 
+// Map of sessionId -> currently-running Harness instance, so stop_generation
+// can find the right harness and tell it to stop.
+const activeHarnesses = new Map();
+
 /**
  * Initialize WebSocket server with Socket.io
  * @param {Object} io - Socket.io server instance
@@ -164,6 +168,44 @@ export function initWebSocket(io) {
         });
       } catch (e) {
         logger.debug('camera:image handler error', { error: e.message });
+      }
+    });
+
+    // ===== HERMES ENGINE — chat_message and stop_generation =====
+    // These power the new MAX Next.js frontend's chat UI. When a client
+    // emits `chat_message`, we instantiate the Harness and run the agent
+    // loop. The harness broadcasts token/reasoning/tool_call/model_badge
+    // events back to the session room as it goes.
+    socket.on('chat_message', async (data) => {
+      const { sessionId, content } = data || {};
+      if (!sessionId || !content) {
+        socket.emit('error', { message: 'sessionId and content required' });
+        return;
+      }
+      // Make sure this socket is in the session room (frontend may subscribe first)
+      socket.join(`session-${sessionId}`);
+      try {
+        const { Harness } = await import('../engine/harness.js');
+        const adapterModule = await import('../llm/adapter.js');
+        const adapter = adapterModule.default || adapterModule.adapter;
+        const harness = new Harness(adapter);
+        // Store on global map so stop_generation can find the SAME harness instance
+        activeHarnesses.set(sessionId, harness);
+        await harness.run(sessionId, content);
+      } catch (error) {
+        logger.error('Harness run failed', { sessionId, error: error.message });
+        broadcastError(sessionId, { message: error.message });
+      } finally {
+        activeHarnesses.delete(sessionId);
+      }
+    });
+
+    socket.on('stop_generation', (data) => {
+      const { sessionId } = data || {};
+      if (!sessionId) return;
+      const harness = activeHarnesses.get(sessionId);
+      if (harness && typeof harness.stop === 'function') {
+        harness.stop(sessionId);
       }
     });
 
@@ -416,4 +458,58 @@ export function broadcastConfirmation(sessionId, payload) {
     ...payload
   });
   logger.info('Confirmation requested', { sessionId, tool: payload.tool, riskLevel: payload.riskLevel });
+}
+
+/**
+ * Broadcast a tool call lifecycle event to the frontend.
+ * The harness emits these as tools progress through pending → running → success/error.
+ */
+export function broadcastToolCall(sessionId, data) {
+  if (!global.wsServer) return;
+  const room = `session-${sessionId}`;
+  global.wsServer.to(room).emit('tool_call', {
+    sessionId,
+    timestamp: new Date().toISOString(),
+    ...data
+  });
+}
+
+/**
+ * Broadcast a final "done" event for a session run.
+ * The frontend uses this to clear the streaming cursor and re-enable the input.
+ */
+export function broadcastDone(sessionId, data) {
+  if (!global.wsServer) return;
+  const room = `session-${sessionId}`;
+  global.wsServer.to(room).emit('done', {
+    sessionId,
+    timestamp: new Date().toISOString(),
+    ...data
+  });
+}
+
+/**
+ * Broadcast an error event to the frontend.
+ */
+export function broadcastError(sessionId, data) {
+  if (!global.wsServer) return;
+  const room = `session-${sessionId}`;
+  global.wsServer.to(room).emit('error', {
+    sessionId,
+    timestamp: new Date().toISOString(),
+    ...data
+  });
+}
+
+/**
+ * Broadcast an artifact (file/code/markdown) created by the agent.
+ */
+export function broadcastArtifact(sessionId, data) {
+  if (!global.wsServer) return;
+  const room = `session-${sessionId}`;
+  global.wsServer.to(room).emit('artifact', {
+    sessionId,
+    timestamp: new Date().toISOString(),
+    ...data
+  });
 }

@@ -1350,6 +1350,50 @@ export function getToolNames() {
 }
 
 /**
+ * Build an OpenAI-compatible tool spec array (function-calling format)
+ * from the TOOLS registry. Used by the Hermes harness to pass `tools`
+ * to the streaming completion endpoint.
+ *
+ * @returns {Array<{type:'function', function:{name:string, description:string, parameters:Object}}>}
+ */
+export function getAllTools() {
+  return Object.values(TOOLS).map(tool => {
+    // Convert the params object ({ name: 'description' }) into JSON Schema properties
+    const properties = {};
+    const required = [];
+    for (const [paramName, paramDesc] of Object.entries(tool.params || {})) {
+      // Heuristic: required if description contains "(required)"
+      const isRequired = typeof paramDesc === 'string' && /required/i.test(paramDesc);
+      // Try to infer type from description; default to string
+      let type = 'string';
+      if (typeof paramDesc === 'string') {
+        if (/number/i.test(paramDesc)) type = 'number';
+        else if (/boolean/i.test(paramDesc)) type = 'boolean';
+        else if (/array/i.test(paramDesc)) type = 'array';
+        else if (/object/i.test(paramDesc)) type = 'object';
+      }
+      properties[paramName] = {
+        type,
+        description: typeof paramDesc === 'string' ? paramDesc : String(paramDesc),
+      };
+      if (isRequired) required.push(paramName);
+    }
+    return {
+      type: 'function',
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: {
+          type: 'object',
+          properties,
+          required,
+        },
+      },
+    };
+  });
+}
+
+/**
  * Build the tool registry (compatibility export for old react-loop.js).
  * Returns the TOOLS object in the format the old code expects.
  */
@@ -1362,5 +1406,6 @@ export default {
   executeTool,
   getToolDescriptions,
   getToolNames,
+  getAllTools,
   buildToolRegistry
 };

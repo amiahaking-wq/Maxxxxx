@@ -1255,5 +1255,16 @@ export function getModelOptionsForAdapter() {
   return adapter.getModelOptions();
 }
 
+// ============================================================================
+// HERMES ENGINE — method aliases on the adapter instance
+// The Hermes Harness (src/engine/harness.js) and ReflectionEngine call
+// `adapter.streamCompletion(...)` and `adapter.generateCompletion(...)`.
+// The actual implementations are standalone named exports above. Expose
+// them as instance methods so the harness can use the adapter as expected.
+// ============================================================================
+adapter.streamCompletion = streamCompletion;
+adapter.generateCompletion = completion;
+adapter.completion = completion;
+
 export default adapter;
 export { adapter };

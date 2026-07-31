@@ -68,3 +68,12 @@ idk-codex/max-frontend/public/favicon-32x32.png
 # Keep the logo.svg (source) and existing favicon.svg
 !idk-codex/max-frontend/public/logo.svg
 !idk-codex/max-frontend/public/favicon.svg
+
+# Hermes Engine port — build artifacts
+frontend/dist/
+frontend/.next/
+frontend/out/
+.npmrc
+
+# Local test scripts (not part of the project)
+test-hermes-e2e-self.js

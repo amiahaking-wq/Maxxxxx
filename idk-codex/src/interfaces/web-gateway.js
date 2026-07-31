@@ -283,30 +283,31 @@ export class WebGateway {
       logger.info('✅ Telegram webhook route registered', { path: webhookPath });
     }
 
-    // Serve frontend static files IF they exist (backward compat for single-service deploys)
+    // Serve frontend static files IF they exist (Phase 3 — Hermes Engine port).
+    // The new Next.js frontend builds to frontend/dist/ via `output: 'export'`.
     // When frontend is a separate Railway service, this path won't exist — that's fine.
-    const frontendDistPath = path.resolve(path.dirname(__dirname), '..', '..', 'app', 'dist');
+    const frontendDistPath = path.resolve(path.dirname(__dirname), '..', '..', 'frontend', 'dist');
 
     if (fs.existsSync(frontendDistPath)) {
       logger.info('Frontend dist path configured', { frontendDistPath, exists: true });
       this.app.use(express.static(frontendDistPath));
-      // SPA fallback
+      // SPA fallback — send index.html for any non-API, non-socket.io route
       this.app.get(/^(?!\/socket\.io\/|\/api\/).*$/, (req, res) => {
         const indexPath = path.resolve(frontendDistPath, 'index.html');
         if (fs.existsSync(indexPath)) {
           res.sendFile(indexPath);
         } else {
-          res.status(404).json({ error: 'Not found', hint: 'This is an API-only service. Frontend is deployed separately.' });
+          res.status(404).json({ error: 'Not found', hint: 'index.html missing in frontend/dist' });
         }
       });
     } else {
-      logger.info('Frontend dist not found — running as API-only service');
+      logger.info('Frontend dist not found — running as API-only service', { lookedFor: frontendDistPath });
       // API-only: return a clear "this is an API" response for non-API routes
       this.app.get('/', (req, res) => {
         res.json({
           service: 'MAX API',
           status: 'running',
-          message: 'This is the MAX backend API. The frontend is deployed separately.',
+          message: 'This is the MAX backend API. The frontend build (frontend/dist) was not found.',
           docs: '/api/health',
           endpoints: {
             auth: '/api/auth/*',
@@ -321,12 +322,12 @@ export class WebGateway {
           }
         });
       });
-      // For all other non-API, non-socket.io routes — return 403 (not a website)
+      // For all other non-API, non-socket.io routes — return 404
       this.app.get(/^(?!\/socket\.io\/|\/api\/).*$/, (req, res) => {
-        res.status(403).json({
-          error: 'Authorization not allowed',
-          message: 'This is an API-only service. Frontend routes are not served here.',
-          hint: 'Visit the frontend URL (separate Railway service) to use the MAX UI.'
+        res.status(404).json({
+          error: 'Not found',
+          message: 'This is an API-only service. Frontend not built.',
+          hint: 'Build the frontend: cd frontend && npm run build'
         });
       });
     }
