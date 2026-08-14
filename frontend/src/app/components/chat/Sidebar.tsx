@@ -5,6 +5,7 @@ import { SidebarHeader } from './SidebarHeader';
 import { ConversationList } from './ConversationList';
 import { SidebarFooter } from './SidebarFooter';
 import { MyGptsPanel } from './MyGptsPanel';
+import { TeamsPanel } from './TeamsPanel';
 import { PenSquare, Search, X } from 'lucide-react';
 import { ConversationListContainer } from './ConversationListContainer';
 import { useState } from 'react';
@@ -12,6 +13,7 @@ import { useState } from 'react';
 export function Sidebar() {
   const { sidebarCollapsed, mobileSidebarOpen, setMobileSidebarOpen } = useApp();
   const [gptsOpen, setGptsOpen] = useState(false);
+  const [teamsOpen, setTeamsOpen] = useState(false);
 
   return (
     <>
@@ -22,7 +24,7 @@ export function Sidebar() {
           mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'
         )}
       >
-        <SidebarContent onOpenGpts={() => setGptsOpen(true)} />
+        <SidebarContent onOpenGpts={() => setGptsOpen(true)} onOpenTeams={() => setTeamsOpen(true)} />
         <button
           onClick={() => setMobileSidebarOpen(false)}
           className="absolute right-3 top-3 rounded-md p-1 text-cg-muted hover:bg-cg-hover hover:text-cg-text"
@@ -38,15 +40,16 @@ export function Sidebar() {
           sidebarCollapsed ? 'md:w-0 md:overflow-hidden' : 'md:w-[260px]'
         )}
       >
-        <SidebarContent onOpenGpts={() => setGptsOpen(true)} />
+        <SidebarContent onOpenGpts={() => setGptsOpen(true)} onOpenTeams={() => setTeamsOpen(true)} />
       </aside>
 
       <MyGptsPanel open={gptsOpen} onClose={() => setGptsOpen(false)} />
+      <TeamsPanel open={teamsOpen} onClose={() => setTeamsOpen(false)} />
     </>
   );
 }
 
-function SidebarContent({ onOpenGpts }: { onOpenGpts: () => void }) {
+function SidebarContent({ onOpenGpts, onOpenTeams }: { onOpenGpts: () => void; onOpenTeams: () => void }) {
   const { sidebarCollapsed, toggleSidebar, setCurrentConversationId, searchQuery, setSearchQuery, conversations } = useApp();
 
   const handleNewChat = async () => {
@@ -86,7 +89,7 @@ function SidebarContent({ onOpenGpts }: { onOpenGpts: () => void }) {
 
       <ConversationListContainer />
 
-      <SidebarFooter onOpenGpts={onOpenGpts} />
+      <SidebarFooter onOpenGpts={onOpenGpts} onOpenTeams={onOpenTeams} />
     </div>
   );
 }
