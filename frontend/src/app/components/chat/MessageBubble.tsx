@@ -5,26 +5,26 @@ import { ModelBadge } from './ModelBadge';
 import { ToolCallCard } from './ToolCallCard';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { MessageActions } from './MessageActions';
+import { UserMessage } from './UserMessage';
 import { Bot } from 'lucide-react';
 
 interface Props {
   message: Message;
   onRegenerate?: () => void;
   onFeedback?: (messageId: string, f: 'up' | 'down') => void;
+  onEditUserMessage?: (messageId: string, newContent: string) => void;
 }
 
-export function MessageBubble({ message, onRegenerate, onFeedback }: Props) {
+export function MessageBubble({ message, onRegenerate, onFeedback, onEditUserMessage }: Props) {
   const isUser = message.role === 'user';
   const isAssistant = message.role === 'assistant';
 
   if (isUser) {
-    // ChatGPT style: user messages are right-aligned gray bubbles
     return (
-      <div className="mb-6 flex justify-end">
-        <div className="max-w-[75%] whitespace-pre-wrap break-words rounded-3xl bg-cg-bubble px-4 py-2.5 text-[15px] text-cg-text">
-          {message.content}
-        </div>
-      </div>
+      <UserMessage
+        message={message}
+        onEdit={onEditUserMessage ? (newContent) => onEditUserMessage(message.id, newContent) : undefined}
+      />
     );
   }
 

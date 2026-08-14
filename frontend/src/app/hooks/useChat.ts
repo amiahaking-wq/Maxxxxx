@@ -247,5 +247,24 @@ export function useChat(sessionId: string) {
     ));
   }, []);
 
-  return { messages, isStreaming, sendMessage, stopGeneration, regenerate, setFeedback };
+  const editUserMessage = useCallback((messageId: string, newContent: string) => {
+    // Find the message index
+    const msgs = messagesRef.current;
+    const idx = msgs.findIndex(m => m.id === messageId);
+    if (idx === -1) return;
+
+    // Update the user message content
+    setMessages(prev => {
+      const updated = [...prev];
+      updated[idx] = { ...updated[idx], content: newContent };
+      // Truncate everything after the edited user message
+      updated.length = idx + 1;
+      return updated;
+    });
+
+    // Re-send the edited message (will trigger a new assistant response)
+    setTimeout(() => sendMessage(newContent), 50);
+  }, [sendMessage]);
+
+  return { messages, isStreaming, sendMessage, stopGeneration, regenerate, setFeedback, editUserMessage };
 }

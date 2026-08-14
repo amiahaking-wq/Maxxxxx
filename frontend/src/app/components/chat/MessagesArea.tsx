@@ -11,9 +11,10 @@ interface Props {
   setInputValue: (v: string) => void;
   onRegenerate?: () => void;
   onFeedback?: (messageId: string, f: 'up' | 'down') => void;
+  onEditUserMessage?: (messageId: string, newContent: string) => void;
 }
 
-export function MessagesArea({ messages, setInputValue, onRegenerate, onFeedback }: Props) {
+export function MessagesArea({ messages, setInputValue, onRegenerate, onFeedback, onEditUserMessage }: Props) {
   const isEmpty = messages.length === 0;
   const { containerRef, isPinned, scrollToBottom } = useAutoScroll([messages]);
 
@@ -30,6 +31,7 @@ export function MessagesArea({ messages, setInputValue, onRegenerate, onFeedback
                 message={msg}
                 onRegenerate={msg.role === 'assistant' ? onRegenerate : undefined}
                 onFeedback={onFeedback}
+                onEditUserMessage={onEditUserMessage}
               />
             ))}
             {/* Show streaming cursor at the end if last message is still streaming */}

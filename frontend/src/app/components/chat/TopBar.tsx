@@ -1,6 +1,7 @@
 'use client';
 import { useApp } from './AppProvider';
 import { useTheme } from './ThemeProvider';
+import { ModelSelector } from './ModelSelector';
 import { Menu, Sun, Moon, Share, User } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 
@@ -21,7 +22,7 @@ export function TopBar() {
 
   return (
     <header className="flex h-12 items-center justify-between border-b border-cg-border bg-cg-canvas px-3">
-      {/* Left: mobile hamburger + model selector placeholder */}
+      {/* Left: mobile hamburger + model selector */}
       <div className="flex items-center gap-2">
         <button
           onClick={() => setMobileSidebarOpen(true)}
@@ -30,9 +31,7 @@ export function TopBar() {
         >
           <Menu className="h-5 w-5" />
         </button>
-        <button className="rounded-md px-2 py-1 text-sm font-medium text-cg-text hover:bg-cg-hover">
-          MAX <span className="text-cg-muted">·</span> <span className="text-cg-muted">Auto</span>
-        </button>
+        <ModelSelector />
       </div>
 
       {/* Right: theme toggle + share + profile */}

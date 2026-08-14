@@ -10,7 +10,7 @@ import { useState } from 'react';
 function ChatShellContent() {
   const { currentConversationId, mobileSidebarOpen, setMobileSidebarOpen } = useApp();
   const [inputValue, setInputValue] = useState('');
-  const { messages, isStreaming, sendMessage, stopGeneration, regenerate, setFeedback } = useChat(currentConversationId || 'default');
+  const { messages, isStreaming, sendMessage, stopGeneration, regenerate, setFeedback, editUserMessage } = useChat(currentConversationId || 'default');
 
   return (
     <div className="flex h-screen overflow-hidden bg-cg-canvas text-cg-text">
@@ -30,6 +30,7 @@ function ChatShellContent() {
           setInputValue={setInputValue}
           onRegenerate={regenerate}
           onFeedback={setFeedback}
+          onEditUserMessage={editUserMessage}
         />
         <InputBar
           value={inputValue}
