@@ -1,35 +1,57 @@
+'use client';
 import { Message } from '@/app/lib/types';
 import { ThinkingBox } from './ThinkingBox';
 import { ModelBadge } from './ModelBadge';
 import { ToolCallCard } from './ToolCallCard';
-import { StreamingCursor } from './StreamingCursor';
 import { User, Bot } from 'lucide-react';
 
 export function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === 'user';
   const isAssistant = message.role === 'assistant';
-  return (
-    <div className={`flex gap-3 ${isUser ? 'flex-row-reverse' : 'flex-row'} mb-6`}>
-      <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${isUser ? 'bg-blue-600' : 'bg-orange-600'}`}>
-        {isUser ? <User className="w-4 h-4 text-white" /> : <Bot className="w-4 h-4 text-white" />}
-      </div>
-      <div className={`flex flex-col max-w-[80%] ${isUser ? 'items-end' : 'items-start'}`}>
-        {isAssistant && message.reasoning && (
-          <ThinkingBox reasoning={message.reasoning} done={message.reasoningDone || false} />
-        )}
-        <div className={`rounded-2xl px-4 py-3 ${isUser ? 'bg-blue-600 text-white rounded-br-sm' : 'bg-gray-800 text-gray-100 rounded-bl-sm'}`}>
-          <div className="prose prose-invert prose-sm max-w-none">
-            {message.content}
-            {message.isStreaming && <StreamingCursor />}
-          </div>
+
+  if (isUser) {
+    // ChatGPT style: user messages are right-aligned gray bubbles
+    return (
+      <div className="mb-6 flex justify-end">
+        <div className="max-w-[75%] whitespace-pre-wrap break-words rounded-3xl bg-cg-bubble px-4 py-2.5 text-[15px] text-cg-text">
+          {message.content}
         </div>
-        {message.toolCalls && message.toolCalls.length > 0 && (
-          <div className="mt-2 space-y-2 w-full">
-            {message.toolCalls.map(tc => <ToolCallCard key={tc.id} toolCall={tc} />)}
-          </div>
-        )}
-        {isAssistant && <ModelBadge provider={message.provider} model={message.model} />}
       </div>
+    );
+  }
+
+  // Assistant messages: NO bubble, bare text on canvas, left-aligned
+  return (
+    <div className="mb-6">
+      {/* Avatar row */}
+      <div className="mb-2 flex items-center gap-2">
+        <div className="flex h-7 w-7 items-center justify-center rounded-full bg-cg-accent text-white">
+          <Bot className="h-4 w-4" />
+        </div>
+        <span className="text-sm font-semibold text-cg-text">MAX</span>
+      </div>
+
+      {/* Reasoning (collapsible) */}
+      {isAssistant && message.reasoning && (
+        <ThinkingBox reasoning={message.reasoning} done={message.reasoningDone || false} />
+      )}
+
+      {/* Tool calls */}
+      {message.toolCalls && message.toolCalls.length > 0 && (
+        <div className="mb-3 space-y-2">
+          {message.toolCalls.map(tc => <ToolCallCard key={tc.id} toolCall={tc} />)}
+        </div>
+      )}
+
+      {/* Main content (plain text for now — Phase 2 adds markdown rendering) */}
+      {message.content && (
+        <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-cg-text">
+          {message.content}
+        </div>
+      )}
+
+      {/* Model badge */}
+      {isAssistant && <ModelBadge provider={message.provider} model={message.model} />}
     </div>
   );
 }

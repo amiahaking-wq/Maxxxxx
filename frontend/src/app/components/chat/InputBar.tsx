@@ -1,37 +1,92 @@
 'use client';
-import { useState, KeyboardEvent } from 'react';
-import { Send, Paperclip, Square } from 'lucide-react';
+import { useState, KeyboardEvent, useRef, useEffect } from 'react';
+import { Send, Paperclip, Square, Mic } from 'lucide-react';
+import { cn } from '@/app/lib/utils';
 
-export function InputBar({ onSend, isStreaming, onStop }: {
-  onSend: (content: string) => void; isStreaming: boolean; onStop: () => void;
-}) {
-  const [input, setInput] = useState('');
-  const handleSend = () => {
-    if (!input.trim()) return;
-    onSend(input); setInput('');
-  };
+interface Props {
+  value: string;
+  onChange: (v: string) => void;
+  onSend: () => void;
+  isStreaming: boolean;
+  onStop: () => void;
+}
+
+export function InputBar({ value, onChange, onSend, isStreaming, onStop }: Props) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-grow textarea
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+  }, [value]);
+
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (value.trim() && !isStreaming) onSend();
+    }
   };
+
   return (
-    <div className="max-w-3xl mx-auto">
-      <div className="flex items-end gap-2 bg-gray-900 rounded-2xl border border-gray-700 p-3">
-        <button className="p-2 text-gray-400 hover:text-white"><Paperclip className="w-5 h-5" /></button>
-        <textarea value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown}
-          placeholder="Message MAX..." rows={1}
-          className="flex-1 bg-transparent text-white placeholder-gray-500 resize-none outline-none max-h-32"
-          disabled={isStreaming} />
-        {isStreaming ? (
-          <button onClick={onStop} className="p-2 text-red-400 hover:text-red-300">
-            <Square className="w-5 h-5 fill-current" />
+    <div className="border-t border-cg-border bg-cg-canvas px-4 py-3">
+      <div className="mx-auto max-w-3xl">
+        <div className="flex items-end gap-2 rounded-[28px] border border-cg-border bg-cg-canvas px-4 py-3 shadow-sm focus-within:border-cg-accent/50">
+          <button
+            className="rounded-md p-1 text-cg-muted hover:bg-cg-hover hover:text-cg-text"
+            aria-label="Attach file"
+            title="Attach file"
+          >
+            <Paperclip className="h-5 w-5" />
           </button>
-        ) : (
-          <button onClick={handleSend} className="p-2 bg-orange-600 text-white rounded-xl hover:bg-orange-500">
-            <Send className="w-5 h-5" />
+          <textarea
+            ref={textareaRef}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Message MAX..."
+            rows={1}
+            className="flex-1 resize-none bg-transparent text-[15px] text-cg-text placeholder:text-cg-muted outline-none"
+            style={{ maxHeight: '200px' }}
+          />
+          <button
+            className="rounded-md p-1 text-cg-muted hover:bg-cg-hover hover:text-cg-text"
+            aria-label="Voice input"
+            title="Voice input"
+          >
+            <Mic className="h-5 w-5" />
           </button>
-        )}
+          {isStreaming ? (
+            <button
+              onClick={onStop}
+              className="flex h-8 w-8 items-center justify-center rounded-full bg-cg-text text-cg-canvas hover:opacity-90"
+              aria-label="Stop generating"
+              title="Stop"
+            >
+              <Square className="h-3.5 w-3.5 fill-current" />
+            </button>
+          ) : (
+            <button
+              onClick={onSend}
+              disabled={!value.trim()}
+              className={cn(
+                'flex h-8 w-8 items-center justify-center rounded-full',
+                value.trim()
+                  ? 'bg-cg-text text-cg-canvas hover:opacity-90'
+                  : 'bg-cg-border text-cg-muted'
+              )}
+              aria-label="Send message"
+              title="Send"
+            >
+              <Send className="h-4 w-4" />
+            </button>
+          )}
+        </div>
+        <p className="mt-2 text-center text-xs text-cg-muted">
+          MAX can make mistakes. Check important info.
+        </p>
       </div>
-      <p className="text-center text-xs text-gray-600 mt-2">MAX can make mistakes. Always verify important results.</p>
     </div>
   );
 }
