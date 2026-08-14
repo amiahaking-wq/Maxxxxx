@@ -9,13 +9,22 @@ interface Props {
   onSelect: (id: string) => void;
   onRename?: (id: string, newTitle: string) => void;
   onDelete?: (id: string) => void;
+  loading?: boolean;
 }
 
-export function ConversationList({ conversations, currentId, onSelect, onRename, onDelete }: Props) {
+export function ConversationList({ conversations, currentId, onSelect, onRename, onDelete, loading }: Props) {
+  if (loading && conversations.length === 0) {
+    return (
+      <div className="flex-1 px-3 py-8 text-center text-sm text-cg-muted">
+        Loading...
+      </div>
+    );
+  }
+
   if (conversations.length === 0) {
     return (
       <div className="flex-1 px-3 py-8 text-center text-sm text-cg-muted">
-        No conversations found
+        No conversations yet
       </div>
     );
   }

@@ -42,7 +42,13 @@ export function Sidebar() {
 }
 
 function SidebarContent() {
-  const { sidebarCollapsed, toggleSidebar, setCurrentConversationId, searchQuery, setSearchQuery } = useApp();
+  const { sidebarCollapsed, toggleSidebar, setCurrentConversationId, searchQuery, setSearchQuery, conversations } = useApp();
+
+  const handleNewChat = async () => {
+    const newId = await conversations.create('New Chat');
+    if (newId) setCurrentConversationId(newId);
+    else setCurrentConversationId(null); // fallback to default session
+  };
 
   return (
     <div className="flex h-full flex-col">
@@ -51,7 +57,7 @@ function SidebarContent() {
       {/* New chat button */}
       <div className="px-2 py-2">
         <button
-          onClick={() => setCurrentConversationId(null)}
+          onClick={handleNewChat}
           className="flex w-full items-center justify-between rounded-lg border border-cg-border px-3 py-2.5 text-sm font-medium text-cg-text hover:bg-cg-hover"
         >
           <span className="flex items-center gap-2">

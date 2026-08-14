@@ -1,5 +1,6 @@
 'use client';
 import { createContext, useContext, useState, ReactNode, useCallback } from 'react';
+import { useConversations } from '@/app/hooks/useConversations';
 
 interface AppState {
   // Sidebar
@@ -10,6 +11,8 @@ interface AppState {
   currentConversationId: string | null;
   // Search
   searchQuery: string;
+  // Conversations
+  conversations: ReturnType<typeof useConversations>;
 }
 
 interface AppActions {
@@ -27,6 +30,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const conversations = useConversations();
 
   const toggleSidebar = useCallback(() => setSidebarCollapsed(v => !v), []);
 
@@ -36,6 +40,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       mobileSidebarOpen,
       currentConversationId,
       searchQuery,
+      conversations,
       toggleSidebar,
       setSidebarCollapsed,
       setMobileSidebarOpen,
