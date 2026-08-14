@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "highlight.js/styles/github-dark.css";
+@import "katex/dist/katex.min.css";
 
 /* ChatGPT-style color tokens (Tailwind v4 @theme) */
 @theme {

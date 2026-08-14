@@ -1,7 +1,9 @@
 'use client';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
 import rehypeHighlight from 'rehype-highlight';
+import rehypeKatex from 'rehype-katex';
 import { CodeBlock } from './CodeBlock';
 import { ComponentPropsWithoutRef } from 'react';
 
@@ -14,8 +16,11 @@ export function MarkdownRenderer({ content, className = '' }: MarkdownRendererPr
   return (
     <div className={`prose-chat ${className}`}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[
+          [rehypeHighlight, { detect: true, ignoreMissing: true }],
+          [rehypeKatex, { strict: false, throwOnError: false }],
+        ]}
         components={{
           // Code blocks (fenced) vs inline code
           code({ inline, className: cls, children, ...props }: ComponentPropsWithoutRef<'code'> & { inline?: boolean }) {
