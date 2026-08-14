@@ -24,7 +24,7 @@ function ChatShellContent() {
       <Sidebar />
 
       <div className="flex flex-1 flex-col overflow-hidden">
-        <TopBar />
+        <TopBar messages={messages} />
         <MessagesArea
           messages={messages}
           setInputValue={setInputValue}
