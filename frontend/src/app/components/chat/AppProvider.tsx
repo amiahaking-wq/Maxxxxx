@@ -1,7 +1,7 @@
 'use client';
 import { createContext, useContext, useState, ReactNode, useCallback } from 'react';
 import { useConversations } from '@/app/hooks/useConversations';
-import { CustomGPT } from '@/app/lib/types';
+import { CustomGPT, Team } from '@/app/lib/types';
 
 interface AppState {
   // Sidebar
@@ -16,6 +16,8 @@ interface AppState {
   conversations: ReturnType<typeof useConversations>;
   // Active GPT (when using a custom GPT)
   activeGpt: CustomGPT | null;
+  // Active workspace: null = personal, or a team id
+  activeWorkspace: Team | null;
 }
 
 interface AppActions {
@@ -25,6 +27,7 @@ interface AppActions {
   setCurrentConversationId: (id: string | null) => void;
   setSearchQuery: (q: string) => void;
   setActiveGpt: (gpt: CustomGPT | null) => void;
+  setActiveWorkspace: (team: Team | null) => void;
 }
 
 const AppContext = createContext<(AppState & AppActions) | null>(null);
@@ -35,6 +38,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeGpt, setActiveGpt] = useState<CustomGPT | null>(null);
+  const [activeWorkspace, setActiveWorkspace] = useState<Team | null>(null);
   const conversations = useConversations();
 
   const toggleSidebar = useCallback(() => setSidebarCollapsed(v => !v), []);
@@ -47,12 +51,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
       searchQuery,
       conversations,
       activeGpt,
+      activeWorkspace,
       toggleSidebar,
       setSidebarCollapsed,
       setMobileSidebarOpen,
       setCurrentConversationId,
       setSearchQuery,
       setActiveGpt,
+      setActiveWorkspace,
     }}>
       {children}
     </AppContext.Provider>

@@ -7,10 +7,10 @@ import { InputBar } from './InputBar';
 import { GptStore } from './GptStore';
 import { useChat } from '@/app/hooks/useChat';
 import { useState } from 'react';
-import { Store, X } from 'lucide-react';
+import { Store, X, Share2 } from 'lucide-react';
 
 function ChatShellContent() {
-  const { currentConversationId, mobileSidebarOpen, setMobileSidebarOpen, activeGpt, setActiveGpt } = useApp();
+  const { currentConversationId, mobileSidebarOpen, setMobileSidebarOpen, activeGpt, setActiveGpt, activeWorkspace } = useApp();
   const [inputValue, setInputValue] = useState('');
   const [storeOpen, setStoreOpen] = useState(false);
   const { messages, isStreaming, sendMessage, stopGeneration, regenerate, setFeedback, editUserMessage } = useChat(currentConversationId || 'default');
@@ -73,6 +73,35 @@ function ChatShellContent() {
             >
               <Store className="h-3 w-3" /> Explore GPTs
             </button>
+
+            {/* Share to team (only when a team workspace is active) */}
+            {activeWorkspace && currentConversationId && (
+              <button
+                onClick={async () => {
+                  try {
+                    const token = typeof window !== 'undefined' ? localStorage.getItem('max_token') : null;
+                    const res = await fetch(`/api/teams/${activeWorkspace.id}/conversations`, {
+                      method: 'POST',
+                      headers: {
+                        'Content-Type': 'application/json',
+                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                      },
+                      body: JSON.stringify({ conversationId: currentConversationId }),
+                    });
+                    if (res.ok) {
+                      alert(`Shared to ${activeWorkspace.name} team!`);
+                    } else {
+                      alert('Failed to share to team');
+                    }
+                  } catch {
+                    alert('Failed to share to team');
+                  }
+                }}
+                className="flex items-center gap-1 rounded-full border border-cg-border px-3 py-1 text-xs text-cg-muted hover:bg-cg-hover hover:text-cg-text"
+              >
+                <Share2 className="h-3 w-3" /> Share to {activeWorkspace.name}
+              </button>
+            )}
           </div>
         )}
 

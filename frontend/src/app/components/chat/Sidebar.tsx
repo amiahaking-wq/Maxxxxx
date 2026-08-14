@@ -6,6 +6,7 @@ import { ConversationList } from './ConversationList';
 import { SidebarFooter } from './SidebarFooter';
 import { MyGptsPanel } from './MyGptsPanel';
 import { TeamsPanel } from './TeamsPanel';
+import { WorkspaceSwitcher } from './WorkspaceSwitcher';
 import { PenSquare, Search, X } from 'lucide-react';
 import { ConversationListContainer } from './ConversationListContainer';
 import { useState } from 'react';
@@ -61,6 +62,8 @@ function SidebarContent({ onOpenGpts, onOpenTeams }: { onOpenGpts: () => void; o
   return (
     <div className="flex h-full flex-col">
       <SidebarHeader collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
+
+      <WorkspaceSwitcher />
 
       <div className="px-2 py-2">
         <button
