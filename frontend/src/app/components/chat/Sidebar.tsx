@@ -4,11 +4,14 @@ import { cn } from '@/app/lib/utils';
 import { SidebarHeader } from './SidebarHeader';
 import { ConversationList } from './ConversationList';
 import { SidebarFooter } from './SidebarFooter';
+import { MyGptsPanel } from './MyGptsPanel';
 import { PenSquare, Search, X } from 'lucide-react';
 import { ConversationListContainer } from './ConversationListContainer';
+import { useState } from 'react';
 
 export function Sidebar() {
   const { sidebarCollapsed, mobileSidebarOpen, setMobileSidebarOpen } = useApp();
+  const [gptsOpen, setGptsOpen] = useState(false);
 
   return (
     <>
@@ -19,7 +22,7 @@ export function Sidebar() {
           mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'
         )}
       >
-        <SidebarContent />
+        <SidebarContent onOpenGpts={() => setGptsOpen(true)} />
         <button
           onClick={() => setMobileSidebarOpen(false)}
           className="absolute right-3 top-3 rounded-md p-1 text-cg-muted hover:bg-cg-hover hover:text-cg-text"
@@ -35,26 +38,27 @@ export function Sidebar() {
           sidebarCollapsed ? 'md:w-0 md:overflow-hidden' : 'md:w-[260px]'
         )}
       >
-        <SidebarContent />
+        <SidebarContent onOpenGpts={() => setGptsOpen(true)} />
       </aside>
+
+      <MyGptsPanel open={gptsOpen} onClose={() => setGptsOpen(false)} />
     </>
   );
 }
 
-function SidebarContent() {
+function SidebarContent({ onOpenGpts }: { onOpenGpts: () => void }) {
   const { sidebarCollapsed, toggleSidebar, setCurrentConversationId, searchQuery, setSearchQuery, conversations } = useApp();
 
   const handleNewChat = async () => {
     const newId = await conversations.create('New Chat');
     if (newId) setCurrentConversationId(newId);
-    else setCurrentConversationId(null); // fallback to default session
+    else setCurrentConversationId(null);
   };
 
   return (
     <div className="flex h-full flex-col">
       <SidebarHeader collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
 
-      {/* New chat button */}
       <div className="px-2 py-2">
         <button
           onClick={handleNewChat}
@@ -67,7 +71,6 @@ function SidebarContent() {
         </button>
       </div>
 
-      {/* Search */}
       <div className="px-2 pb-2">
         <div className="relative">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-cg-muted" />
@@ -83,7 +86,7 @@ function SidebarContent() {
 
       <ConversationListContainer />
 
-      <SidebarFooter />
+      <SidebarFooter onOpenGpts={onOpenGpts} />
     </div>
   );
 }

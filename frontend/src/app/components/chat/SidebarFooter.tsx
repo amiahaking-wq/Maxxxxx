@@ -1,9 +1,20 @@
 'use client';
-import { Settings, User } from 'lucide-react';
+import { Settings, User, Bot } from 'lucide-react';
 
-export function SidebarFooter() {
+interface Props {
+  onOpenGpts: () => void;
+}
+
+export function SidebarFooter({ onOpenGpts }: Props) {
   return (
     <div className="border-t border-cg-border p-2">
+      <button
+        onClick={onOpenGpts}
+        className="mb-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-cg-text hover:bg-cg-hover"
+      >
+        <Bot className="h-4 w-4" />
+        <span className="flex-1 text-left">My GPTs</span>
+      </button>
       <button className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-cg-text hover:bg-cg-hover">
         <div className="flex h-6 w-6 items-center justify-center rounded-full bg-cg-accent text-white">
           <User className="h-3.5 w-3.5" />

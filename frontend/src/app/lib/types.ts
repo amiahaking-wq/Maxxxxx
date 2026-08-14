@@ -100,6 +100,7 @@ export interface CustomGPT {
   updatedAt: string;
   iconColor?: string;
   isPublic?: boolean;
+  visibility?: 'private' | 'public';
   authorId?: string;
   authorName?: string;
   category?: string;
