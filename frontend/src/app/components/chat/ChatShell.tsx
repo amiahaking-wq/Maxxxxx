@@ -10,11 +10,10 @@ import { useState } from 'react';
 function ChatShellContent() {
   const { currentConversationId, mobileSidebarOpen, setMobileSidebarOpen } = useApp();
   const [inputValue, setInputValue] = useState('');
-  const { messages, isStreaming, sendMessage, stopGeneration } = useChat(currentConversationId || 'default');
+  const { messages, isStreaming, sendMessage, stopGeneration, regenerate, setFeedback } = useChat(currentConversationId || 'default');
 
   return (
     <div className="flex h-screen overflow-hidden bg-cg-canvas text-cg-text">
-      {/* Mobile backdrop */}
       {mobileSidebarOpen && (
         <div
           className="fixed inset-0 z-30 bg-black/50 md:hidden"
@@ -24,10 +23,14 @@ function ChatShellContent() {
 
       <Sidebar />
 
-      {/* Main area */}
       <div className="flex flex-1 flex-col overflow-hidden">
         <TopBar />
-        <MessagesArea messages={messages} setInputValue={setInputValue} />
+        <MessagesArea
+          messages={messages}
+          setInputValue={setInputValue}
+          onRegenerate={regenerate}
+          onFeedback={setFeedback}
+        />
         <InputBar
           value={inputValue}
           onChange={setInputValue}
