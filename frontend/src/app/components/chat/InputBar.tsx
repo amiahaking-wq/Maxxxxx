@@ -1,7 +1,8 @@
 'use client';
 import { useState, KeyboardEvent, useRef, useEffect } from 'react';
-import { Send, Paperclip, Square, Mic } from 'lucide-react';
+import { Send, Paperclip, Square, Mic, MicOff } from 'lucide-react';
 import { cn } from '@/app/lib/utils';
+import { useVoiceInput } from '@/app/hooks/useVoiceInput';
 
 interface Props {
   value: string;
@@ -13,6 +14,8 @@ interface Props {
 
 export function InputBar({ value, onChange, onSend, isStreaming, onStop }: Props) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const { isListening, transcript, interimTranscript, start, stop, reset } = useVoiceInput();
+  const lastTranscriptRef = useRef('');
 
   // Auto-grow textarea
   useEffect(() => {
@@ -22,17 +25,42 @@ export function InputBar({ value, onChange, onSend, isStreaming, onStop }: Props
     ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
   }, [value]);
 
+  // When voice transcript changes, append to input
+  useEffect(() => {
+    if (transcript && transcript !== lastTranscriptRef.current) {
+      const newValue = value ? `${value} ${transcript}`.trim() : transcript;
+      onChange(newValue);
+      lastTranscriptRef.current = transcript;
+      reset();
+    }
+  }, [transcript, value, onChange, reset]);
+
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      if (value.trim() && !isStreaming) onSend();
+      if (value.trim() && !isStreaming) {
+        if (isListening) stop();
+        onSend();
+      }
+    }
+  };
+
+  const handleMicClick = () => {
+    if (isListening) {
+      stop();
+    } else {
+      lastTranscriptRef.current = '';
+      start();
     }
   };
 
   return (
     <div className="border-t border-cg-border bg-cg-canvas px-4 py-3">
       <div className="mx-auto max-w-3xl">
-        <div className="flex items-end gap-2 rounded-[28px] border border-cg-border bg-cg-canvas px-4 py-3 shadow-sm focus-within:border-cg-accent/50">
+        <div className={cn(
+          'flex items-end gap-2 rounded-[28px] border bg-cg-canvas px-4 py-3 shadow-sm focus-within:border-cg-accent/50',
+          isListening ? 'border-red-400 ring-2 ring-red-100' : 'border-cg-border'
+        )}>
           <button
             className="rounded-md p-1 text-cg-muted hover:bg-cg-hover hover:text-cg-text"
             aria-label="Attach file"
@@ -40,22 +68,30 @@ export function InputBar({ value, onChange, onSend, isStreaming, onStop }: Props
           >
             <Paperclip className="h-5 w-5" />
           </button>
-          <textarea
-            ref={textareaRef}
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Message MAX..."
-            rows={1}
-            className="flex-1 resize-none bg-transparent text-[15px] text-cg-text placeholder:text-cg-muted outline-none"
-            style={{ maxHeight: '200px' }}
-          />
+          <div className="flex-1">
+            <textarea
+              ref={textareaRef}
+              value={value + (isListening && interimTranscript ? ' ' + interimTranscript : '')}
+              onChange={(e) => onChange(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={isListening ? 'Listening...' : 'Message MAX...'}
+              rows={1}
+              className="w-full resize-none bg-transparent text-[15px] text-cg-text placeholder:text-cg-muted outline-none"
+              style={{ maxHeight: '200px' }}
+            />
+          </div>
           <button
-            className="rounded-md p-1 text-cg-muted hover:bg-cg-hover hover:text-cg-text"
-            aria-label="Voice input"
-            title="Voice input"
+            onClick={handleMicClick}
+            className={cn(
+              'rounded-md p-1 hover:bg-cg-hover',
+              isListening
+                ? 'text-red-500 hover:text-red-600'
+                : 'text-cg-muted hover:text-cg-text'
+            )}
+            aria-label={isListening ? 'Stop voice input' : 'Start voice input'}
+            title={isListening ? 'Stop voice input' : 'Voice input'}
           >
-            <Mic className="h-5 w-5" />
+            {isListening ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
           </button>
           {isStreaming ? (
             <button
