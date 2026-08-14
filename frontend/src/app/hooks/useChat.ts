@@ -4,6 +4,21 @@ import { Message, ToolCall, Artifact } from '@/app/lib/types';
 import { subscribeToSession, emitChatMessage, emitStopGeneration, getSocket } from '@/app/lib/socket';
 import { conversationsApi } from '@/app/lib/api';
 
+/**
+ * Convert a blob URL (from URL.createObjectURL) to a data URL.
+ * Used to send image attachments to vision models via WebSocket.
+ */
+async function urlToDataUrl(url: string): Promise<string> {
+  const res = await fetch(url);
+  const blob = await res.blob();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
 export function useChat(sessionId: string) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -172,6 +187,26 @@ export function useChat(sessionId: string) {
   const sendMessage = useCallback(async (content: string, attachments?: any[]) => {
     if (!content.trim() && (!attachments || attachments.length === 0)) return;
 
+    // Convert image attachments to data URLs for vision models
+    let images: string[] | undefined;
+    if (attachments && attachments.length > 0) {
+      const imageAtts = attachments.filter(a => a.type === 'image' && a.previewUrl);
+      if (imageAtts.length > 0) {
+        images = [];
+        for (const att of imageAtts) {
+          if (att.previewUrl) {
+            try {
+              const dataUrl = await urlToDataUrl(att.previewUrl);
+              images.push(dataUrl);
+            } catch {
+              // If conversion fails, skip this image
+            }
+          }
+        }
+        if (images.length === 0) images = undefined;
+      }
+    }
+
     const userMsg: Message = {
       id: `user-${Date.now()}`,
       role: 'user',
@@ -203,15 +238,15 @@ export function useChat(sessionId: string) {
       });
     }
 
-    // If we have attachments, include their storage paths in the message
-    // so the backend agent can access them
+    // Include non-image attachment info in the message text
     let emitContent = content;
-    if (attachments && attachments.length > 0) {
-      const attList = attachments.map(a => `- ${a.filename} (${a.type}, ${a.mimeType}) at ${a.storagePath || 'memory'}`).join('\n');
+    const nonImageAtts = attachments?.filter(a => a.type !== 'image');
+    if (nonImageAtts && nonImageAtts.length > 0) {
+      const attList = nonImageAtts.map(a => `- ${a.filename} (${a.mimeType}) at ${a.storagePath || 'memory'}`).join('\n');
       emitContent = `${content}\n\n[Attached files:\n${attList}\n]`;
     }
 
-    emitChatMessage(sessionId, emitContent);
+    emitChatMessage(sessionId, emitContent, images ? { images } : undefined);
   }, [sessionId]);
 
   const stopGeneration = useCallback(() => {

@@ -37,7 +37,7 @@ export class Harness {
         loadedSkills: this.skillManager.getAllSkills(),
         taskDomain: this.inferTaskDomain(task),
       })},
-      { role: 'user', content: task },
+      { role: 'user', content: this.buildUserMessage(task, options) },
     ];
 
     const skillMatch = task.match(/^\/([a-z0-9-]+)(?:\s+(.*))?$/);
@@ -167,6 +167,29 @@ export class Harness {
       if (keywords.some(k => lower.includes(k))) return domain;
     }
     return 'general';
+  }
+
+  /**
+   * Build the user message content. If images are attached, returns an
+   * OpenAI-compatible vision message (array of content parts).
+   * Otherwise returns plain string.
+   */
+  buildUserMessage(task, options = {}) {
+    const images = options.images;
+    if (Array.isArray(images) && images.length > 0) {
+      // OpenAI vision format: [{type:'text', text}, {type:'image_url', image_url:{url}}]
+      const content = [{ type: 'text', text: task }];
+      for (const img of images) {
+        const url = typeof img === 'string'
+          ? (img.startsWith('data:') || img.startsWith('http') ? img : `data:image/jpeg;base64,${img}`)
+          : (img.url || (img.data ? `data:${img.mimeType || 'image/jpeg'};base64,${img.data}` : ''));
+        if (url) {
+          content.push({ type: 'image_url', image_url: { url, detail: 'high' } });
+        }
+      }
+      return content;
+    }
+    return task;
   }
 
   getAvailableTools() {

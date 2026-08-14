@@ -177,7 +177,7 @@ export function initWebSocket(io) {
     // loop. The harness broadcasts token/reasoning/tool_call/model_badge
     // events back to the session room as it goes.
     socket.on('chat_message', async (data) => {
-      const { sessionId, content } = data || {};
+      const { sessionId, content, images, attachments } = data || {};
       if (!sessionId || !content) {
         socket.emit('error', { message: 'sessionId and content required' });
         return;
@@ -191,7 +191,8 @@ export function initWebSocket(io) {
         const harness = new Harness(adapter);
         // Store on global map so stop_generation can find the SAME harness instance
         activeHarnesses.set(sessionId, harness);
-        await harness.run(sessionId, content);
+        // Pass images/attachments as options so the harness can build vision messages
+        await harness.run(sessionId, content, { images, attachments });
       } catch (error) {
         logger.error('Harness run failed', { sessionId, error: error.message });
         broadcastError(sessionId, { message: error.message });

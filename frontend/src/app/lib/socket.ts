@@ -116,9 +116,13 @@ export function subscribeToSession(sessionId: string, handlers: {
 /**
  * Emit a chat message to the backend. The backend will run the Hermes harness
  * and stream back events to this session.
+ *
+ * @param sessionId - Session ID
+ * @param content - User message text
+ * @param options - Optional images (data URLs or HTTP URLs) for vision models
  */
-export function emitChatMessage(sessionId: string, content: string) {
-  getSocket().emit('chat_message', { sessionId, content });
+export function emitChatMessage(sessionId: string, content: string, options?: { images?: string[] }) {
+  getSocket().emit('chat_message', { sessionId, content, ...options });
 }
 
 /**

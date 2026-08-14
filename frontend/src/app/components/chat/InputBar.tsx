@@ -53,6 +53,26 @@ export function InputBar({ value, onChange, onSend, isStreaming, onStop }: Props
     }
   };
 
+  // Paste image from clipboard
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    const imageFiles: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) imageFiles.push(file);
+      }
+    }
+
+    if (imageFiles.length > 0) {
+      e.preventDefault();
+      addFiles(imageFiles);
+    }
+  };
+
   const handleSend = () => {
     if ((!value.trim() && attachments.length === 0) || isStreaming) return;
     if (isListening) stop();
@@ -132,6 +152,7 @@ export function InputBar({ value, onChange, onSend, isStreaming, onStop }: Props
               value={value + (isListening && interimTranscript ? ' ' + interimTranscript : '')}
               onChange={(e) => onChange(e.target.value)}
               onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
               placeholder={isListening ? 'Listening...' : isDragging ? 'Drop files here...' : 'Message MAX...'}
               rows={1}
               className="w-full resize-none bg-transparent text-[15px] text-cg-text placeholder:text-cg-muted outline-none"
