@@ -2,6 +2,7 @@
 import { useApp } from './AppProvider';
 import { useTheme } from './ThemeProvider';
 import { ModelSelector } from './ModelSelector';
+import { ShareDialog } from './ShareDialog';
 import { Menu, Sun, Moon, Share, User, FileJson, FileText, Printer } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { exportAsJson, exportAsText, exportAsPdf } from '@/app/lib/export';
@@ -11,6 +12,8 @@ export function TopBar({ messages = [] }: { messages?: Array<{ role: string; con
   const { theme, toggleTheme } = useTheme();
   const [profileOpen, setProfileOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [sharedLinks, setSharedLinks] = useState<Array<{ id: string; conversationId: string; title: string; viewCount: number; expiresAt?: string; createdAt: string }>>([]);
   const profileRef = useRef<HTMLDivElement>(null);
   const exportRef = useRef<HTMLDivElement>(null);
 
@@ -61,6 +64,22 @@ export function TopBar({ messages = [] }: { messages?: Array<{ role: string; con
           {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
         </button>
         <button
+          onClick={async () => {
+            setShareOpen(true);
+            // Load existing shared links for this conversation
+            if (currentConversationId) {
+              try {
+                const token = typeof window !== 'undefined' ? localStorage.getItem('max_token') : null;
+                const res = await fetch('/api/shared', {
+                  headers: token ? { Authorization: `Bearer ${token}` } : {},
+                });
+                if (res.ok) {
+                  const data = await res.json();
+                  setSharedLinks((data.sharedLinks || []).filter((l: any) => l.conversationId === currentConversationId));
+                }
+              } catch {}
+            }
+          }}
           className="rounded-md p-1.5 text-cg-muted hover:bg-cg-hover hover:text-cg-text"
           aria-label="Share conversation"
           title="Share"
@@ -127,6 +146,27 @@ export function TopBar({ messages = [] }: { messages?: Array<{ role: string; con
           )}
         </div>
       </div>
+
+      <ShareDialog
+        open={shareOpen}
+        onClose={() => setShareOpen(false)}
+        conversationId={currentConversationId}
+        conversationTitle={convTitle}
+        existingLinks={sharedLinks}
+        onCreated={() => {
+          // Refresh the list after creating
+          if (currentConversationId) {
+            fetch('/api/shared', {
+              headers: typeof window !== 'undefined' && localStorage.getItem('max_token')
+                ? { Authorization: `Bearer ${localStorage.getItem('max_token')}` }
+                : {},
+            }).then(r => r.json()).then(data => {
+              setSharedLinks((data.sharedLinks || []).filter((l: any) => l.conversationId === currentConversationId));
+            }).catch(() => {});
+          }
+        }}
+        onDeleted={(id) => setSharedLinks(prev => prev.filter(l => l.id !== id))}
+      />
     </header>
   );
 }

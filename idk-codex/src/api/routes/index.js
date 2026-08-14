@@ -30,6 +30,7 @@ import memoryLongTermRouter from './memory-long-term.js';
 import suggestionsRouter from './suggestions.js';
 import sandboxRouter from './sandbox.js';
 import scheduledRouter from './scheduled.js';
+import sharedRouter from './shared.js';
 
 // Re-export validation utilities (Phase 3.9) so callers can import them
 // from a single entry point.
@@ -152,6 +153,7 @@ router.use('/suggestions', suggestionsRouter);
 // Apply apiLimiter to sandbox + scheduled (Phase 3.3)
 router.use('/sandbox', apiLimiter, sandboxRouter);
 router.use('/scheduled', apiLimiter, scheduledRouter);
+router.use('/shared', sharedRouter);
 router.use('/', extrasRouter);  // memory + user profile routes
 router.use('/files/download', uploadRouter);
 
