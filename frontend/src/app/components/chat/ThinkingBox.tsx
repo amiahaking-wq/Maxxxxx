@@ -5,18 +5,24 @@ import { useState } from 'react';
 export function ThinkingBox({ reasoning, done }: { reasoning: string; done: boolean }) {
   const [isOpen, setIsOpen] = useState(!done);
   if (!reasoning || !reasoning.trim()) return null;
+
   return (
-    <details className="mb-3 rounded-lg border border-amber-500/20 bg-amber-500/5 overflow-hidden"
-      open={isOpen} onToggle={(e) => setIsOpen((e.target as HTMLDetailsElement).open)}>
-      <summary className="flex items-center gap-2 px-3 py-2 cursor-pointer select-none hover:bg-amber-500/10">
-        <Brain className="w-4 h-4 text-amber-400" />
-        <span className="text-sm font-medium text-amber-400">
-          {done ? '💭 Thinking (done)' : '💭 Thinking...'}
+    <details
+      className="mb-3 overflow-hidden rounded-lg border border-cg-border bg-cg-sidebar"
+      open={isOpen}
+      onToggle={(e) => setIsOpen((e.target as HTMLDetailsElement).open)}
+    >
+      <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2 text-sm hover:bg-cg-hover">
+        <Brain className="h-4 w-4 text-cg-muted" />
+        <span className="font-medium text-cg-muted">
+          {done ? `Thought process` : 'Thinking...'}
         </span>
-        <ChevronDown className={`w-4 h-4 text-amber-400 ml-auto transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+        <ChevronDown
+          className={`ml-auto h-4 w-4 text-cg-muted transition-transform ${isOpen ? 'rotate-180' : ''}`}
+        />
       </summary>
-      <div className="px-3 pb-3">
-        <pre className="text-xs text-amber-200/70 whitespace-pre-wrap font-mono leading-relaxed">
+      <div className="border-t border-cg-border px-3 py-3">
+        <pre className="whitespace-pre-wrap text-xs text-cg-muted leading-relaxed">
           {reasoning}
         </pre>
       </div>

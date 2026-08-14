@@ -1,6 +1,5 @@
 @import "tailwindcss";
-
-/* highlight.js theme will be imported in Phase 2 when markdown rendering lands */
+@import "highlight.js/styles/github-dark.css";
 
 /* ChatGPT-style color tokens (Tailwind v4 @theme) */
 @theme {
@@ -71,3 +70,59 @@
   51%, 100% { opacity: 0; }
 }
 .streaming-cursor { animation: blink 1s infinite; }
+
+/* ChatGPT-style markdown typography (.prose-chat) */
+.prose-chat {
+  font-size: 15px;
+  line-height: 1.75;
+  color: var(--color-cg-text);
+  word-wrap: break-word;
+}
+.prose-chat p { margin: 0.75em 0; }
+.prose-chat p:first-child { margin-top: 0; }
+.prose-chat p:last-child { margin-bottom: 0; }
+.prose-chat h1 { font-size: 1.75em; font-weight: 600; margin: 1em 0 0.5em; }
+.prose-chat h2 { font-size: 1.5em; font-weight: 600; margin: 1em 0 0.5em; }
+.prose-chat h3 { font-size: 1.25em; font-weight: 600; margin: 1em 0 0.5em; }
+.prose-chat h4 { font-size: 1.1em; font-weight: 600; margin: 1em 0 0.5em; }
+.prose-chat ul { list-style: disc; padding-left: 1.5em; margin: 0.75em 0; }
+.prose-chat ol { list-style: decimal; padding-left: 1.5em; margin: 0.75em 0; }
+.prose-chat li { margin: 0.25em 0; }
+.prose-chat li > p { margin: 0.25em 0; }
+.prose-chat a { color: #2563eb; text-decoration: underline; }
+.dark .prose-chat a { color: #60a5fa; }
+.prose-chat blockquote {
+  border-left: 3px solid var(--color-cg-border);
+  padding-left: 1em;
+  margin: 0.75em 0;
+  color: var(--color-cg-muted);
+  font-style: italic;
+}
+.prose-chat code:not(pre code) {
+  background-color: rgba(0,0,0,0.06);
+  padding: 0.15em 0.35em;
+  border-radius: 4px;
+  font-size: 0.875em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.dark .prose-chat code:not(pre code) {
+  background-color: rgba(255,255,255,0.1);
+}
+.prose-chat pre {
+  margin: 0.75em 0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.prose-chat table {
+  border-collapse: collapse;
+  margin: 0.75em 0;
+  width: 100%;
+}
+.prose-chat th, .prose-chat td {
+  border: 1px solid var(--color-cg-border);
+  padding: 0.5em 0.75em;
+  text-align: left;
+}
+.prose-chat th { background-color: var(--color-cg-hover); font-weight: 600; }
+.prose-chat hr { border: 0; border-top: 1px solid var(--color-cg-border); margin: 1.5em 0; }
+.prose-chat img { max-width: 100%; border-radius: 8px; margin: 0.75em 0; }

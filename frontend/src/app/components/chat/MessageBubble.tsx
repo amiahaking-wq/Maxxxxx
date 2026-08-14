@@ -3,9 +3,17 @@ import { Message } from '@/app/lib/types';
 import { ThinkingBox } from './ThinkingBox';
 import { ModelBadge } from './ModelBadge';
 import { ToolCallCard } from './ToolCallCard';
-import { User, Bot } from 'lucide-react';
+import { MarkdownRenderer } from './MarkdownRenderer';
+import { MessageActions } from './MessageActions';
+import { Bot } from 'lucide-react';
 
-export function MessageBubble({ message }: { message: Message }) {
+interface Props {
+  message: Message;
+  onRegenerate?: () => void;
+  onFeedback?: (messageId: string, f: 'up' | 'down') => void;
+}
+
+export function MessageBubble({ message, onRegenerate, onFeedback }: Props) {
   const isUser = message.role === 'user';
   const isAssistant = message.role === 'assistant';
 
@@ -22,7 +30,7 @@ export function MessageBubble({ message }: { message: Message }) {
 
   // Assistant messages: NO bubble, bare text on canvas, left-aligned
   return (
-    <div className="mb-6">
+    <div className="group mb-6">
       {/* Avatar row */}
       <div className="mb-2 flex items-center gap-2">
         <div className="flex h-7 w-7 items-center justify-center rounded-full bg-cg-accent text-white">
@@ -43,11 +51,19 @@ export function MessageBubble({ message }: { message: Message }) {
         </div>
       )}
 
-      {/* Main content (plain text for now — Phase 2 adds markdown rendering) */}
+      {/* Main content — markdown rendered for assistant */}
       {message.content && (
-        <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-cg-text">
-          {message.content}
-        </div>
+        <MarkdownRenderer content={message.content} />
+      )}
+
+      {/* Message actions (visible on hover) */}
+      {isAssistant && message.content && !message.isStreaming && (
+        <MessageActions
+          content={message.content}
+          onRegenerate={onRegenerate}
+          feedback={message.feedback}
+          onFeedback={(f) => onFeedback?.(message.id, f)}
+        />
       )}
 
       {/* Model badge */}

@@ -1,3 +1,3 @@
 export function StreamingCursor() {
-  return <span className="inline-block w-2 h-4 bg-gray-400 animate-pulse ml-1 align-middle" />;
+  return <span className="streaming-cursor ml-1 inline-block h-4 w-2 bg-cg-text align-middle" />;
 }
