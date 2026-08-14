@@ -169,14 +169,15 @@ export function useChat(sessionId: string) {
     return cleanup;
   }, [sessionId]);
 
-  const sendMessage = useCallback(async (content: string) => {
-    if (!content.trim()) return;
+  const sendMessage = useCallback(async (content: string, attachments?: any[]) => {
+    if (!content.trim() && (!attachments || attachments.length === 0)) return;
 
     const userMsg: Message = {
       id: `user-${Date.now()}`,
       role: 'user',
       content,
       timestamp: new Date().toISOString(),
+      attachments: attachments || undefined,
     };
     const assistantMsg: Message = {
       id: `assistant-${Date.now()}`,
@@ -198,12 +199,19 @@ export function useChat(sessionId: string) {
       await new Promise<void>(resolve => {
         const onConnect = () => { sock.off('connect', onConnect); resolve(); };
         sock.on('connect', onConnect);
-        // Timeout after 5s
         setTimeout(() => { sock.off('connect', onConnect); resolve(); }, 5000);
       });
     }
 
-    emitChatMessage(sessionId, content);
+    // If we have attachments, include their storage paths in the message
+    // so the backend agent can access them
+    let emitContent = content;
+    if (attachments && attachments.length > 0) {
+      const attList = attachments.map(a => `- ${a.filename} (${a.type}, ${a.mimeType}) at ${a.storagePath || 'memory'}`).join('\n');
+      emitContent = `${content}\n\n[Attached files:\n${attList}\n]`;
+    }
+
+    emitChatMessage(sessionId, emitContent);
   }, [sessionId]);
 
   const stopGeneration = useCallback(() => {

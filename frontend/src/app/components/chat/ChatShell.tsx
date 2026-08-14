@@ -35,9 +35,10 @@ function ChatShellContent() {
         <InputBar
           value={inputValue}
           onChange={setInputValue}
-          onSend={() => {
-            if (inputValue.trim()) {
-              sendMessage(inputValue);
+          onSend={(attachments) => {
+            const text = inputValue.trim();
+            if (text || (attachments && attachments.length > 0)) {
+              sendMessage(text, attachments);
               setInputValue('');
             }
           }}

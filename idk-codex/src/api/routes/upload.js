@@ -15,6 +15,7 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import multer from 'multer';
 import logger from '../../utils/logger.js';
 
 const router = express.Router();
@@ -22,6 +23,19 @@ const SANDBOX = process.env.SANDBOX_WORKSPACE || './sandbox-workspace';
 const UPLOADS_DIR = path.resolve(SANDBOX, 'uploads');
 
 try { fs.mkdirSync(UPLOADS_DIR, { recursive: true }); } catch (e) { /* ok */ }
+
+// Multer storage — save to UPLOADS_DIR with sanitized name + timestamp prefix
+const multerStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, UPLOADS_DIR),
+  filename: (req, file, cb) => {
+    const safe = sanitizeFilename(file.originalname);
+    cb(null, `${Date.now()}_${safe}`);
+  },
+});
+const multerUpload = multer({
+  storage: multerStorage,
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
+});
 
 const TEXT_EXTENSIONS = new Set([
   '.txt', '.md', '.markdown', '.rst', '.log',
@@ -205,6 +219,66 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'Content-Type must be application/json with base64 data' });
   } catch (err) {
     logger.error('Upload failed', { error: err.message });
+    res.status(500).json({ error: 'Upload failed: ' + err.message });
+  }
+});
+
+// ============================================================================
+// MULTIPART UPLOAD (FormData with file field) — Phase 8
+// ============================================================================
+router.post('/multipart', multerUpload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded. Send a "file" field in multipart/form-data.' });
+    }
+
+    const userId = req.user?.id || 'anonymous';
+    const safeFilename = req.file.filename;
+    const filePath = req.file.path;
+    const buffer = fs.readFileSync(filePath);
+    const originalName = req.file.originalname;
+
+    logger.info('File uploaded (multipart)', { filename: safeFilename, originalName, size: req.file.size, userId });
+
+    const publicUrl = await uploadToSupabaseStorage(buffer, originalName, userId);
+
+    let extractedText = null;
+    if (isTextFile(originalName)) {
+      try { extractedText = fs.readFileSync(filePath, 'utf-8').substring(0, 50000); } catch (e) {}
+    } else if (isPdfFile(originalName)) {
+      extractedText = await extractTextFromPdf(buffer);
+    } else if (isExcelFile(originalName)) {
+      extractedText = await extractTextFromExcel(buffer);
+    } else if (isCsvFile(originalName)) {
+      extractedText = extractTextFromCsv(buffer);
+    } else if (isImageFile(originalName)) {
+      extractedText = `[IMAGE: ${originalName}]`;
+    }
+
+    if (extractedText && !extractedText.startsWith('[IMAGE')) {
+      await addToKnowledgeBase(userId, originalName, extractedText, publicUrl || `local:${safeFilename}`);
+    }
+
+    return res.json({
+      success: true,
+      filename: originalName,
+      storedFilename: safeFilename,
+      path: `uploads/${safeFilename}`,
+      absolutePath: filePath,
+      size: req.file.size,
+      mimeType: req.file.mimetype,
+      url: publicUrl || `/api/files/sandbox/uploads/${safeFilename}`,
+      publicUrl,
+      isText: isTextFile(originalName),
+      isImage: isImageFile(originalName),
+      isPdf: isPdfFile(originalName),
+      isExcel: isExcelFile(originalName),
+      isCsv: isCsvFile(originalName),
+      extractedText: extractedText ? extractedText.substring(0, 2000) : null,
+      addedToKnowledgeBase: !!extractedText && !extractedText.startsWith('[IMAGE'),
+    });
+  } catch (err) {
+    logger.error('Multipart upload failed', { error: err.message });
     res.status(500).json({ error: 'Upload failed: ' + err.message });
   }
 });
