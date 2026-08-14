@@ -1,6 +1,7 @@
 'use client';
 import { createContext, useContext, useState, ReactNode, useCallback } from 'react';
 import { useConversations } from '@/app/hooks/useConversations';
+import { CustomGPT } from '@/app/lib/types';
 
 interface AppState {
   // Sidebar
@@ -13,6 +14,8 @@ interface AppState {
   searchQuery: string;
   // Conversations
   conversations: ReturnType<typeof useConversations>;
+  // Active GPT (when using a custom GPT)
+  activeGpt: CustomGPT | null;
 }
 
 interface AppActions {
@@ -21,6 +24,7 @@ interface AppActions {
   setMobileSidebarOpen: (v: boolean) => void;
   setCurrentConversationId: (id: string | null) => void;
   setSearchQuery: (q: string) => void;
+  setActiveGpt: (gpt: CustomGPT | null) => void;
 }
 
 const AppContext = createContext<(AppState & AppActions) | null>(null);
@@ -30,6 +34,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [activeGpt, setActiveGpt] = useState<CustomGPT | null>(null);
   const conversations = useConversations();
 
   const toggleSidebar = useCallback(() => setSidebarCollapsed(v => !v), []);
@@ -41,11 +46,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       currentConversationId,
       searchQuery,
       conversations,
+      activeGpt,
       toggleSidebar,
       setSidebarCollapsed,
       setMobileSidebarOpen,
       setCurrentConversationId,
       setSearchQuery,
+      setActiveGpt,
     }}>
       {children}
     </AppContext.Provider>
