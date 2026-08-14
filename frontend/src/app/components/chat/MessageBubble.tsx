@@ -3,6 +3,7 @@ import { Message } from '@/app/lib/types';
 import { ThinkingBox } from './ThinkingBox';
 import { ModelBadge } from './ModelBadge';
 import { ToolCallCard } from './ToolCallCard';
+import { ArtifactCard } from './ArtifactCard';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { MessageActions } from './MessageActions';
 import { UserMessage } from './UserMessage';
@@ -48,6 +49,13 @@ export function MessageBubble({ message, onRegenerate, onFeedback, onEditUserMes
       {message.toolCalls && message.toolCalls.length > 0 && (
         <div className="mb-3 space-y-2">
           {message.toolCalls.map(tc => <ToolCallCard key={tc.id} toolCall={tc} />)}
+        </div>
+      )}
+
+      {/* Artifacts (files created by agent) */}
+      {message.artifacts && message.artifacts.length > 0 && (
+        <div className="mb-3 space-y-2">
+          {message.artifacts.map(a => <ArtifactCard key={a.id} artifact={a} />)}
         </div>
       )}
 

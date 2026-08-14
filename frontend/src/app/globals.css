@@ -126,3 +126,25 @@
 .prose-chat th { background-color: var(--color-cg-hover); font-weight: 600; }
 .prose-chat hr { border: 0; border-top: 1px solid var(--color-cg-border); margin: 1.5em 0; }
 .prose-chat img { max-width: 100%; border-radius: 8px; margin: 0.75em 0; }
+
+/* Focus-visible rings for keyboard navigation */
+*:focus-visible {
+  outline: 2px solid var(--color-cg-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid var(--color-cg-accent);
+  outline-offset: 2px;
+}
+
+/* Mobile sidebar drawer animation */
+@media (max-width: 768px) {
+  .sidebar-drawer {
+    transition: transform 0.2s ease-in-out;
+  }
+}
